@@ -1,6 +1,8 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracterror, contracttype, token, Address, Bytes, BytesN, Env, Map, Symbol};
 
+/// Represents user roles in the contract with hierarchical permissions.
+/// Admin > Operator > Viewer
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[derive(Debug)]
@@ -10,6 +12,7 @@ pub enum Role {
     Viewer,
 }
 
+/// Storage keys for contract state
 #[contracttype]
 pub enum DataKey {
     Treasury,
@@ -18,14 +21,16 @@ pub enum DataKey {
     Admin,
     Roles,
     ReentrancyGuard,
-    Roles,
 }
 
+/// Contract errors
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
+    /// Amount must be positive
     InvalidAmount = 1,
+    /// Token transfer operation failed
     TransferFailed = 2,
 }
 
@@ -34,9 +39,20 @@ pub struct Stellar_CardReceiver;
 
 #[contractimpl]
 impl Stellar_CardReceiver {
-    /// One-time initialisation. Panics if already initialised.
-    /// The admin must authorize this call to prevent front-running on deployment (C-1).
+    /// Initializes the contract with essential configuration.
     ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `admin` - The admin address (must authorize this call)
+    /// * `treasury` - The treasury address where payments are received
+    /// * `usdc_contract` - The USDC SAC contract address
+    /// * `xlm_contract` - The native XLM SAC contract address
+    ///
+    /// # Panics
+    /// Panics if already initialized or if admin authorization fails.
+    ///
+    /// # Notes
+    /// One-time initialization. The admin must authorize to prevent front-running on deployment.
     /// Expected mainnet values (C-3, C-7):
     ///   usdc_contract : CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75  (USDC SAC)
     ///   xlm_contract  : native XLM SAC address (varies by network)
@@ -62,9 +78,10 @@ impl Stellar_CardReceiver {
         env.storage().instance().extend_ttl(17_280_000, 17_280_000);
     }
 
-    /// Acquire the reentrancy guard before a state-changing transfer.
+    /// Acquires the reentrancy guard to prevent reentrant calls.
     ///
-    /// Panics if the guard is already held, which indicates a reentrant call.
+    /// # Panics
+    /// Panics if the guard is already held, indicating a reentrant call attempt.
     fn _enter(env: &Env) {
         let key = DataKey::ReentrancyGuard;
         if env.storage().instance().get::<_, bool>(&key).unwrap_or(false) {
@@ -73,12 +90,27 @@ impl Stellar_CardReceiver {
         env.storage().instance().set(&key, &true);
     }
 
-    /// Release the reentrancy guard after a guarded operation completes.
+    /// Releases the reentrancy guard after a guarded operation completes.
     fn _exit(env: &Env) {
         env.storage().instance().set(&DataKey::ReentrancyGuard, &false);
     }
 
-    /// Transfer `amount` USDC (in micro-USDC, 7 d.p.) from `from` to treasury.
+    /// Transfers USDC tokens from a payer to the contract treasury.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `from` - The payer address (must authorize this transfer)
+    /// * `amount` - Amount in micro-USDC (7 decimal places)
+    /// * `order_id` - Order identifier for event tracking
+    ///
+    /// # Returns
+    /// `Ok(())` on successful transfer, `Err(Error)` otherwise.
+    ///
+    /// # Errors
+    /// * `InvalidAmount` - If amount is <= 0
+    /// * `TransferFailed` - If the underlying token transfer fails
+    ///
+    /// # Events
     /// Emits: topics=[Symbol("pay_usdc"), order_id, from], value=amount
     pub fn pay_usdc(env: Env, from: Address, amount: i128, order_id: Bytes) -> Result<(), Error> {
         if amount <= 0 {
@@ -109,7 +141,22 @@ impl Stellar_CardReceiver {
         Ok(())
     }
 
-    /// Transfer `amount` XLM (in stroops, 7 d.p.) from `from` to treasury.
+    /// Transfers XLM tokens from a payer to the contract treasury.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `from` - The payer address (must authorize this transfer)
+    /// * `amount` - Amount in stroops (7 decimal places)
+    /// * `order_id` - Order identifier for event tracking
+    ///
+    /// # Returns
+    /// `Ok(())` on successful transfer, `Err(Error)` otherwise.
+    ///
+    /// # Errors
+    /// * `InvalidAmount` - If amount is <= 0
+    /// * `TransferFailed` - If the underlying token transfer fails
+    ///
+    /// # Events
     /// Emits: topics=[Symbol("pay_xlm"), order_id, from], value=amount
     pub fn pay_xlm(env: Env, from: Address, amount: i128, order_id: Bytes) -> Result<(), Error> {
         if amount <= 0 {
@@ -140,34 +187,73 @@ impl Stellar_CardReceiver {
         Ok(())
     }
 
-    /// Return the treasury address.
+    /// Returns the treasury address where payments are received.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// The treasury address
     pub fn treasury(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Treasury).unwrap()
     }
 
-    /// Return the USDC SAC contract address.
+    /// Returns the USDC SAC contract address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// The USDC contract address
     pub fn usdc_contract(env: Env) -> Address {
         env.storage().instance().get(&DataKey::UsdcContract).unwrap()
     }
 
-    /// Return the native XLM SAC contract address.
+    /// Returns the native XLM SAC contract address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// The XLM contract address
     pub fn xlm_contract(env: Env) -> Address {
         env.storage().instance().get(&DataKey::XlmContract).unwrap()
     }
 
-    /// Return the admin address.
+    /// Returns the admin address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// The admin address
     pub fn admin(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Admin).unwrap()
     }
 
-    /// Upgrade the contract WASM. Only the admin may call this.
+    /// Upgrades the contract WASM code.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `new_wasm_hash` - The hash of the new WASM code
+    ///
+    /// # Authorization
+    /// Only the admin can call this function.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
-    /// Grant a role to an address. Only admin may call this.
+    /// Grants a role to an address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `address` - The address to grant the role to
+    /// * `role` - The role to grant (Admin, Operator, or Viewer)
+    ///
+    /// # Authorization
+    /// Only the admin can call this function.
     pub fn grant_role(env: Env, address: Address, role: Role) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -183,7 +269,14 @@ impl Stellar_CardReceiver {
         env.storage().instance().extend_ttl(17_280_000, 17_280_000);
     }
 
-    /// Revoke a role from an address. Only admin may call this.
+    /// Revokes a role from an address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `address` - The address to revoke the role from
+    ///
+    /// # Authorization
+    /// Only the admin can call this function.
     pub fn revoke_role(env: Env, address: Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -195,7 +288,14 @@ impl Stellar_CardReceiver {
         }
     }
 
-    /// Get the role of an address. Returns none if no role is assigned.
+    /// Retrieves the role assigned to an address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `address` - The address to query
+    ///
+    /// # Returns
+    /// `Some(role)` if a role is assigned, `None` otherwise
     pub fn get_role(env: Env, address: Address) -> Option<Role> {
         if let Some(roles) = env.storage().instance().get::<_, Map<Address, Role>>(&DataKey::Roles) {
             roles.get(address)
@@ -204,7 +304,18 @@ impl Stellar_CardReceiver {
         }
     }
 
-    /// Check if an address has at least the specified role or higher.
+    /// Checks if an address has at least the specified role or higher.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `address` - The address to check
+    /// * `required_role` - The minimum required role
+    ///
+    /// # Returns
+    /// `true` if the address has the required role or higher in hierarchy, `false` otherwise
+    ///
+    /// # Hierarchy
+    /// Admin > Operator > Viewer
     pub fn has_role(env: Env, address: Address, required_role: Role) -> bool {
         if let Some(roles) = env.storage().instance().get::<_, Map<Address, Role>>(&DataKey::Roles) {
             if let Some(user_role) = roles.get(address) {
@@ -214,7 +325,7 @@ impl Stellar_CardReceiver {
         false
     }
 
-    /// Return whether `user_role` satisfies `required_role`.
+    /// Checks whether a user role satisfies a required role level.
     fn is_role_sufficient(user_role: &Role, required_role: &Role) -> bool {
         match (user_role, required_role) {
             (Role::Admin, _) => true,
