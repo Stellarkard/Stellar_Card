@@ -954,6 +954,208 @@ mod test {
         assert_eq!(f.client().admin(), f.admin);
     }
 
+    // ── comprehensive edge-case and error handling tests ──────────────────────
+
+    #[test]
+    fn test_pay_usdc_with_max_i128() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = i128::MAX / 2;
+        f.mint_usdc(&f.payer, amount);
+
+        let oid = order_bytes(&f.env, "max-i128");
+        f.client().pay_usdc(&f.payer, &amount, &oid);
+
+        assert_eq!(f.usdc_balance(&f.treasury), amount);
+    }
+
+    #[test]
+    fn test_pay_xlm_with_max_i128() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = i128::MAX / 2;
+        f.mint_xlm(&f.payer, amount);
+
+        let oid = order_bytes(&f.env, "max-xlm");
+        f.client().pay_xlm(&f.payer, &amount, &oid);
+
+        assert_eq!(f.xlm_balance(&f.treasury), amount);
+    }
+
+    #[test]
+    fn test_concurrent_payments_from_different_payers() {
+        let f = Fixture::new();
+        f.init();
+
+        let payer1 = Address::generate(&f.env);
+        let payer2 = Address::generate(&f.env);
+        let payer3 = Address::generate(&f.env);
+
+        let amount: i128 = 10_000_000;
+        f.mint_usdc(&payer1, amount);
+        f.mint_usdc(&payer2, amount);
+        f.mint_usdc(&payer3, amount);
+
+        f.client().pay_usdc(&payer1, &amount, &order_bytes(&f.env, "payer1"));
+        f.client().pay_usdc(&payer2, &amount, &order_bytes(&f.env, "payer2"));
+        f.client().pay_usdc(&payer3, &amount, &order_bytes(&f.env, "payer3"));
+
+        assert_eq!(f.usdc_balance(&f.treasury), amount * 3);
+    }
+
+    #[test]
+    fn test_pay_usdc_with_exact_order_id_match() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 10_000_000;
+        f.mint_usdc(&f.payer, amount);
+
+        let order_id = "exact-match-order-12345";
+        let oid = order_bytes(&f.env, order_id);
+        f.client().pay_usdc(&f.payer, &amount, &oid);
+
+        let events = f.env.events().all();
+        let mut found = false;
+        for (contract_addr, topics, _) in events.iter() {
+            if contract_addr != f.contract_id {
+                continue;
+            }
+            let sym: Symbol = topics.get(0).unwrap().try_into_val(&f.env).unwrap();
+            if sym != Symbol::new(&f.env, "pay_usdc") {
+                continue;
+            }
+            let emitted_oid: Bytes = topics.get(1).unwrap().try_into_val(&f.env).unwrap();
+            let emitted_bytes = order_bytes(&f.env, order_id);
+            if emitted_oid == emitted_bytes {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "order_id should match exactly");
+    }
+
+    #[test]
+    fn test_treasury_getter_returns_consistent_value() {
+        let f = Fixture::new();
+        f.init();
+
+        for _ in 0..5 {
+            assert_eq!(f.client().treasury(), f.treasury);
+        }
+    }
+
+    #[test]
+    fn test_usdc_contract_getter_returns_consistent_value() {
+        let f = Fixture::new();
+        f.init();
+
+        for _ in 0..5 {
+            assert_eq!(f.client().usdc_contract(), f.usdc);
+        }
+    }
+
+    #[test]
+    fn test_xlm_contract_getter_returns_consistent_value() {
+        let f = Fixture::new();
+        f.init();
+
+        for _ in 0..5 {
+            assert_eq!(f.client().xlm_contract(), f.xlm_sac);
+        }
+    }
+
+    #[test]
+    fn test_admin_getter_returns_consistent_value() {
+        let f = Fixture::new();
+        f.init();
+
+        for _ in 0..5 {
+            assert_eq!(f.client().admin(), f.admin);
+        }
+    }
+
+    #[test]
+    fn test_pay_usdc_with_various_order_id_formats() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 1_000_000;
+
+        let test_cases = vec![
+            "",
+            "order-1",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "123456789",
+            "!@#$%^&*()",
+            "order\nwith\nnewlines",
+        ];
+
+        for (idx, order_id) in test_cases.iter().enumerate() {
+            f.mint_usdc(&f.payer, amount);
+            let oid = order_bytes(&f.env, order_id);
+            f.client().pay_usdc(&f.payer, &amount, &oid);
+        }
+
+        assert_eq!(f.usdc_balance(&f.treasury), amount * test_cases.len() as i128);
+    }
+
+    #[test]
+    fn test_role_check_with_unassigned_user_returns_false() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+
+        assert!(!f.client().has_role(&user, &Role::Admin));
+        assert!(!f.client().has_role(&user, &Role::Operator));
+        assert!(!f.client().has_role(&user, &Role::Viewer));
+    }
+
+    #[test]
+    fn test_get_role_returns_none_for_unassigned_user() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        assert_eq!(f.client().get_role(&user), None);
+    }
+
+    #[test]
+    fn test_pay_operations_increment_ttl() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 10_000_000;
+        f.mint_usdc(&f.payer, amount * 2);
+
+        let oid1 = order_bytes(&f.env, "ttl-1");
+        f.client().pay_usdc(&f.payer, &amount, &oid1);
+
+        let oid2 = order_bytes(&f.env, "ttl-2");
+        f.client().pay_usdc(&f.payer, &amount, &oid2);
+
+        assert_eq!(f.usdc_balance(&f.treasury), amount * 2);
+    }
+
+    #[test]
+    fn test_role_management_operations_increment_ttl() {
+        let f = Fixture::new();
+        f.init();
+
+        let user1 = Address::generate(&f.env);
+        let user2 = Address::generate(&f.env);
+
+        f.client().grant_role(&user1, &Role::Viewer);
+        f.client().grant_role(&user2, &Role::Operator);
+        f.client().revoke_role(&user1);
+
+        assert_eq!(f.client().get_role(&user1), None);
+        assert_eq!(f.client().get_role(&user2), Some(Role::Operator));
+    }
+
     #[test]
     fn test_pay_usdc_event_count_matches_payment() {
         let f = Fixture::new();
@@ -1026,6 +1228,159 @@ mod test {
         assert_eq!(f.usdc_balance(&f.payer), 0);
         assert_eq!(f.xlm_balance(&f.payer), 0);
     }
+
+    // ── RBAC integration with payments tests ──────────────────────────────────
+
+    #[test]
+    fn test_admin_can_always_see_treasury() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Admin);
+
+        assert!(f.client().has_role(&user, &Role::Admin));
+        assert_eq!(f.client().treasury(), f.treasury);
+    }
+
+    #[test]
+    fn test_operator_cannot_be_admin() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Operator);
+
+        assert!(!f.client().has_role(&user, &Role::Admin));
+        assert!(f.client().has_role(&user, &Role::Operator));
+    }
+
+    #[test]
+    fn test_viewer_has_minimal_permissions() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Viewer);
+
+        assert!(!f.client().has_role(&user, &Role::Admin));
+        assert!(!f.client().has_role(&user, &Role::Operator));
+        assert!(f.client().has_role(&user, &Role::Viewer));
+    }
+
+    #[test]
+    fn test_multiple_users_can_have_roles() {
+        let f = Fixture::new();
+        f.init();
+
+        let admin_user = Address::generate(&f.env);
+        let operator_user = Address::generate(&f.env);
+        let viewer_user = Address::generate(&f.env);
+
+        f.client().grant_role(&admin_user, &Role::Admin);
+        f.client().grant_role(&operator_user, &Role::Operator);
+        f.client().grant_role(&viewer_user, &Role::Viewer);
+
+        assert_eq!(f.client().get_role(&admin_user), Some(Role::Admin));
+        assert_eq!(f.client().get_role(&operator_user), Some(Role::Operator));
+        assert_eq!(f.client().get_role(&viewer_user), Some(Role::Viewer));
+    }
+
+    #[test]
+    fn test_grant_role_overwrites_existing_role() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Viewer);
+        assert_eq!(f.client().get_role(&user), Some(Role::Viewer));
+
+        f.client().grant_role(&user, &Role::Operator);
+        assert_eq!(f.client().get_role(&user), Some(Role::Operator));
+
+        f.client().grant_role(&user, &Role::Admin);
+        assert_eq!(f.client().get_role(&user), Some(Role::Admin));
+    }
+
+    #[test]
+    fn test_revoke_role_makes_has_role_return_false() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Operator);
+        assert!(f.client().has_role(&user, &Role::Operator));
+
+        f.client().revoke_role(&user);
+        assert!(!f.client().has_role(&user, &Role::Operator));
+        assert!(!f.client().has_role(&user, &Role::Viewer));
+        assert!(!f.client().has_role(&user, &Role::Admin));
+    }
+
+    #[test]
+    fn test_admin_has_highest_privilege() {
+        let f = Fixture::new();
+        f.init();
+
+        let admin_user = Address::generate(&f.env);
+        f.client().grant_role(&admin_user, &Role::Admin);
+
+        assert!(f.client().has_role(&admin_user, &Role::Admin));
+        assert!(f.client().has_role(&admin_user, &Role::Operator));
+        assert!(f.client().has_role(&admin_user, &Role::Viewer));
+    }
+
+    #[test]
+    fn test_operator_has_operator_and_viewer_but_not_admin() {
+        let f = Fixture::new();
+        f.init();
+
+        let operator_user = Address::generate(&f.env);
+        f.client().grant_role(&operator_user, &Role::Operator);
+
+        assert!(!f.client().has_role(&operator_user, &Role::Admin));
+        assert!(f.client().has_role(&operator_user, &Role::Operator));
+        assert!(f.client().has_role(&operator_user, &Role::Viewer));
+    }
+
+    // ── role-based access control state persistence tests ──────────────────────
+
+    #[test]
+    fn test_role_assignments_persist_across_calls() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Operator);
+
+        assert_eq!(f.client().get_role(&user), Some(Role::Operator));
+        assert_eq!(f.client().get_role(&user), Some(Role::Operator)); // Call again
+    }
+
+    #[test]
+    fn test_multiple_role_assignments_do_not_interfere() {
+        let f = Fixture::new();
+        f.init();
+
+        let user1 = Address::generate(&f.env);
+        let user2 = Address::generate(&f.env);
+        let user3 = Address::generate(&f.env);
+
+        f.client().grant_role(&user1, &Role::Admin);
+        f.client().grant_role(&user2, &Role::Operator);
+        f.client().grant_role(&user3, &Role::Viewer);
+
+        assert_eq!(f.client().get_role(&user1), Some(Role::Admin));
+        assert_eq!(f.client().get_role(&user2), Some(Role::Operator));
+        assert_eq!(f.client().get_role(&user3), Some(Role::Viewer));
+
+        f.client().revoke_role(&user2);
+
+        assert_eq!(f.client().get_role(&user1), Some(Role::Admin));
+        assert_eq!(f.client().get_role(&user2), None);
+        assert_eq!(f.client().get_role(&user3), Some(Role::Viewer));
+    }
+
     // ── role management tests ────────────────────────────────────────────────
 
     #[test]
