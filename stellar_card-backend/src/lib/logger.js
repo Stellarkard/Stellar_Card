@@ -97,6 +97,18 @@ function deepFreeze(value) {
 function log(level, msg, fields = {}) {
   if (IS_TEST) return; // tests control their own output
 
+  // Send error logs to Sentry in production
+  if (IS_PROD && level === 'error') {
+    try {
+      const { captureMessage } = require('./sentry-config');
+      captureMessage(msg, 'error', {
+        extra: fields,
+      });
+    } catch {
+      // Sentry integration may not be loaded yet — continue logging
+    }
+  }
+
   if (IS_PROD) {
     // F1-logger: structural fields (ts, level, msg) spread LAST so a
     // caller-supplied `fields` can't overwrite them. Previously the
