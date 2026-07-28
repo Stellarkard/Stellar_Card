@@ -1,6 +1,14 @@
 name: Accessibility Audit
 
 on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+    paths:
+      - 'stellar_card-frontend/**'
+      - '.github/workflows/a11y.yml'
   pull_request:
     branches:
       - main
@@ -8,45 +16,52 @@ on:
     paths:
       - 'stellar_card-frontend/**'
       - '.github/workflows/a11y.yml'
-  push:
-    branches:
-      - main
-      - develop
-    paths:
-      - 'stellar_card-frontend/**'
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   a11y-audit:
     name: axe-core Accessibility Audit
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: stellar_card-frontend
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: ./.github/actions/setup-node
         with:
-          node-version: 20.x
-          cache: npm
-          cache-dependency-path: 'stellar_card-frontend/package-lock.json'
+          node-version: '20.x'
+          working-directory: stellar_card-frontend
 
       - name: Install dependencies
+        working-directory: stellar_card-frontend
         run: npm ci
 
       - name: Install Playwright browsers
+        working-directory: stellar_card-frontend
         run: npx playwright install chromium --with-deps
 
       - name: Run a11y audit
+        working-directory: stellar_card-frontend
         run: npx playwright test e2e/a11y-audit.spec.ts
         env:
           CI: true
+
+      - name: Run Storybook a11y checks
+        working-directory: stellar_card-frontend
+        run: |
+          npx storybook build --quiet
+          npx @storybook/addon-a11y-test --storybook-static ./storybook-static
+        continue-on-error: true
 
       - name: Upload a11y report
         if: always()
@@ -55,3 +70,18 @@ jobs:
           name: a11y-report
           path: stellar_card-frontend/test-results/
           retention-days: 7
+
+  audit-summary:
+    name: Audit summary
+    runs-on: ubuntu-latest
+    needs: a11y-audit
+    if: always()
+
+    steps:
+      - name: Report result
+        run: |
+          if [ "${{ needs.a11y-audit.result }}" = "success" ]; then
+            echo "Accessibility audit passed."
+          else
+            echo "::warning::Accessibility audit had failures — check the a11y-audit job logs."
+          fi
