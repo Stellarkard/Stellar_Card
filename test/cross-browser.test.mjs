@@ -31,6 +31,8 @@ describe('Cross-Browser Testing Suite Configuration', () => {
     expect(content).toContain('chromium');
     expect(content).toContain('firefox');
     expect(content).toContain('webkit');
+    expect(content).toContain('Mobile Chrome');
+    expect(content).toContain('Mobile Safari');
     expect(content).toContain('npx playwright install --with-deps');
   });
 
