@@ -22,8 +22,6 @@ interface Props extends Omit<InputHTMLAttributes<HTMLInputElement>, 'prefix'> {
   /** Marks the field invalid — should be paired with a visible error. */
   'aria-invalid'?: boolean | 'true' | 'false' | 'grammar' | 'spelling';
   'aria-label'?: string;
-  'aria-describedby'?: string;
-  'aria-invalid'?: boolean;
   'aria-required'?: boolean;
 }
 
@@ -31,7 +29,7 @@ export function Input({ prefix, suffix, wrapperStyle, style, ...rest }: Props) {
   const ariaLabel = rest['aria-label'];
   const ariaInvalid = rest['aria-invalid'];
   const ariaRequired = rest['aria-required'];
-  
+
   return (
     <div
       style={{
@@ -48,7 +46,11 @@ export function Input({ prefix, suffix, wrapperStyle, style, ...rest }: Props) {
         ...wrapperStyle,
       }}
     >
-      {prefix && <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>{prefix}</span>}
+      {prefix && (
+        <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>
+          {prefix}
+        </span>
+      )}
       <input
         {...rest}
         aria-label={ariaLabel}
@@ -65,7 +67,11 @@ export function Input({ prefix, suffix, wrapperStyle, style, ...rest }: Props) {
           ...style,
         }}
       />
-      {suffix && <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>{suffix}</span>}
+      {suffix && (
+        <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>
+          {suffix}
+        </span>
+      )}
     </div>
   );
 }

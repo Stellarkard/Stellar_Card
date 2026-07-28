@@ -100,16 +100,10 @@ export class SpendLimitError extends Stellar_CardError {
  */
 export class RateLimitError extends Stellar_CardError {
   constructor(message = 'Rate limit exceeded. Back off and retry.', context?: ErrorContext) {
-    super(
-      message,
-      'rate_limit_exceeded',
-      429,
-      undefined,
-      {
-        recoveryHint: 'Wait a few moments before retrying. Implement exponential backoff.',
-        ...context,
-      },
-    );
+    super(message, 'rate_limit_exceeded', 429, undefined, {
+      recoveryHint: 'Wait a few moments before retrying. Implement exponential backoff.',
+      ...context,
+    });
     this.name = 'RateLimitError';
     Object.setPrototypeOf(this, new.target.prototype);
   }
@@ -121,16 +115,10 @@ export class ServiceUnavailableError extends Stellar_CardError {
     message = 'Card fulfillment is temporarily suspended. Retry in a few minutes.',
     context?: ErrorContext,
   ) {
-    super(
-      message,
-      'service_temporarily_unavailable',
-      503,
-      undefined,
-      {
-        recoveryHint: 'Check https://status.stellar_card.com or retry in 5-10 minutes.',
-        ...context,
-      },
-    );
+    super(message, 'service_temporarily_unavailable', 503, undefined, {
+      recoveryHint: 'Check https://status.stellar_card.com or retry in 5-10 minutes.',
+      ...context,
+    });
     this.name = 'ServiceUnavailableError';
     Object.setPrototypeOf(this, new.target.prototype);
   }
@@ -142,16 +130,10 @@ export class PriceUnavailableError extends Stellar_CardError {
     message = 'XLM price is temporarily unavailable. Retry shortly, or use payment_asset: "usdc".',
     context?: ErrorContext,
   ) {
-    super(
-      message,
-      'price_unavailable',
-      503,
-      undefined,
-      {
-        recoveryHint: 'Try paying in USDC instead, or wait a few minutes for the price feed.',
-        ...context,
-      },
-    );
+    super(message, 'price_unavailable', 503, undefined, {
+      recoveryHint: 'Try paying in USDC instead, or wait a few minutes for the price feed.',
+      ...context,
+    });
     this.name = 'PriceUnavailableError';
     Object.setPrototypeOf(this, new.target.prototype);
   }
@@ -300,11 +282,7 @@ export class NetworkError extends Stellar_CardError {
 
 /** Request timed out. */
 export class TimeoutError extends Stellar_CardError {
-  constructor(
-    operation: string,
-    timeoutMs: number,
-    context?: ErrorContext,
-  ) {
+  constructor(operation: string, timeoutMs: number, context?: ErrorContext) {
     super(
       `Operation "${operation}" timed out after ${timeoutMs}ms. ` +
         'Network may be slow — try again or increase timeout.',
@@ -324,12 +302,10 @@ export class ValidationError extends Stellar_CardError {
     public readonly field: string,
     reason: string,
   ) {
-    super(
-      `Validation error for field "${field}": ${reason}`,
-      'validation_error',
-      400,
-      { field, reason },
-    );
+    super(`Validation error for field "${field}": ${reason}`, 'validation_error', 400, {
+      field,
+      reason,
+    });
     this.name = 'ValidationError';
     Object.setPrototypeOf(this, new.target.prototype);
   }
@@ -385,7 +361,9 @@ export class WalletError extends Stellar_CardError {
   ) {
     super(
       `Wallet error: ${reason}. ` +
-        (operation ? `Check your ${operation} settings or try re-creating the wallet.` : 'Try again.'),
+        (operation
+          ? `Check your ${operation} settings or try re-creating the wallet.`
+          : 'Try again.'),
       'wallet_error',
       0,
       { operation },
@@ -446,10 +424,7 @@ export function parseApiError(
  * the original `raw` payload. Otherwise, wrap it in a generic Stellar_CardError
  * with the original error recorded as `cause`.
  */
-export function wrapError(
-  err: unknown,
-  context: Partial<ErrorContext>,
-): Stellar_CardError {
+export function wrapError(err: unknown, context: Partial<ErrorContext>): Stellar_CardError {
   if (err instanceof Stellar_CardError) {
     // Enhance existing error with context — preserve raw and merge contexts so
     // callers higher up the stack can add operation/source without losing
@@ -572,10 +547,7 @@ export function wrapNetworkError(
   endpoint?: string,
   operation?: string,
 ): NetworkError {
-  const message =
-    err instanceof Error
-      ? err.message
-      : 'Unknown network error';
+  const message = err instanceof Error ? err.message : 'Unknown network error';
   return new NetworkError(message, endpoint, err instanceof Error ? err : undefined, {
     recoveryHint:
       'Check your internet connection, firewall rules, and that the endpoint is reachable.',
@@ -632,10 +604,7 @@ export function wrapHorizonError(
 /**
  * Wrap a wallet operation error with context.
  */
-export function wrapWalletError(
-  err: unknown,
-  operation?: string,
-): WalletError {
+export function wrapWalletError(err: unknown, operation?: string): WalletError {
   const message = err instanceof Error ? err.message : String(err);
   return new WalletError(message, operation, err instanceof Error ? err : undefined);
 }

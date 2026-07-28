@@ -1,5 +1,10 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// This config covers the automated, CI-safe suite in `e2e/` only — a
+// mocked-backend smoke test with no external dependencies. The Domino's
+// live-site script lives in `e2e-manual/` under its own
+// `playwright.manual.config.ts` and is never picked up here (see that
+// file's docstring for why it must stay opt-in).
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false, // single-file admin tests don't need parallelism
@@ -11,13 +16,24 @@ export default defineConfig({
   expect: {
     timeout: 10_000,
   },
+  // CI gets a machine-readable JUnit report (for annotations), an HTML
+  // report that .github/workflows/e2e.yml uploads as an artifact on
+  // failure alongside traces/screenshots, and inline `github` annotations.
+  // Local runs stay terse.
   reporter: process.env.CI
-    ? [['html', { open: 'never' }], ['github'], ['list']]
-    : [['list']],
+    ? [
+        ['list'],
+        ['html', { open: 'never', outputFolder: 'playwright-report' }],
+        ['junit', { outputFile: 'test-results/junit.xml' }],
+        ['github'],
+      ]
+    : 'list',
   use: {
     baseURL: 'http://localhost:3000',
     trace: 'on-first-retry',
-    // Capture screenshots on failure for CI debugging.
+    // Traces only kick in on retry; a screenshot on every failed attempt
+    // (including the first, non-retried one) gives a faster first signal
+    // for a CI failure without waiting for the retry to reproduce it.
     screenshot: process.env.CI ? 'only-on-failure' : 'off',
     // Record video only on retry to save disk.
     video: 'on-first-retry',

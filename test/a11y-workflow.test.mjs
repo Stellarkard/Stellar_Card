@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
-const rootDir = resolve(import.meta.dirname, '../..');
+const rootDir = resolve(import.meta.dirname, '..');
 const workflowPath = resolve(rootDir, '.github/workflows/a11y.yml');
 const workflowContent = readFileSync(workflowPath, 'utf-8');
 const workflow = parseYaml(workflowContent);

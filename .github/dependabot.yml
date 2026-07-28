@@ -25,6 +25,14 @@ updates:
     allow:
       - dependency-type: direct
       - dependency-type: indirect
+    ignore:
+      # Ignore major version bumps for certain packages (manual review recommended)
+      - dependency-name: '@stellar/stellar-sdk'
+        update-types:
+          - 'version-update:semver-major'
+      - dependency-name: 'typescript'
+        update-types:
+          - 'version-update:semver-major'
 
   # npm dependencies — Backend API
   - package-ecosystem: npm
@@ -51,6 +59,17 @@ updates:
     allow:
       - dependency-type: direct
       - dependency-type: indirect
+    ignore:
+      # Ignore major version bumps for certain packages (manual review recommended)
+      - dependency-name: '@stellar/stellar-sdk'
+        update-types:
+          - 'version-update:semver-major'
+      - dependency-name: 'typescript'
+        update-types:
+          - 'version-update:semver-major'
+      - dependency-name: 'better-sqlite3'
+        update-types:
+          - 'version-update:semver-major'
 
   # npm dependencies — Frontend Web Dashboard
   - package-ecosystem: npm
@@ -77,6 +96,21 @@ updates:
     allow:
       - dependency-type: direct
       - dependency-type: indirect
+    ignore:
+      # Ignore major version bumps for certain packages (manual review recommended) —
+      # Next.js and React majors both need a deliberate, coordinated upgrade.
+      - dependency-name: 'next'
+        update-types:
+          - 'version-update:semver-major'
+      - dependency-name: 'react'
+        update-types:
+          - 'version-update:semver-major'
+      - dependency-name: 'react-dom'
+        update-types:
+          - 'version-update:semver-major'
+      - dependency-name: 'typescript'
+        update-types:
+          - 'version-update:semver-major'
 
   # Cargo dependencies — Soroban Smart Contract
   - package-ecosystem: cargo
@@ -100,9 +134,15 @@ updates:
     pull-request-branch-name:
       separator: '/'
     rebase-strategy: 'auto'
-    allow:
-      - dependency-type: direct
-      - dependency-type: indirect
+    ignore:
+      # soroban-sdk is pinned to an exact version (`=22.0.11`) in Cargo.toml
+      # because Soroban's ABI/host-function surface can break between minor
+      # releases — major AND minor bumps need a deliberate, tested upgrade,
+      # not an automated PR.
+      - dependency-name: 'soroban-sdk'
+        update-types:
+          - 'version-update:semver-major'
+          - 'version-update:semver-minor'
 
   # GitHub Actions workflows
   - package-ecosystem: github-actions
