@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        project: [chromium, firefox, webkit]
+        project: [chromium, firefox, webkit, 'Mobile Chrome', 'Mobile Safari']
 
     steps:
       - uses: actions/checkout@v4
@@ -47,10 +47,24 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Project names like "Mobile Chrome" / "Mobile Safari" are device
+      # emulation presets, not installable browser engines — they run on
+      # the underlying chromium/webkit engine. Resolve the engine name so
+      # `playwright install` gets a name it understands.
+      - name: Resolve browser engine for project
+        id: engine
+        run: |
+          case "${{ matrix.project }}" in
+            "Mobile Chrome") ENGINE=chromium ;;
+            "Mobile Safari") ENGINE=webkit ;;
+            *) ENGINE="${{ matrix.project }}" ;;
+          esac
+          echo "name=$ENGINE" >> "$GITHUB_OUTPUT"
+
       # Playwright browser binaries are large (~100s of MB) and rarely
       # change between runs — cache them keyed on the installed
-      # @playwright/test version and the matrix project (each project
-      # only needs its own browser, and matrix jobs run on isolated
+      # @playwright/test version and the resolved engine (device-emulation
+      # projects share their engine's cache; matrix jobs run on isolated
       # runners so there's no cross-project contamination to worry about).
       - name: Get installed Playwright version
         id: playwright-version
@@ -62,11 +76,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ matrix.project }}-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+          key: playwright-${{ steps.engine.outputs.name }}-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
 
       - name: Install Playwright browsers & dependencies (${{ matrix.project }})
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps ${{ matrix.project }}
+        run: npx playwright install --with-deps ${{ steps.engine.outputs.name }}
 
       # Even on a cache hit for the browser binary itself, the OS-level
       # shared libraries Playwright needs (from `--with-deps`) live outside
@@ -74,7 +88,7 @@ jobs:
       # those cheaply.
       - name: Install OS dependencies for Playwright (${{ matrix.project }})
         if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: npx playwright install-deps ${{ matrix.project }}
+        run: npx playwright install-deps ${{ steps.engine.outputs.name }}
 
       - name: Run E2E tests (${{ matrix.project }})
         run: npx playwright test --project=${{ matrix.project }}

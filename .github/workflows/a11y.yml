@@ -46,9 +46,28 @@ jobs:
         working-directory: stellar_card-frontend
         run: npm ci
 
+      - name: Get installed Playwright version
+        id: playwright-version
+        working-directory: stellar_card-frontend
+        run: |
+          echo "version=$(node -e "console.log(require('./node_modules/@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
       - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         working-directory: stellar_card-frontend
         run: npx playwright install chromium --with-deps
+
+      - name: Install OS dependencies for Playwright
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: stellar_card-frontend
+        run: npx playwright install-deps chromium
 
       - name: Run a11y audit
         working-directory: stellar_card-frontend
