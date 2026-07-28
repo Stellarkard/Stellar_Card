@@ -1,0 +1,57 @@
+name: Accessibility Audit
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'stellar_card-frontend/**'
+      - '.github/workflows/a11y.yml'
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'stellar_card-frontend/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  a11y-audit:
+    name: axe-core Accessibility Audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: stellar_card-frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+          cache-dependency-path: 'stellar_card-frontend/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Run a11y audit
+        run: npx playwright test e2e/a11y-audit.spec.ts
+        env:
+          CI: true
+
+      - name: Upload a11y report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a11y-report
+          path: stellar_card-frontend/test-results/
+          retention-days: 7
