@@ -1,26 +1,66 @@
+//! # stellar_card Card Receiver Contract
+//!
+//! A Soroban smart contract that receives USDC and native XLM payments on behalf
+//! of the stellar_card card platform and forwards them to a configured treasury
+//! address.
+//!
+//! ## Overview
+//! Payers authorize a transfer of USDC or XLM to the contract, which routes the
+//! funds to the treasury and emits a payment event tagged with an order identifier
+//! so off-chain systems can reconcile card top-ups.
+//!
+//! ## Security features
+//! * **Reentrancy guard** — a storage-backed guard (`_enter` / `_exit`) blocks
+//!   reentrant calls into the payment functions.
+//! * **Pause mechanism** — the admin can pause the contract to halt all transfers
+//!   during incidents or upgrades.
+//! * **Role-based access control (RBAC)** — a hierarchical role model
+//!   (`Admin > Operator > Viewer`) gates privileged operations.
+//! * **Upgradeability** — the admin can swap the contract WASM in place.
+//!
+//! ## Authorization model
+//! `init` and every state-mutating administrative entrypoint require the caller
+//! to authorize via Soroban's `require_auth`. Payment entrypoints require the
+//! paying address to authorize the transfer.
+
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracterror, contracttype, token, Address, Bytes, BytesN, Env, Map, Symbol};
 
 /// Represents user roles in the contract with hierarchical permissions.
-/// Admin > Operator > Viewer
+///
+/// Roles are ordered by privilege: `Admin > Operator > Viewer`. A holder of a
+/// higher role implicitly satisfies any lower role requirement (see
+/// [`Stellar_CardReceiver::has_role`]).
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[derive(Debug)]
 pub enum Role {
+    /// Full administrative control. Can pause/unpause, upgrade, and manage roles.
     Admin,
+    /// Operational role. Satisfies `Operator` and `Viewer` requirements.
     Operator,
+    /// Lowest-privilege role. Read/observer level access only.
     Viewer,
 }
 
-/// Storage keys for contract state
+/// Storage keys for contract state.
+///
+/// Each variant identifies a slot in the contract's instance storage.
 #[contracttype]
 pub enum DataKey {
+    /// Address that receives forwarded payments.
     Treasury,
+    /// Address of the USDC Stellar Asset Contract (SAC).
     UsdcContract,
+    /// Address of the native XLM Stellar Asset Contract (SAC).
     XlmContract,
+    /// Address of the contract administrator.
     Admin,
+    /// Map of address to assigned [`Role`].
     Roles,
+    /// Boolean flag marking whether a guarded operation is currently in progress.
     ReentrancyGuard,
+    /// Boolean flag marking whether the contract is paused.
     Paused,
 }
 
@@ -37,12 +77,17 @@ pub enum Error {
     ContractPaused = 3,
 }
 
+/// The stellar_card card receiver contract.
+///
+/// Holds no in-memory state; all persistent data lives in instance storage keyed
+/// by [`DataKey`]. All contract entrypoints are implemented on this type.
 #[contract]
 pub struct Stellar_CardReceiver;
 
-/// Instance storage TTL constants (in ledgers).
+/// Number of ledgers to extend the instance TTL by on each extension.
 /// 17_280_000 ledgers ≈ 2 years at 5s per ledger.
 const INSTANCE_TTL: u32 = 17_280_000;
+/// Minimum remaining TTL (in ledgers) that triggers an extension.
 const INSTANCE_TTL_THRESHOLD: u32 = 17_280_000;
 
 #[contractimpl]
