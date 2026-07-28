@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Stellar_Card contract deployment helper — Node.js port of deploy_testnet.sh.
+ * Stellar_Card contract deployment helper.
  *
  * Uses modern Node.js built-ins (util.parseArgs, node:fs/promises, import.meta)
  * so no additional dependencies are required beyond Node 18+.

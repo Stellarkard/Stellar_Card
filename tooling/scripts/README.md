@@ -4,9 +4,10 @@ This directory contains scripts for automating the deployment of the Stellar_Car
 
 ## Prerequisites
 
-Before running the deployment scripts, ensure you have the following installed:
+Before running the deployment script, ensure you have the following installed:
 - [Rust toolchain](https://rustup.rs/) (including the `wasm32-unknown-unknown` target)
 - [Soroban CLI](https://soroban.stellar.org/docs/getting-started/setup)
+- Node.js 18+ (the script uses `node:util.parseArgs` and other modern built-ins)
 
 ## Environment Setup
 
@@ -27,10 +28,17 @@ soroban config identity generate --network testnet alice
 
 ## Running the Deployment
 
-To deploy the contract to the testnet, simply execute the script:
+To deploy the contract to the testnet, run the script with Node:
 
 ```bash
-./deploy_testnet.sh
+node deploy_testnet.mjs --source alice
+```
+
+Flags mirror the environment variables above (`--source`, `--network`), plus
+a `--dry-run` flag that builds without deploying:
+
+```bash
+node deploy_testnet.mjs --source alice --network testnet --dry-run
 ```
 
 ## Expected Outputs
