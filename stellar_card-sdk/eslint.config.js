@@ -11,9 +11,17 @@
 // to want type-aware rules.
 'use strict';
 
+// This file is itself linted by the recommended.ts ruleset it configures
+// (it matches the generic *.{ts,tsx,mjs,js} lint-staged glob), so its own
+// require() calls need the same disable used at the other scoped call
+// sites (src/cli.ts, src/client.ts, src/mcp.ts, src/version-check.ts) —
+// a CJS flat config can't use ESM imports instead.
+/* eslint-disable @typescript-eslint/no-require-imports */
 const js = require('@eslint/js');
 const tseslint = require('typescript-eslint');
 const globals = require('globals');
+const { noUnusedVars } = require('../eslint.shared.cjs');
+/* eslint-enable @typescript-eslint/no-require-imports */
 
 module.exports = tseslint.config(
   js.configs.recommended,
@@ -26,10 +34,7 @@ module.exports = tseslint.config(
       },
     },
     rules: {
-      '@typescript-eslint/no-unused-vars': [
-        'warn',
-        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' },
-      ],
+      '@typescript-eslint/no-unused-vars': noUnusedVars,
       // The SDK deliberately types some public surfaces loosely (MCP tool
       // payloads, CLI argv, Horizon/Soroban RPC responses) — banning `any`
       // outright would just push everyone to `as any` casts instead.

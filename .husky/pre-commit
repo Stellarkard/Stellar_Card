@@ -6,6 +6,15 @@
 # for the full explanation of why `npx --no` can't resolve packages from
 # the repo root). Invoke the CLI entrypoint directly instead, same as
 # commit-msg does for commitlint.
+#
+# .lintstagedrc.json's per-package commands (`eslint --fix --config
+# stellar_card-backend/eslint.config.js`, `prettier --write`, ...) are
+# plain shell commands — lint-staged spawns them and relies on PATH to
+# find the `eslint`/`prettier` binaries, which NODE_PATH does nothing
+# for. Each package installs its own copy under its own node_modules/.bin
+# (there's no root node_modules/.bin to rely on), so prepend all three.
 HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-SDK_DIR="$HOOK_DIR/../stellar_card-sdk"
-NODE_PATH="$SDK_DIR/node_modules" node "$SDK_DIR/node_modules/lint-staged/bin/lint-staged.js"
+REPO_ROOT="$HOOK_DIR/.."
+SDK_DIR="$REPO_ROOT/stellar_card-sdk"
+PATH="$REPO_ROOT/stellar_card-frontend/node_modules/.bin:$REPO_ROOT/stellar_card-backend/node_modules/.bin:$SDK_DIR/node_modules/.bin:$PATH" \
+  NODE_PATH="$SDK_DIR/node_modules" node "$SDK_DIR/node_modules/lint-staged/bin/lint-staged.js"
