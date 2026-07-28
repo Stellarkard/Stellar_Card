@@ -1,0 +1,4 @@
+#!/bin/sh
+# Validate commit message format with commitlint.
+# Requires @commitlint/cli and @commitlint/config-conventional in devDependencies.
+npx --no -- commitlint --edit "$1"
