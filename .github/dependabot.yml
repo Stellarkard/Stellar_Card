@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # npm dependencies
+  # npm dependencies — SDK package
   - package-ecosystem: npm
     directory: '/stellar_card-sdk'
     schedule:
@@ -13,6 +13,7 @@ updates:
       - 'devpeter999'
     labels:
       - 'dependencies'
+      - 'security'
       - 'sdk'
     commit-message:
       prefix: 'chore'
@@ -24,18 +25,36 @@ updates:
     allow:
       - dependency-type: direct
       - dependency-type: indirect
-    ignore:
-      # Ignore major version bumps for certain packages (manual review recommended)
-      - dependency-name: '@stellar/stellar-sdk'
-        update-types:
-          - 'version-update:semver-major'
-      - dependency-name: 'typescript'
-        update-types:
-          - 'version-update:semver-major'
 
-  # GitHub Actions
-  - package-ecosystem: github-actions
-    directory: '/'
+  # npm dependencies — Backend API
+  - package-ecosystem: npm
+    directory: '/stellar_card-backend'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '03:30'
+      timezone: UTC
+    open-pull-requests-limit: 5
+    reviewers:
+      - 'devpeter999'
+    labels:
+      - 'dependencies'
+      - 'security'
+      - 'backend'
+    commit-message:
+      prefix: 'chore'
+      prefix-scope: 'deps'
+      include: 'scope'
+    pull-request-branch-name:
+      separator: '/'
+    rebase-strategy: 'auto'
+    allow:
+      - dependency-type: direct
+      - dependency-type: indirect
+
+  # npm dependencies — Frontend Web Dashboard
+  - package-ecosystem: npm
+    directory: '/stellar_card-frontend'
     schedule:
       interval: weekly
       day: monday
@@ -45,22 +64,81 @@ updates:
     reviewers:
       - 'devpeter999'
     labels:
-      - 'ci/cd'
+      - 'dependencies'
+      - 'security'
+      - 'frontend'
     commit-message:
-      prefix: 'ci'
+      prefix: 'chore'
+      prefix-scope: 'deps'
       include: 'scope'
+    pull-request-branch-name:
+      separator: '/'
+    rebase-strategy: 'auto'
+    allow:
+      - dependency-type: direct
+      - dependency-type: indirect
 
-  # Docker (if used in future)
-  - package-ecosystem: docker
+  # Cargo dependencies — Soroban Smart Contract
+  - package-ecosystem: cargo
+    directory: '/stellar_card-contract'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '04:30'
+      timezone: UTC
+    open-pull-requests-limit: 5
+    reviewers:
+      - 'devpeter999'
+    labels:
+      - 'dependencies'
+      - 'security'
+      - 'contract'
+    commit-message:
+      prefix: 'chore'
+      prefix-scope: 'deps'
+      include: 'scope'
+    pull-request-branch-name:
+      separator: '/'
+    rebase-strategy: 'auto'
+    allow:
+      - dependency-type: direct
+      - dependency-type: indirect
+
+  # GitHub Actions workflows
+  - package-ecosystem: github-actions
     directory: '/'
     schedule:
       interval: weekly
       day: monday
       time: '05:00'
       timezone: UTC
+    open-pull-requests-limit: 5
+    reviewers:
+      - 'devpeter999'
+    labels:
+      - 'ci/cd'
+      - 'security'
+    commit-message:
+      prefix: 'ci'
+      prefix-scope: 'deps'
+      include: 'scope'
+
+  # Docker containers
+  - package-ecosystem: docker
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '05:30'
+      timezone: UTC
     open-pull-requests-limit: 3
     reviewers:
       - 'devpeter999'
     labels:
       - 'docker'
+      - 'security'
       - 'infra'
+    commit-message:
+      prefix: 'chore'
+      prefix-scope: 'deps'
+      include: 'scope'
