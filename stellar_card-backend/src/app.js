@@ -9,6 +9,11 @@ const cors = require('cors');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const db = require('./db');
 const { log } = require('./lib/logger');
+const {
+  sentryRequestHandler,
+  sentryErrorHandler,
+  setRequestId: setSentryRequestId,
+} = require('./lib/sentry-config');
 const auth = require('./middleware/auth');
 const ordersRouter = require('./api/orders');
 const { buildBudget, policyCheck, orderPollLimiter, openSSEStreamCount } = require('./api/orders');
@@ -23,6 +28,13 @@ const vccCallbackRouter = require('./api/vcc-callback');
 const { MAX_WEBHOOK_ATTEMPTS: MAX_WEBHOOK_ATTEMPTS_FOR_STATUS } = require('./fulfillment');
 
 const app = express();
+
+// Sentry's request handler must be the very first middleware: it opens
+// the per-request scope that every later captureException() attaches
+// itself to, and anything mounted above it reports without request
+// context. It is a pass-through no-op when SENTRY_DSN is unset, which is
+// the case in development and across the whole test suite.
+app.use(sentryRequestHandler());
 
 // B-13: Attach a unique request ID to every request for log correlation.
 //
@@ -92,6 +104,10 @@ app.use((req, res, next) => {
   }
   req.id = validated || crypto.randomUUID();
   res.setHeader('X-Request-ID', req.id);
+  // Tag the Sentry scope with the same correlation id the structured
+  // logs carry, so an event in Sentry can be joined back to the log
+  // lines for the request that produced it. No-op when Sentry is off.
+  setSentryRequestId(req.id);
   log('info', 'request', { req_id: req.id, method: req.method, path: req.path });
   next();
 });
@@ -890,6 +906,15 @@ const vccCallbackLimiter = rateLimit({
   handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
 });
 app.use('/vcc-callback', vccCallbackLimiter, vccCallbackRouter);
+
+// Sentry's error handler runs before the application's own responder
+// because the responder terminates the chain — it writes a 500 and never
+// calls next(), so anything mounted after it would never see the error.
+// Sentry's handler reports and then re-throws into the next error
+// middleware, leaving the response contract below untouched. Its
+// shouldHandleError predicate (see lib/sentry-config.js) filters out CORS
+// rejections and 4xx so only genuine server faults are reported.
+app.use(sentryErrorHandler());
 
 // Structured CORS denial — cors() throws on rejected origins; catch and return clean 403
 app.use((err, req, res, _next) => {

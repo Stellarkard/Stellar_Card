@@ -97,8 +97,12 @@ function deepFreeze(value) {
 function log(level, msg, fields = {}) {
   if (IS_TEST) return; // tests control their own output
 
-  // Send error logs to Sentry in production
-  if (IS_PROD && level === 'error') {
+  // Mirror error-level logs into Sentry. The gate is Sentry's own
+  // "was I initialised" flag rather than NODE_ENV: captureMessage is a
+  // no-op until initSentry() succeeds, so this costs one function call
+  // in dev and test, and a developer pointing SENTRY_DSN at a scratch
+  // project to reproduce an issue locally still gets events.
+  if (level === 'error') {
     try {
       const { captureMessage } = require('./sentry-config');
       captureMessage(msg, 'error', {
