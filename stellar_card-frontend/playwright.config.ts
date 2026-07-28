@@ -4,10 +4,23 @@ export default defineConfig({
   testDir: './e2e',
   fullyParallel: false, // single-file admin tests don't need parallelism
   retries: process.env.CI ? 2 : 0,
-  reporter: 'list',
+  // Fail the build on CI if you accidentally left test.only in the source code.
+  forbidOnly: !!process.env.CI,
+  // Increase timeout for CI (Next.js cold start can be slow).
+  timeout: process.env.CI ? 60_000 : 30_000,
+  expect: {
+    timeout: 10_000,
+  },
+  reporter: process.env.CI
+    ? [['html', { open: 'never' }], ['github'], ['list']]
+    : [['list']],
   use: {
     baseURL: 'http://localhost:3000',
     trace: 'on-first-retry',
+    // Capture screenshots on failure for CI debugging.
+    screenshot: process.env.CI ? 'only-on-failure' : 'off',
+    // Record video only on retry to save disk.
+    video: 'on-first-retry',
   },
   projects: [
     {
@@ -21,6 +34,6 @@ export default defineConfig({
     command: 'npm run dev -- --port 3000',
     url: 'http://localhost:3000',
     reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
+    timeout: 120_000,
   },
 });
