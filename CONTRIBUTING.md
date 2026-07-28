@@ -1,6 +1,6 @@
 # Contributing to Stellar_Card
 
-Thank you for helping improve Stellar_Card. This guide covers everything you need to open a successful pull request.
+Thank you for helping improve Stellar_Card. This guide covers everything you need to set up your local environment, run tests, and open a successful pull request.
 
 ---
 
@@ -10,12 +10,13 @@ Thank you for helping improve Stellar_Card. This guide covers everything you nee
 Stellar_Card/
 ├── stellar_card-sdk/        # TypeScript SDK published to npm
 ├── stellar_card-contract/   # Soroban smart contract (Rust)
-├── stellar_card-backend/    # API server
-├── stellar_card-frontend/   # Web dashboard
+├── stellar_card-backend/    # API server (Node.js/Express)
+├── stellar_card-frontend/   # Web dashboard (Next.js 16)
+├── docker-compose.yml       # Unified local development environment
 └── tooling/                 # Build and deployment scripts
 ```
 
-Each sub-package has its own `README.md` with setup instructions specific to that area.
+Each sub-package contains its own `README.md` with detailed instructions for that specific component.
 
 ---
 
@@ -23,25 +24,46 @@ Each sub-package has its own `README.md` with setup instructions specific to tha
 
 | Tool | Minimum version | Notes |
 |------|-----------------|-------|
-| Node.js | 18 | SDK development and tooling scripts |
-| npm | 9 | Package management for the SDK |
-| Rust | stable | Contract development |
-| Soroban CLI | latest | Contract build and deploy |
+| Node.js | 18+ | SDK, frontend, backend, and tooling scripts |
+| npm | 9+ | Package management |
+| Docker & Docker Compose | 20.10+ / 2.0+ | Unified local container development environment |
+| Rust | stable | Soroban smart contract development |
+| Soroban CLI | latest | Contract build and deployment |
+| Playwright | 1.40+ | Cross-browser e2e testing |
 
 ---
 
 ## Setting up locally
 
+### Option 1: Native Node.js Workflow
+
 ```bash
-# 1. Fork and clone
+# 1. Fork and clone repository
 git clone https://github.com/<your-fork>/Stellar_Card.git
 cd Stellar_Card
 
-# 2. Install SDK dependencies
+# 2. Install SDK dependencies & run SDK test suite
 cd stellar_card-sdk && npm ci
-
-# 3. Verify setup
 npm test
+
+# 3. Setup backend environment
+cd ../stellar_card-backend && npm ci && cp .env.example .env
+
+# 4. Setup frontend environment
+cd ../stellar_card-frontend && npm ci
+```
+
+### Option 2: Unified Container Workflow (Docker Compose)
+
+```bash
+# Start backend (:4000) and frontend (:3000) containers
+docker compose up --build
+
+# Run in background
+docker compose up -d
+
+# Stop environment
+docker compose down
 ```
 
 ---
@@ -49,13 +71,46 @@ npm test
 ## Workflow
 
 1. **Pick an issue** — check the open issues list and leave a comment to claim one before starting.
-2. **Branch naming** — follow the convention used in issue descriptions:
-   - `feature/<task-slug>` for new features
-   - `fix/<short-description>` for bug fixes
-   - `docs/<short-description>` for documentation-only changes
+2. **Branch naming** — follow the convention used in issue tasks:
+   - `feature/docs-task-46` or `docs/<short-description>` for documentation updates
+   - `feature/devops-task-45` or `infra/<short-description>` for DevOps & Docker Compose updates
+   - `feature/qa-task-44` or `test/<short-description>` for cross-browser & QA updates
+   - `feature/security-task-43` or `security/<short-description>` for Dependabot & security updates
 3. **Make your changes** — keep commits small and focused; see the commit message guide below.
-4. **Test** — run `npm test` in `stellar_card-sdk/` before opening a PR. For contract changes, run `cargo test` in `stellar_card-contract/`.
+4. **Test across suites**:
+   - SDK: `npm test` in `stellar_card-sdk/`
+   - Backend: `npm test` in `stellar_card-backend/`
+   - Frontend Unit: `npm test` in `stellar_card-frontend/`
+   - Cross-Browser E2E: `npm run test:e2e` in `stellar_card-frontend/` (Playwright across Chromium, Firefox, WebKit, Mobile Chrome, Mobile Safari)
 5. **Open a PR** — fill in the pull request template and link the issue with `Closes #N`.
+
+---
+
+## Testing & Cross-Browser QA
+
+We use Playwright for cross-browser testing across multiple rendering engines and mobile viewports:
+
+```bash
+cd stellar_card-frontend
+
+# Run Playwright cross-browser test suite
+npx playwright test
+
+# Test specific browser project (e.g., firefox, webkit)
+npx playwright test --project=firefox
+npx playwright test --project=webkit
+npx playwright test --project="Mobile Chrome"
+```
+
+---
+
+## Dependabot & Security Policy
+
+Automated security updates are managed by Dependabot (`.github/dependabot.yml`):
+
+- **Ecosystems monitored**: `npm` (`stellar_card-sdk`, `stellar_card-backend`, `stellar_card-frontend`), `cargo` (`stellar_card-contract`), `docker`, `github-actions`.
+- **Commit prefix**: `chore(deps): ...` or `ci(deps): ...` following Conventional Commits.
+- **Review policy**: Security patches and patch updates receive automated CI audit runs (`.github/workflows/security.yml`).
 
 ---
 
@@ -111,6 +166,7 @@ All changes go through automated checks:
 |----------|---------|--------------|
 | Test & Lint | Push, PR | Runs linting, type checking, tests, build |
 | Security Audit | Push, PR, daily | npm audit, Trivy scan, CodeQL analysis |
+| E2E Tests | Push, PR | Cross-browser Playwright test matrix |
 | SDK Validate | PR to main/develop | Full build and package verification |
 | Accessibility Audit | Push, PR, weekly | Playwright a11y checks, Storybook audit |
 
@@ -121,6 +177,8 @@ See [CICD.md](.github/CICD.md) for full details.
 ## Pull request checklist
 
 - [ ] `npm test` passes in `stellar_card-sdk/`
+- [ ] Backend tests pass in `stellar_card-backend/`
+- [ ] Cross-browser e2e tests pass (`npx playwright test`)
 - [ ] New behaviour has test coverage
 - [ ] Commit messages follow Conventional Commits
 - [ ] PR description links the resolved issue (`Closes #N`)
