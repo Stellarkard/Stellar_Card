@@ -38,7 +38,10 @@ git clone https://github.com/<your-fork>/Stellar_Card.git
 cd Stellar_Card
 
 # 2. Install SDK dependencies
-cd stellar_card-sdk && npm ci && cd ..
+cd stellar_card-sdk && npm ci
+
+# 3. Verify setup
+npm test
 ```
 
 ---
@@ -53,6 +56,18 @@ cd stellar_card-sdk && npm ci && cd ..
 3. **Make your changes** — keep commits small and focused; see the commit message guide below.
 4. **Test** — run `npm test` in `stellar_card-sdk/` before opening a PR. For contract changes, run `cargo test` in `stellar_card-contract/`.
 5. **Open a PR** — fill in the pull request template and link the issue with `Closes #N`.
+
+---
+
+## Git hooks
+
+This project uses Husky to enforce code quality automatically:
+
+- **commit-msg** — validates commit messages against [Conventional Commits](https://www.conventionalcommits.org/) via commitlint
+- **pre-commit** — runs lint-staged to lint and type-check staged files
+- **pre-push** — runs the test suite to catch regressions before pushing
+
+Hooks are installed automatically when you run `npm ci` in `stellar_card-sdk/`.
 
 ---
 
@@ -82,9 +97,24 @@ Commit messages are validated automatically by commitlint on every commit (see `
 
 ## Code style
 
-- **TypeScript**: the SDK has no ESLint config checked in yet; follow the existing file conventions (2-space indent, named exports, `node:` import protocol for built-ins).
+- **TypeScript**: follow the existing file conventions (2-space indent, named exports, `node:` import protocol for built-ins).
 - **Rust**: run `cargo fmt` before committing contract changes.
 - **Shell scripts**: use `set -euo pipefail` at the top of every script.
+
+---
+
+## CI/CD pipelines
+
+All changes go through automated checks:
+
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| Test & Lint | Push, PR | Runs linting, type checking, tests, build |
+| Security Audit | Push, PR, daily | npm audit, Trivy scan, CodeQL analysis |
+| SDK Validate | PR to main/develop | Full build and package verification |
+| Accessibility Audit | Push, PR, weekly | Playwright a11y checks, Storybook audit |
+
+See [CICD.md](.github/CICD.md) for full details.
 
 ---
 

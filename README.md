@@ -6,6 +6,11 @@ Pay XLM or USDC on Stellar, get a real Visa card number in about 60 seconds.
 Stellar_Card gives agents their own funding rails without giving them your personal card details.
 With one line of code, an agent can deploy an Open Wallet Standard (OWS) wallet with Stellar and Soroban support, then use that wallet to buy anywhere x402 is supported and anywhere Visa is accepted.
 
+[![Tests](https://github.com/devpeter999/Stellar_Card/workflows/Test%20%26%20Lint/badge.svg)](https://github.com/devpeter999/Stellar_Card/actions/workflows/test.yml)
+[![Security](https://github.com/devpeter999/Stellar_Card/workflows/Security%20Audit/badge.svg)](https://github.com/devpeter999/Stellar_Card/actions/workflows/security.yml)
+[![SDK Validate](https://github.com/devpeter999/Stellar_Card/workflows/SDK%20Validate%20(PR)/badge.svg)](https://github.com/devpeter999/Stellar_Card/actions/workflows/sdk-validate.yml)
+[![Accessibility](https://github.com/devpeter999/Stellar_Card/workflows/Accessibility%20Audit/badge.svg)](https://github.com/devpeter999/Stellar_Card/actions/workflows/a11y.yml)
+
 ## Core idea
 
 - Instant 1:1 value cards with no markup fee. `5 USDC -> $5 Visa card`.
@@ -48,3 +53,45 @@ Stellar_Card is not only card issuance. It is a full control plane for operating
 - Human dashboard for oversight and operations.
 
 Stellar_Card gives agents real purchasing power with strict, configurable guardrails.
+
+## Project structure
+
+```
+Stellar_Card/
+├── stellar_card-sdk/        # TypeScript SDK published to npm
+├── stellar_card-contract/   # Soroban smart contract (Rust)
+├── stellar_card-backend/    # API server
+├── stellar_card-frontend/   # Web dashboard
+├── tooling/                 # Build and deployment scripts
+└── .github/                 # CI/CD workflows
+```
+
+## Getting started
+
+```bash
+# 1. Fork and clone
+git clone https://github.com/<your-fork>/Stellar_Card.git
+cd Stellar_Card
+
+# 2. Install SDK dependencies
+cd stellar_card-sdk && npm ci
+
+# 3. Run tests
+npm test
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on setting up the project, commit conventions, and pull request workflow.
+
+## CI/CD
+
+This project uses GitHub Actions for:
+
+- **Testing & Linting** — runs on every push and PR
+- **Security Audits** — daily dependency and container scanning
+- **SDK Validation** — ensures the package is publishable before merge
+- **Accessibility Audits** — automated a11y checks via Playwright and Storybook
+- **Publishing** — automatic npm publish on tagged releases
+
+See [CICD.md](.github/CICD.md) for full pipeline documentation.
