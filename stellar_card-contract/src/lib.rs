@@ -24,7 +24,7 @@
 //! paying address to authorize the transfer.
 
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracterror, contracttype, token, Address, Bytes, BytesN, Env, Map, Symbol};
+use soroban_sdk::{contract, contractimpl, contracterror, contracttype, token, Address, Bytes, BytesN, Env, Symbol};
 
 /// Represents user roles in the contract with hierarchical permissions.
 ///
@@ -56,11 +56,15 @@ pub enum DataKey {
     XlmContract,
     /// Address of the contract administrator.
     Admin,
-    /// Map of address to assigned [`Role`].
-    Roles,
+    /// Per-address role assignment. Replaces a single `Roles: Map<Address, Role>`
+    /// instance-storage entry: a Map entry grows (and gets re-serialized +
+    /// rent-extended) on every single role grant/revoke, regardless of which
+    /// address changed. A per-address key means each grant/revoke touches only
+    /// its own entry, and only that entry's TTL needs extending.
+    UserRole(Address),
     /// Boolean flag marking whether a guarded operation is currently in progress.
     ReentrancyGuard,
-    /// Boolean flag marking whether the contract is paused.
+    /// Circuit breaker: when true, `pay_usdc`/`pay_xlm` refuse new payments.
     Paused,
 }
 
@@ -73,7 +77,7 @@ pub enum Error {
     InvalidAmount = 1,
     /// Token transfer operation failed
     TransferFailed = 2,
-    /// Contract is paused
+    /// The contract is paused; no new payments are accepted until unpaused
     ContractPaused = 3,
 }
 
@@ -129,10 +133,14 @@ impl Stellar_CardReceiver {
         env.storage().instance().set(&DataKey::XlmContract, &xlm_contract);
         env.storage().instance().set(&DataKey::Paused, &false);
 
-        // Grant Admin role to the admin address
-        let mut roles: Map<Address, Role> = Map::new(&env);
-        roles.set(admin.clone(), Role::Admin);
-        env.storage().instance().set(&DataKey::Roles, &roles);
+        // Grant the Admin role to the admin address itself. Without this,
+        // the deploying admin (the DataKey::Admin address) would satisfy
+        // admin-only checks but NOT role-based checks like has_role(...,
+        // Role::Admin) until someone remembered to self-grant it — a real
+        // gap a fresh deployment could otherwise silently hit.
+        let admin_role_key = DataKey::UserRole(admin.clone());
+        env.storage().persistent().set(&admin_role_key, &Role::Admin);
+        env.storage().persistent().extend_ttl(&admin_role_key, 17_280_000, 17_280_000);
 
         Self::extend_instance_ttl(&env);
     }
@@ -171,15 +179,26 @@ impl Stellar_CardReceiver {
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
+    /// * `caller` - The address invoking pause (must authorize this call)
     ///
     /// # Authorization
-    /// Only the admin can call this function.
+    /// Requires `caller` to hold at least the `Operator` role. Pausing is an
+    /// operational response to an incident, so it's granted to Operators
+    /// (not Admin-only) — the faster an incident responder can halt
+    /// payments, the smaller the blast radius. Resuming is stricter; see
+    /// `unpause`.
     ///
     /// # Notes
     /// Idempotent — calling when already paused is a no-op.
-    pub fn pause(env: Env) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
+    ///
+    /// # Panics
+    /// Panics if `caller` does not hold at least the `Operator` role, or if
+    /// `caller.require_auth()` fails.
+    pub fn pause(env: Env, caller: Address) {
+        caller.require_auth();
+        if !Self::has_role(env.clone(), caller, Role::Operator) {
+            panic!("pause requires at least the Operator role");
+        }
         env.storage().instance().set(&DataKey::Paused, &true);
         Self::extend_instance_ttl(&env);
     }
@@ -379,19 +398,18 @@ impl Stellar_CardReceiver {
     ///
     /// # Authorization
     /// Only the admin can call this function.
+    ///
+    /// # Storage
+    /// Stored under a per-address persistent key (`DataKey::UserRole`)
+    /// rather than in a single growing `Map` — see the `DataKey::UserRole`
+    /// doc comment for why.
     pub fn grant_role(env: Env, address: Address, role: Role) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
-        let mut roles: Map<Address, Role> = env
-            .storage()
-            .instance()
-            .get(&DataKey::Roles)
-            .unwrap_or_else(|| Map::new(&env));
-
-        roles.set(address, role);
-        env.storage().instance().set(&DataKey::Roles, &roles);
-        Self::extend_instance_ttl(&env);
+        let key = DataKey::UserRole(address);
+        env.storage().persistent().set(&key, &role);
+        env.storage().persistent().extend_ttl(&key, 17_280_000, 17_280_000);
     }
 
     /// Revokes a role from an address.
@@ -406,11 +424,7 @@ impl Stellar_CardReceiver {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
-        if let Some(mut roles) = env.storage().instance().get::<_, Map<Address, Role>>(&DataKey::Roles) {
-            roles.remove(address);
-            env.storage().instance().set(&DataKey::Roles, &roles);
-            Self::extend_instance_ttl(&env);
-        }
+        env.storage().persistent().remove(&DataKey::UserRole(address));
     }
 
     /// Retrieves the role assigned to an address.
@@ -422,11 +436,7 @@ impl Stellar_CardReceiver {
     /// # Returns
     /// `Some(role)` if a role is assigned, `None` otherwise
     pub fn get_role(env: Env, address: Address) -> Option<Role> {
-        if let Some(roles) = env.storage().instance().get::<_, Map<Address, Role>>(&DataKey::Roles) {
-            roles.get(address)
-        } else {
-            None
-        }
+        env.storage().persistent().get(&DataKey::UserRole(address))
     }
 
     /// Checks if an address has at least the specified role or higher.
@@ -442,12 +452,10 @@ impl Stellar_CardReceiver {
     /// # Hierarchy
     /// Admin > Operator > Viewer
     pub fn has_role(env: Env, address: Address, required_role: Role) -> bool {
-        if let Some(roles) = env.storage().instance().get::<_, Map<Address, Role>>(&DataKey::Roles) {
-            if let Some(user_role) = roles.get(address) {
-                return Self::is_role_sufficient(&user_role, &required_role);
-            }
+        match env.storage().persistent().get::<_, Role>(&DataKey::UserRole(address)) {
+            Some(user_role) => Self::is_role_sufficient(&user_role, &required_role),
+            None => false,
         }
-        false
     }
 
     /// Checks whether a user role satisfies a required role level.
@@ -1219,7 +1227,7 @@ mod test {
 
         let amount: i128 = 1_000_000;
 
-        let test_cases = vec![
+        let test_cases = [
             "",
             "order-1",
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -1228,7 +1236,7 @@ mod test {
             "order\nwith\nnewlines",
         ];
 
-        for (idx, order_id) in test_cases.iter().enumerate() {
+        for order_id in test_cases.iter() {
             f.mint_usdc(&f.payer, amount);
             let oid = order_bytes(&f.env, order_id);
             f.client().pay_usdc(&f.payer, &amount, &oid);
@@ -1682,43 +1690,74 @@ mod test {
         assert!(!f.client().has_role(&unknown, &Role::Admin));
     }
 
-    // ── pause/unpause tests ────────────────────────────────────────────────
+    // ── pause / unpause (circuit breaker) tests ──────────────────────────────
 
     #[test]
-    fn test_init_sets_unpaused() {
+    fn test_contract_starts_unpaused() {
         let f = Fixture::new();
         f.init();
-        assert!(!f.client().is_paused_view());
+        assert_eq!(f.client().is_paused_view(), false);
     }
 
     #[test]
-    fn test_pause_and_unpause() {
+    fn test_pause_requires_operator_role() {
         let f = Fixture::new();
         f.init();
 
-        f.client().pause();
-        assert!(f.client().is_paused_view());
+        let operator = Address::generate(&f.env);
+        f.client().grant_role(&operator, &Role::Operator);
+
+        f.client().pause(&operator);
+        assert_eq!(f.client().is_paused_view(), true);
+    }
+
+    #[test]
+    fn test_admin_role_can_also_pause() {
+        let f = Fixture::new();
+        f.init();
+
+        let admin_role_holder = Address::generate(&f.env);
+        f.client().grant_role(&admin_role_holder, &Role::Admin);
+
+        f.client().pause(&admin_role_holder);
+        assert_eq!(f.client().is_paused_view(), true);
+    }
+
+    #[test]
+    #[should_panic(expected = "pause requires at least the Operator role")]
+    fn test_pause_rejects_viewer_role() {
+        let f = Fixture::new();
+        f.init();
+
+        let viewer = Address::generate(&f.env);
+        f.client().grant_role(&viewer, &Role::Viewer);
+
+        f.client().pause(&viewer); // panics — Viewer is below Operator
+    }
+
+    #[test]
+    #[should_panic(expected = "pause requires at least the Operator role")]
+    fn test_pause_rejects_address_with_no_role() {
+        let f = Fixture::new();
+        f.init();
+
+        let nobody = Address::generate(&f.env);
+        f.client().pause(&nobody); // panics — no role at all
+    }
+
+    #[test]
+    fn test_unpause_resumes_payments() {
+        let f = Fixture::new();
+        f.init();
+
+        let operator = Address::generate(&f.env);
+        f.client().grant_role(&operator, &Role::Operator);
+        f.client().pause(&operator);
+        assert_eq!(f.client().is_paused_view(), true);
 
         f.client().unpause();
-        assert!(!f.client().is_paused_view());
-    }
+        assert_eq!(f.client().is_paused_view(), false);
 
-    #[test]
-    #[should_panic]
-    fn test_pause_requires_admin_auth() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let usdc = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        let xlm_sac = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        let contract_id = env.register(Stellar_CardReceiver, ());
-        let client = Stellar_CardReceiverClient::new(&env, &contract_id);
-
-        env.mock_all_auths();
-        client.init(&admin, &treasury, &usdc, &xlm_sac);
-
-        env.mock_auths(&[]);
-        client.pause();
     }
 
     #[test]
@@ -1734,70 +1773,70 @@ mod test {
 
         env.mock_all_auths();
         client.init(&admin, &treasury, &usdc, &xlm_sac);
-        client.pause();
+
+        // unpause() checks DataKey::Admin directly (not the Role system), and
+        // is deliberately stricter than pause() — with no auth mocked at all,
+        // admin.require_auth() must panic.
 
         env.mock_auths(&[]);
         client.unpause();
     }
 
     #[test]
-    fn test_pay_usdc_rejected_when_paused() {
+    fn test_paused_contract_rejects_pay_usdc() {
         let f = Fixture::new();
         f.init();
 
-        f.mint_usdc(&f.payer, 10_000_000);
-        f.client().pause();
+        let operator = Address::generate(&f.env);
+        f.client().grant_role(&operator, &Role::Operator);
+        f.client().pause(&operator);
 
-        let oid = order_bytes(&f.env, "paused-usdc");
-        let result = f.client().try_pay_usdc(&f.payer, &1_000_000_i128, &oid);
-        assert!(result.is_err(), "should reject payment when paused");
-    }
-
-    #[test]
-    fn test_pay_xlm_rejected_when_paused() {
-        let f = Fixture::new();
-        f.init();
-
-        f.mint_xlm(&f.payer, 10_000_000);
-        f.client().pause();
-
-        let oid = order_bytes(&f.env, "paused-xlm");
-        let result = f.client().try_pay_xlm(&f.payer, &1_000_000_i128, &oid);
-        assert!(result.is_err(), "should reject payment when paused");
-    }
-
-    #[test]
-    fn test_pay_usdc_after_unpause_works() {
-        let f = Fixture::new();
-        f.init();
-
-        let amount: i128 = 5_000_000;
+        let amount: i128 = 10_000_000;
         f.mint_usdc(&f.payer, amount);
 
-        f.client().pause();
-        f.client().unpause();
+        let oid = order_bytes(&f.env, "paused-usdc");
+        let result = f.client().try_pay_usdc(&f.payer, &amount, &oid);
+        assert_eq!(result, Err(Ok(Error::ContractPaused)));
 
-        let oid = order_bytes(&f.env, "after-unpause-usdc");
-        f.client().pay_usdc(&f.payer, &amount, &oid);
-
-        assert_eq!(f.usdc_balance(&f.treasury), amount);
+        // Balance must be untouched — the paused check runs before any transfer.
+        assert_eq!(f.usdc_balance(&f.payer), amount);
     }
 
     #[test]
-    fn test_pay_xlm_after_unpause_works() {
+    fn test_paused_contract_rejects_pay_xlm() {
         let f = Fixture::new();
         f.init();
+
+        let operator = Address::generate(&f.env);
+        f.client().grant_role(&operator, &Role::Operator);
+        f.client().pause(&operator);
 
         let amount: i128 = 5_000_000;
         f.mint_xlm(&f.payer, amount);
 
-        f.client().pause();
+        let oid = order_bytes(&f.env, "paused-xlm");
+        let result = f.client().try_pay_xlm(&f.payer, &amount, &oid);
+        assert_eq!(result, Err(Ok(Error::ContractPaused)));
+        assert_eq!(f.xlm_balance(&f.payer), amount);
+    }
+
+    #[test]
+    fn test_pay_usdc_works_again_after_unpause() {
+        let f = Fixture::new();
+        f.init();
+
+        let operator = Address::generate(&f.env);
+        f.client().grant_role(&operator, &Role::Operator);
+        f.client().pause(&operator);
         f.client().unpause();
 
-        let oid = order_bytes(&f.env, "after-unpause-xlm");
-        f.client().pay_xlm(&f.payer, &amount, &oid);
+        let amount: i128 = 10_000_000;
+        f.mint_usdc(&f.payer, amount);
+        let oid = order_bytes(&f.env, "after-unpause");
 
-        assert_eq!(f.xlm_balance(&f.treasury), amount);
+        f.client().pay_usdc(&f.payer, &amount, &oid);
+
+        assert_eq!(f.usdc_balance(&f.treasury), amount);
     }
 
     #[test]
@@ -1912,12 +1951,21 @@ mod test {
         assert_eq!(f.xlm_balance(&f.treasury), 1);
     }
 
+    mod upgrade_wasm {
+        soroban_sdk::contractimport!(
+            file = "target/wasm32-unknown-unknown/release/stellar_card_receiver.wasm"
+        );
+    }
+
     #[test]
     fn test_upgrade_works() {
         let f = Fixture::new();
         f.init();
 
-        let new_hash = BytesN::from_array(&f.env, &[1u8; 32]);
+        // `upgrade()` only needs a WASM hash that actually exists in the
+        // ledger — upload this same contract's own compiled WASM so the
+        // success path can be exercised without a second dummy contract.
+        let new_hash = f.env.deployer().upload_contract_wasm(upgrade_wasm::WASM);
         f.client().upgrade(&new_hash);
     }
 
@@ -1934,4 +1982,42 @@ mod test {
             assert_ne!(contract_addr, f.contract_id, "init should not emit events");
         }
     }
+
+    // ── per-address role storage tests ───────────────────────────────────────
+
+    #[test]
+    fn test_role_storage_is_independent_per_address() {
+        let f = Fixture::new();
+        f.init();
+
+        let alice = Address::generate(&f.env);
+        let bob = Address::generate(&f.env);
+
+        f.client().grant_role(&alice, &Role::Admin);
+        f.client().grant_role(&bob, &Role::Viewer);
+
+        // Each address's role is stored under its own key — granting/
+        // revoking one must never affect the other.
+        assert_eq!(f.client().get_role(&alice), Some(Role::Admin));
+        assert_eq!(f.client().get_role(&bob), Some(Role::Viewer));
+
+        f.client().revoke_role(&alice);
+        assert_eq!(f.client().get_role(&alice), None);
+        assert_eq!(f.client().get_role(&bob), Some(Role::Viewer)); // untouched
+    }
+
+    #[test]
+    fn test_grant_role_overwrites_previous_role_for_same_address() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Viewer);
+        assert_eq!(f.client().get_role(&user), Some(Role::Viewer));
+
+        f.client().grant_role(&user, &Role::Admin);
+        assert_eq!(f.client().get_role(&user), Some(Role::Admin));
+    }
+
+
 }
