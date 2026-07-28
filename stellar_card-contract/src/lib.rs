@@ -155,19 +155,26 @@ impl Stellar_CardReceiver {
 
     /// Acquires the reentrancy guard to prevent reentrant calls.
     ///
+    /// # Storage
+    /// Stored in `temporary` storage, not `instance`. The guard only needs
+    /// to exist for the span of a single call (set on entry, cleared before
+    /// return) — it has no reason to persist across ledger closes or count
+    /// toward the contract's `instance` storage footprint, which every
+    /// `pay_usdc`/`pay_xlm` call already reads and rent-extends.
+    ///
     /// # Panics
     /// Panics if the guard is already held, indicating a reentrant call attempt.
     fn _enter(env: &Env) {
         let key = DataKey::ReentrancyGuard;
-        if env.storage().instance().get::<_, bool>(&key).unwrap_or(false) {
+        if env.storage().temporary().get::<_, bool>(&key).unwrap_or(false) {
             panic!("reentrancy detected");
         }
-        env.storage().instance().set(&key, &true);
+        env.storage().temporary().set(&key, &true);
     }
 
     /// Releases the reentrancy guard after a guarded operation completes.
     fn _exit(env: &Env) {
-        env.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+        env.storage().temporary().set(&DataKey::ReentrancyGuard, &false);
     }
 
     /// Returns whether the contract is currently paused.
@@ -389,6 +396,94 @@ impl Stellar_CardReceiver {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
+    /// Recovers tokens sent to the contract by mistake — a direct transfer
+    /// to the contract's own address, bypassing `pay_usdc`/`pay_xlm` (which
+    /// forward straight to the treasury and never leave a balance on the
+    /// contract itself). Works for any SAC-compatible token, not just the
+    /// configured USDC/XLM contracts, since a mistaken send could be any
+    /// asset.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `caller` - The address invoking the rescue (must authorize this call)
+    /// * `token_contract` - The token contract to rescue a balance from
+    /// * `to` - Where to send the recovered tokens
+    /// * `amount` - Amount to recover, in the token's base units
+    ///
+    /// # Authorization
+    /// Requires `caller` to either be the stored `DataKey::Admin` address,
+    /// or hold the `Admin` role via `grant_role` — recovering funds is
+    /// powerful enough that it stays Admin-only, unlike `pause` (see
+    /// `Stellar_CardReceiver::pause`'s doc comment for the contrast). Both
+    /// forms are accepted because the deploying admin is never
+    /// auto-granted the `Admin` role (`grant_role`/`has_role` are a
+    /// separate system from `DataKey::Admin`) — requiring only the role
+    /// would lock out a fresh deployment until someone remembered to grant
+    /// it to themselves.
+    ///
+    /// # Errors
+    /// * `InvalidAmount` - If `amount` is <= 0
+    /// * `TransferFailed` - If the underlying token transfer fails (e.g. the
+    ///   contract's balance is lower than `amount`)
+    ///
+    /// # Panics
+    /// Panics if `caller` does not hold the `Admin` role, or if
+    /// `caller.require_auth()` fails.
+    pub fn rescue_tokens(
+        env: Env,
+        caller: Address,
+        token_contract: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        // The contract's single DataKey::Admin address is never
+        // auto-granted the Admin *role* — grant_role/has_role are a
+        // separate system, so a fresh deployer wouldn't satisfy a
+        // has_role-only check until someone explicitly grants it to
+        // themselves. Accept either form of admin authority here.
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let is_stored_admin = caller == stored_admin;
+        if !is_stored_admin && !Self::has_role(env.clone(), caller, Role::Admin) {
+            panic!("rescue_tokens requires the Admin role");
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let contract_address = env.current_contract_address();
+        let token_client = token::Client::new(&env, &token_contract);
+        let res = token_client.try_transfer(&contract_address, &to, &amount);
+        if res.is_err() {
+            return Err(Error::TransferFailed);
+        }
+        Ok(())
+    }
+
+    /// Begins a two-step handover of the admin address. Unlike a naive
+    /// single-step reassignment, this requires the *proposed new admin* to
+    /// also authorize the call — a typo'd or unreachable address can never
+    /// silently become admin, since it would have to co-sign its own
+    /// appointment.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `new_admin` - The address to become the new admin
+    ///
+    /// # Authorization
+    /// Requires auth from BOTH the current admin (`DataKey::Admin`) and
+    /// `new_admin` itself — matching `grant_role`/`revoke_role`'s pattern of
+    /// panicking (via `require_auth`) on an authorization failure, rather
+    /// than returning a `Result`.
+    pub fn transfer_admin(env: Env, new_admin: Address) {
+        let current_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        current_admin.require_auth();
+        new_admin.require_auth();
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().extend_ttl(17_280_000, 17_280_000);
+    }
+
     /// Grants a role to an address.
     ///
     /// # Arguments
@@ -483,8 +578,8 @@ impl Stellar_CardReceiver {
 mod test {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Events},
-        token, Bytes, Env, Symbol, TryIntoVal,
+        testutils::{Address as _, Events, MockAuth, MockAuthInvoke},
+        token, Bytes, Env, IntoVal, Symbol, TryIntoVal,
     };
 
     // ── Test fixture ──────────────────────────────────────────────────────────
@@ -826,7 +921,7 @@ mod test {
 
         // Set the reentrancy guard from within the contract context
         f.env.as_contract(&f.contract_id, || {
-            f.env.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+            f.env.storage().temporary().set(&DataKey::ReentrancyGuard, &true);
         });
 
         let oid1 = order_bytes(&f.env, "reentry-1");
@@ -1757,7 +1852,144 @@ mod test {
 
         f.client().unpause();
         assert_eq!(f.client().is_paused_view(), false);
+    }
 
+    // ── rescue_tokens tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_rescue_tokens_recovers_mistaken_direct_transfer() {
+        let f = Fixture::new();
+        f.init();
+
+        // Simulate a mistaken direct send: USDC minted straight to the
+        // contract's own address, bypassing pay_usdc entirely.
+        let amount: i128 = 3_000_000;
+        f.mint_usdc(&f.contract_id, amount);
+        assert_eq!(f.usdc_balance(&f.contract_id), amount);
+
+        let rescue_destination = Address::generate(&f.env);
+        f.client()
+            .rescue_tokens(&f.admin, &f.usdc, &rescue_destination, &amount);
+
+        assert_eq!(f.usdc_balance(&f.contract_id), 0);
+        assert_eq!(f.usdc_balance(&rescue_destination), amount);
+    }
+
+    #[test]
+    #[should_panic(expected = "rescue_tokens requires the Admin role")]
+    fn test_rescue_tokens_requires_admin_role() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 1_000_000;
+        f.mint_usdc(&f.contract_id, amount);
+
+        let operator = Address::generate(&f.env);
+        f.client().grant_role(&operator, &Role::Operator);
+
+        let destination = Address::generate(&f.env);
+        // Operator is below Admin in the hierarchy — must panic (has_role
+        // check), not merely return Err.
+        f.client().rescue_tokens(&operator, &f.usdc, &destination, &amount);
+    }
+
+    #[test]
+    fn test_rescue_tokens_accepts_role_admin_who_is_not_the_stored_admin() {
+        let f = Fixture::new();
+        f.init();
+
+        // Someone granted the Admin *role* — but who is NOT the stored
+        // DataKey::Admin address — must still be able to rescue tokens.
+        let role_admin = Address::generate(&f.env);
+        f.client().grant_role(&role_admin, &Role::Admin);
+
+        let amount: i128 = 750_000;
+        f.mint_usdc(&f.contract_id, amount);
+        let destination = Address::generate(&f.env);
+
+        f.client().rescue_tokens(&role_admin, &f.usdc, &destination, &amount);
+        assert_eq!(f.usdc_balance(&destination), amount);
+    }
+
+    #[test]
+    fn test_rescue_tokens_rejects_non_positive_amount() {
+        let f = Fixture::new();
+        f.init();
+
+        f.client().grant_role(&f.admin, &Role::Admin);
+        let destination = Address::generate(&f.env);
+
+        let result = f.client().try_rescue_tokens(&f.admin, &f.usdc, &destination, &0_i128);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rescue_tokens_works_for_any_sac_not_just_configured_ones() {
+        let f = Fixture::new();
+        f.init();
+
+        // A third, unrelated token (not the contract's configured USDC/XLM)
+        // mistakenly sent to the contract — rescue_tokens must still work,
+        // since it takes the token contract as a parameter.
+        let other_token_admin = Address::generate(&f.env);
+        let other_token = f.env.register_stellar_asset_contract_v2(other_token_admin.clone()).address();
+        let amount: i128 = 500_000;
+        token::StellarAssetClient::new(&f.env, &other_token).mint(&f.contract_id, &amount);
+
+        let destination = Address::generate(&f.env);
+        f.client().rescue_tokens(&f.admin, &other_token, &destination, &amount);
+
+        assert_eq!(token::Client::new(&f.env, &other_token).balance(&destination), amount);
+    }
+
+    // ── transfer_admin tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_transfer_admin_updates_admin_address() {
+        let f = Fixture::new();
+        f.init();
+
+        let new_admin = Address::generate(&f.env);
+        f.client().transfer_admin(&new_admin);
+
+        assert_eq!(f.client().admin(), new_admin);
+    }
+
+    #[test]
+    fn test_new_admin_can_act_after_transfer() {
+        let f = Fixture::new();
+        f.init();
+
+        let new_admin = Address::generate(&f.env);
+        f.client().transfer_admin(&new_admin);
+
+        // The new admin must now be able to do admin-gated work (e.g.
+        // grant a role) — proving the handover actually took effect, not
+        // just that the getter reports the new address.
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Viewer);
+        assert_eq!(f.client().get_role(&user), Some(Role::Viewer));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_pause_requires_admin_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let usdc = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let xlm_sac = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let contract_id = env.register(Stellar_CardReceiver, ());
+        let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+
+        env.mock_all_auths();
+        client.init(&admin, &treasury, &usdc, &xlm_sac);
+
+        // init() auto-grants admin the Admin role, which satisfies pause()'s
+        // Operator-or-above check -- so with no auth mocked at all, the
+        // panic must come from caller.require_auth(), not a missing role.
+        env.mock_auths(&[]);
+        client.pause(&admin);
     }
 
     #[test]
@@ -1783,7 +2015,72 @@ mod test {
     }
 
     #[test]
-    fn test_paused_contract_rejects_pay_usdc() {
+    #[should_panic]
+    fn test_old_admin_loses_authority_after_transfer() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let usdc = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let xlm_sac = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let contract_id = env.register(Stellar_CardReceiver, ());
+        let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+
+        env.mock_all_auths();
+        client.init(&admin, &treasury, &usdc, &xlm_sac);
+
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&new_admin);
+        assert_eq!(client.admin(), new_admin);
+
+        // DataKey::Admin now holds new_admin. Mock auth for the OLD admin
+        // ONLY (not new_admin) and try an admin-gated call — it must panic,
+        // proving the old admin no longer has authority, not merely that
+        // the getter reports a different address.
+        let someone = Address::generate(&env);
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "revoke_role",
+                args: (someone.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.revoke_role(&someone);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_transfer_admin_requires_new_admin_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let usdc = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let xlm_sac = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let contract_id = env.register(Stellar_CardReceiver, ());
+        let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+
+        env.mock_all_auths();
+        client.init(&admin, &treasury, &usdc, &xlm_sac);
+
+        // transfer_admin requires BOTH the current admin's and the new
+        // admin's auth. Mock only the current admin — the new admin's
+        // require_auth() must panic.
+        let new_admin = Address::generate(&env);
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "transfer_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.transfer_admin(&new_admin);
+    }
+
+    #[test]
+    fn test_pay_usdc_rejected_when_paused() {
         let f = Fixture::new();
         f.init();
 
