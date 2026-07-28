@@ -1,0 +1,35 @@
+name: Setup Node project
+description: Configure Node and restore deterministic npm and build caches
+
+inputs:
+  node-version:
+    description: Node.js version
+    required: true
+  working-directory:
+    description: Project directory containing package-lock.json
+    required: true
+  cache-version:
+    description: Increment to invalidate build caches
+    default: v1
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+        cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+    - name: Restore project build cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ inputs.working-directory }}/.eslintcache
+          ${{ inputs.working-directory }}/.next/cache
+          ${{ inputs.working-directory }}/node_modules/.cache
+          ${{ inputs.working-directory }}/*.tsbuildinfo
+        key: node-build-${{ runner.os }}-${{ inputs.node-version }}-${{ inputs.cache-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+        restore-keys: |
+          node-build-${{ runner.os }}-${{ inputs.node-version }}-${{ inputs.cache-version }}-
