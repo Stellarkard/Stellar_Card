@@ -9,6 +9,7 @@
 const { defineConfig, globalIgnores } = require('eslint/config');
 const js = require('@eslint/js');
 const globals = require('globals');
+const { noUnusedVars } = require('../eslint.shared.cjs');
 
 module.exports = defineConfig([
   js.configs.recommended,
@@ -23,10 +24,7 @@ module.exports = defineConfig([
     rules: {
       // Prefix with `_` to intentionally mark a param/binding as unused
       // (common in Express middleware signatures like `(err, req, res, next)`).
-      'no-unused-vars': [
-        'warn',
-        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' },
-      ],
+      'no-unused-vars': noUnusedVars,
       'no-console': 'off',
       // `catch (_) {}` is the established idiom here for intentionally
       // swallowing "already applied" errors in idempotent SQLite migrations

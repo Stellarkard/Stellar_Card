@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        project: [chromium, firefox, webkit, 'Mobile Chrome', 'Mobile Safari']
+        project: [chromium, firefox, webkit, 'Mobile Chrome', 'Mobile Safari', 'Microsoft Edge']
 
     steps:
       - uses: actions/checkout@v4
@@ -49,14 +49,17 @@ jobs:
 
       # Project names like "Mobile Chrome" / "Mobile Safari" are device
       # emulation presets, not installable browser engines — they run on
-      # the underlying chromium/webkit engine. Resolve the engine name so
-      # `playwright install` gets a name it understands.
+      # the underlying chromium/webkit engine. "Microsoft Edge" runs on
+      # the `msedge` channel, which Playwright installs as its own binary
+      # (not plain chromium). Resolve the engine name so `playwright
+      # install` gets a name it understands.
       - name: Resolve browser engine for project
         id: engine
         run: |
           case "${{ matrix.project }}" in
             "Mobile Chrome") ENGINE=chromium ;;
             "Mobile Safari") ENGINE=webkit ;;
+            "Microsoft Edge") ENGINE=msedge ;;
             *) ENGINE="${{ matrix.project }}" ;;
           esac
           echo "name=$ENGINE" >> "$GITHUB_OUTPUT"
