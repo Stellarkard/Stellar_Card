@@ -5,12 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { WalletInfo } from '@ctx.com/stellar-ows-core';
-import {
-  createOWSWallet,
-  importStellarKey,
-  getOWSPublicKey,
-  getOWSBalance,
-} from '../ows';
+import { createOWSWallet, importStellarKey, getOWSPublicKey, getOWSBalance } from '../ows';
 
 const VALID_STELLAR_SECRET = 'SBLJZDWSDV4BCYT6BUGIJBVX65LE34NLVTL7SR2L2FHUGMFQ7VYFJUMV';
 const VALID_STELLAR_PUBLIC_KEY = 'GCY5PWJB77OWDLLJ7QLW3KZUKFQSNGZVAOCP4XEWIUORVCKVJBDNR5FK';
@@ -52,9 +47,8 @@ vi.mock('@ctx.com/stellar-ows-core', () => ({
 
 // Mock Horizon server
 vi.mock('@stellar/stellar-sdk', async () => {
-  const actual = await vi.importActual<typeof import('@stellar/stellar-sdk')>(
-    '@stellar/stellar-sdk',
-  );
+  const actual =
+    await vi.importActual<typeof import('@stellar/stellar-sdk')>('@stellar/stellar-sdk');
   return {
     ...actual,
     Horizon: {

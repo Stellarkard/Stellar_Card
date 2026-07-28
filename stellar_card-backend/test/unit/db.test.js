@@ -13,9 +13,7 @@ const { db, resetDb } = require('../helpers/app');
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function insertApiKey({ id = uuidv4(), keyHash = `hash-${uuidv4()}`, label = 'test' } = {}) {
-  db.prepare(
-    `INSERT INTO api_keys (id, key_hash, label) VALUES (?, ?, ?)`,
-  ).run(id, keyHash, label);
+  db.prepare(`INSERT INTO api_keys (id, key_hash, label) VALUES (?, ?, ?)`).run(id, keyHash, label);
   return id;
 }
 
@@ -70,9 +68,7 @@ describe('db.js — schema initialization', () => {
 
 describe('db.js — system_state seed rows', () => {
   it('seeds the frozen flag as 0', () => {
-    const row = db
-      .prepare(`SELECT value FROM system_state WHERE key = 'frozen'`)
-      .get();
+    const row = db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get();
     assert.ok(row, 'frozen row should exist');
     assert.equal(row.value, '0');
   });
@@ -109,10 +105,7 @@ describe('db.js — orders table queries', () => {
 
   it('enforces PRIMARY KEY uniqueness on id', () => {
     const id = insertOrder();
-    assert.throws(
-      () => insertOrder({ id }),
-      /UNIQUE constraint failed: orders\.id/,
-    );
+    assert.throws(() => insertOrder({ id }), /UNIQUE constraint failed: orders\.id/);
   });
 
   it('allows updating order status', () => {

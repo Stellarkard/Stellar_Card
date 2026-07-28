@@ -1,4 +1,7 @@
 {
-  "*.{js,ts,mjs}": "eslint --fix",
-  "*.{ts,tsx}": "tsc --noEmit"
+  "stellar_card-frontend/**/*.{js,jsx,ts,tsx,mjs}": "eslint --fix --config stellar_card-frontend/eslint.config.mjs",
+  "stellar_card-backend/**/*.{js,mjs}": "eslint --fix --config stellar_card-backend/eslint.config.js",
+  "stellar_card-sdk/**/*.{ts,mjs}": "eslint --fix --config stellar_card-sdk/eslint.config.js",
+  "stellar_card-frontend/**/*.{ts,tsx}": "bash -c 'cd stellar_card-frontend && npm run typecheck'",
+  "stellar_card-sdk/**/*.ts": "bash -c 'cd stellar_card-sdk && npm run typecheck'"
 }

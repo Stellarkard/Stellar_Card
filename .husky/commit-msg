@@ -1,4 +1,20 @@
 #!/bin/sh
 # Validate commit message format with commitlint.
 # Requires @commitlint/cli and @commitlint/config-conventional in devDependencies.
-npx --no -- commitlint --edit "$1"
+#
+# Those only live in stellar_card-sdk/node_modules — this is a monorepo
+# with no root package.json/node_modules. Two separate problems follow:
+#
+#   1. `npx commitlint` can't find a local install by walking up from
+#      the repo root, and (with --no) refuses to fall back to
+#      installing the unrelated, differently-named top-level
+#      `commitlint` package from the registry — so invoke the CLI
+#      entrypoint directly instead of going through npx.
+#   2. The root .commitlintrc.json's `"extends": ["@commitlint/config-conventional"]`
+#      is resolved as a plain Node module lookup from the repo root
+#      (where the config file lives), which also has no node_modules.
+#      NODE_PATH adds stellar_card-sdk/node_modules as an extra global
+#      resolution path so that lookup succeeds regardless of cwd.
+HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SDK_DIR="$HOOK_DIR/../stellar_card-sdk"
+NODE_PATH="$SDK_DIR/node_modules" node "$SDK_DIR/node_modules/@commitlint/cli/lib/cli.js" --edit "$1"

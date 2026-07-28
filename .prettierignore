@@ -1,9 +1,34 @@
-node_modules
-dist
-build
-.next
-out
-coverage
-*.min.js
-pnpm-lock.yaml
-package-lock.json
+# Shared Prettier ignore for the whole monorepo (frontend, backend, sdk).
+# Each package's `format` / `format:check` script runs Prettier from its own
+# directory; Prettier resolves this file by walking up from the target files,
+# so it applies everywhere without duplication.
+
+# Dependency & build output
+**/node_modules/**
+**/dist/**
+**/build/**
+**/.next/**
+**/out/**
+**/coverage/**
+**/storybook-static/**
+**/target/**
+
+# Test artifacts
+**/playwright-report/**
+**/test-results/**
+**/blob-report/**
+
+# Lockfiles (formatting these is noisy and not useful)
+**/package-lock.json
+**/pnpm-lock.yaml
+**/yarn.lock
+
+# Generated / vendored
+**/*.wasm
+**/next-env.d.ts
+**/.tsbuildinfo
+**/*.min.js
+
+# Misc
+**/.DS_Store
+**/*.pem

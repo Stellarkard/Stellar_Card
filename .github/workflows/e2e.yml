@@ -12,8 +12,10 @@ on:
     branches:
       - main
       - develop
+      - 'feature/**'
     paths:
       - 'stellar_card-frontend/**'
+      - '.github/workflows/e2e.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,7 +23,7 @@ concurrency:
 
 jobs:
   e2e:
-    name: Playwright E2E (${{ matrix.shard }})
+    name: Playwright E2E (${{ matrix.project }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -45,8 +47,34 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright browsers & dependencies
-        run: npx playwright install --with-deps
+      # Playwright browser binaries are large (~100s of MB) and rarely
+      # change between runs — cache them keyed on the installed
+      # @playwright/test version and the matrix project (each project
+      # only needs its own browser, and matrix jobs run on isolated
+      # runners so there's no cross-project contamination to worry about).
+      - name: Get installed Playwright version
+        id: playwright-version
+        run: |
+          echo "version=$(node -e "console.log(require('./node_modules/@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ matrix.project }}-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers & dependencies (${{ matrix.project }})
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps ${{ matrix.project }}
+
+      # Even on a cache hit for the browser binary itself, the OS-level
+      # shared libraries Playwright needs (from `--with-deps`) live outside
+      # the cached path and won't survive a fresh runner — install just
+      # those cheaply.
+      - name: Install OS dependencies for Playwright (${{ matrix.project }})
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps ${{ matrix.project }}
 
       - name: Run E2E tests (${{ matrix.project }})
         run: npx playwright test --project=${{ matrix.project }}

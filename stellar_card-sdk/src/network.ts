@@ -101,7 +101,7 @@ function normalizeRpcEndpoint(
  *
  * @example
  * ```typescript
- * const config = resolveNetworkConfig({ 
+ * const config = resolveNetworkConfig({
  *   networkPassphrase: Networks.TESTNET,
  *   sorobanRpcUrl: 'https://custom-rpc.example.com'
  * });
@@ -110,7 +110,7 @@ function normalizeRpcEndpoint(
  */
 export function resolveNetworkConfig(config: NetworkConfig = {}): ResolvedNetworkConfig {
   const networkPassphrase = config.networkPassphrase ?? Networks.PUBLIC;
-  
+
   let defaultSorobanRpc: string;
   let defaultHorizon: string;
   let defaultName: string;
@@ -139,9 +139,9 @@ export function resolveNetworkConfig(config: NetworkConfig = {}): ResolvedNetwor
 
 /**
  * Return the default Soroban RPC URL for a given network passphrase.
- * 
+ *
  * Supports Mainnet, Testnet, and Futurenet networks.
- * 
+ *
  * @param networkPassphrase - Stellar network passphrase (defaults to mainnet)
  * @returns The default Soroban RPC URL for the specified network
  *
@@ -159,9 +159,9 @@ export function getDefaultSorobanRpcUrl(networkPassphrase = Networks.PUBLIC): st
 
 /**
  * Return the default Horizon URL for a given network passphrase.
- * 
+ *
  * Supports Mainnet, Testnet, and Futurenet networks.
- * 
+ *
  * @param networkPassphrase - Stellar network passphrase (defaults to mainnet)
  * @returns The default Horizon URL for the specified network
  *
@@ -179,7 +179,7 @@ export function getDefaultHorizonUrl(networkPassphrase = Networks.PUBLIC): strin
 
 /**
  * Create a custom network configuration for private or non-standard deployments.
- * 
+ *
  * @example
  * const config = createCustomNetworkConfig({
  *   networkPassphrase: 'Custom Network ; January 2025',
@@ -199,9 +199,9 @@ export function createCustomNetworkConfig(params: {
 
 /**
  * Validate that an RPC endpoint URL is well-formed.
- * 
+ *
  * Checks URL format and warns about insecure HTTP endpoints in production.
- * 
+ *
  * @param url - The RPC endpoint URL to validate
  * @param context - Optional context description for error messages
  * @throws {Error} When the URL is malformed or uses an invalid protocol
@@ -210,8 +210,8 @@ export function createCustomNetworkConfig(params: {
  * ```typescript
  * validateRpcEndpoint('https://rpc.example.com', 'Soroban RPC');
  * // Validates successfully
- * 
- * validateRpcEndpoint('ftp://invalid.com'); 
+ *
+ * validateRpcEndpoint('ftp://invalid.com');
  * // Throws: Invalid protocol: ftp:
  * ```
  */
@@ -225,12 +225,12 @@ export function validateRpcEndpoint(url: string, context?: string): void {
     if (parsed.protocol === 'http:' && !url.includes('localhost') && !url.includes('127.0.0.1')) {
       console.warn(
         `Warning: Using insecure HTTP endpoint ${url}${context ? ` for ${context}` : ''}. ` +
-        'Consider using HTTPS for production deployments.'
+          'Consider using HTTPS for production deployments.',
       );
     }
   } catch (err) {
     throw new Error(
-      `Invalid RPC endpoint URL "${url}"${context ? ` for ${context}` : ''}: ${(err as Error).message}`
+      `Invalid RPC endpoint URL "${url}"${context ? ` for ${context}` : ''}: ${(err as Error).message}`,
     );
   }
 }
@@ -264,9 +264,7 @@ export const NETWORK_ENV_VARS = {
  * build) this behaves exactly like {@link resolveNetworkConfig} with only the
  * supplied `overrides` applied.
  */
-export function resolveNetworkConfigFromEnv(
-  overrides: NetworkConfig = {},
-): ResolvedNetworkConfig {
+export function resolveNetworkConfigFromEnv(overrides: NetworkConfig = {}): ResolvedNetworkConfig {
   const env: Record<string, string | undefined> =
     typeof process !== 'undefined' && process.env ? process.env : {};
 
@@ -287,9 +285,7 @@ export function resolveNetworkConfigFromEnv(
   // Build endpoint configs only when a URL is present so the public defaults
   // still apply when a URL is omitted. The env apiKey/timeout are attached to
   // any explicitly-configured endpoint URL.
-  const buildEndpoint = (
-    url: string | undefined,
-  ): string | RpcEndpointConfig | undefined => {
+  const buildEndpoint = (url: string | undefined): string | RpcEndpointConfig | undefined => {
     if (url === undefined || url === '') return undefined;
     if (apiKey || timeout !== undefined) {
       return { url, apiKey, timeout };
@@ -298,12 +294,9 @@ export function resolveNetworkConfigFromEnv(
   };
 
   return resolveNetworkConfig({
-    networkPassphrase:
-      overrides.networkPassphrase ?? env[NETWORK_ENV_VARS.networkPassphrase],
-    sorobanRpcUrl:
-      overrides.sorobanRpcUrl ?? buildEndpoint(env[NETWORK_ENV_VARS.sorobanRpcUrl]),
-    horizonUrl:
-      overrides.horizonUrl ?? buildEndpoint(env[NETWORK_ENV_VARS.horizonUrl]),
+    networkPassphrase: overrides.networkPassphrase ?? env[NETWORK_ENV_VARS.networkPassphrase],
+    sorobanRpcUrl: overrides.sorobanRpcUrl ?? buildEndpoint(env[NETWORK_ENV_VARS.sorobanRpcUrl]),
+    horizonUrl: overrides.horizonUrl ?? buildEndpoint(env[NETWORK_ENV_VARS.horizonUrl]),
     networkName: overrides.networkName ?? env[NETWORK_ENV_VARS.networkName],
   });
 }
