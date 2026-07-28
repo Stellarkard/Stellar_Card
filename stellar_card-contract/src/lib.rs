@@ -133,10 +133,14 @@ impl Stellar_CardReceiver {
         env.storage().instance().set(&DataKey::XlmContract, &xlm_contract);
         env.storage().instance().set(&DataKey::Paused, &false);
 
-        // Grant Admin role to the admin address
-        let mut roles: Map<Address, Role> = Map::new(&env);
-        roles.set(admin.clone(), Role::Admin);
-        env.storage().instance().set(&DataKey::Roles, &roles);
+        // Grant the Admin role to the admin address itself. Without this,
+        // the deploying admin (the DataKey::Admin address) would satisfy
+        // admin-only checks but NOT role-based checks like has_role(...,
+        // Role::Admin) until someone remembered to self-grant it — a real
+        // gap a fresh deployment could otherwise silently hit.
+        let admin_role_key = DataKey::UserRole(admin.clone());
+        env.storage().persistent().set(&admin_role_key, &Role::Admin);
+        env.storage().persistent().extend_ttl(&admin_role_key, 17_280_000, 17_280_000);
 
         Self::extend_instance_ttl(&env);
     }
@@ -383,62 +387,6 @@ impl Stellar_CardReceiver {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
-    }
-
-    /// Pauses the contract, causing `pay_usdc`/`pay_xlm` to reject new
-    /// payments with `Error::ContractPaused` until `unpause` is called.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment
-    /// * `caller` - The address invoking pause (must authorize this call)
-    ///
-    /// # Authorization
-    /// Requires `caller` to hold at least the `Operator` role. Pausing is an
-    /// operational response to an incident, so it's granted to Operators
-    /// (not Admin-only) — the faster an incident responder can halt
-    /// payments, the smaller the blast radius. Resuming is stricter; see
-    /// `unpause`.
-    ///
-    /// # Panics
-    /// Panics if `caller` does not hold at least the `Operator` role, or if
-    /// `caller.require_auth()` fails.
-    pub fn pause(env: Env, caller: Address) {
-        caller.require_auth();
-        if !Self::has_role(env.clone(), caller, Role::Operator) {
-            panic!("pause requires at least the Operator role");
-        }
-        env.storage().instance().set(&DataKey::Paused, &true);
-        env.storage().instance().extend_ttl(17_280_000, 17_280_000);
-    }
-
-    /// Resumes the contract after a `pause`, allowing `pay_usdc`/`pay_xlm`
-    /// to accept payments again.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment
-    ///
-    /// # Authorization
-    /// Only the admin (the single address in `DataKey::Admin`, not merely an
-    /// `Admin`-role holder) can call this function — deliberately stricter
-    /// than `pause`, so resuming payments always requires the same
-    /// authority that can initialize or upgrade the contract.
-    pub fn unpause(env: Env) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Paused, &false);
-        env.storage().instance().extend_ttl(17_280_000, 17_280_000);
-    }
-
-    /// Returns whether the contract is currently paused.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment
-    ///
-    /// # Returns
-    /// `true` if paused, `false` otherwise (including before any pause/
-    /// unpause call has ever been made — the contract starts unpaused).
-    pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
     }
 
     /// Grants a role to an address.
@@ -1279,7 +1227,7 @@ mod test {
 
         let amount: i128 = 1_000_000;
 
-        let test_cases = vec![
+        let test_cases = [
             "",
             "order-1",
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -1288,7 +1236,7 @@ mod test {
             "order\nwith\nnewlines",
         ];
 
-        for (idx, order_id) in test_cases.iter().enumerate() {
+        for order_id in test_cases.iter() {
             f.mint_usdc(&f.payer, amount);
             let oid = order_bytes(&f.env, order_id);
             f.client().pay_usdc(&f.payer, &amount, &oid);
@@ -1748,7 +1696,7 @@ mod test {
     fn test_contract_starts_unpaused() {
         let f = Fixture::new();
         f.init();
-        assert_eq!(f.client().is_paused(), false);
+        assert_eq!(f.client().is_paused_view(), false);
     }
 
     #[test]
@@ -1760,7 +1708,7 @@ mod test {
         f.client().grant_role(&operator, &Role::Operator);
 
         f.client().pause(&operator);
-        assert_eq!(f.client().is_paused(), true);
+        assert_eq!(f.client().is_paused_view(), true);
     }
 
     #[test]
@@ -1772,7 +1720,7 @@ mod test {
         f.client().grant_role(&admin_role_holder, &Role::Admin);
 
         f.client().pause(&admin_role_holder);
-        assert_eq!(f.client().is_paused(), true);
+        assert_eq!(f.client().is_paused_view(), true);
     }
 
     #[test]
@@ -1805,10 +1753,10 @@ mod test {
         let operator = Address::generate(&f.env);
         f.client().grant_role(&operator, &Role::Operator);
         f.client().pause(&operator);
-        assert_eq!(f.client().is_paused(), true);
+        assert_eq!(f.client().is_paused_view(), true);
 
         f.client().unpause();
-        assert_eq!(f.client().is_paused(), false);
+        assert_eq!(f.client().is_paused_view(), false);
 
     }
 
@@ -2003,12 +1951,21 @@ mod test {
         assert_eq!(f.xlm_balance(&f.treasury), 1);
     }
 
+    mod upgrade_wasm {
+        soroban_sdk::contractimport!(
+            file = "target/wasm32-unknown-unknown/release/stellar_card_receiver.wasm"
+        );
+    }
+
     #[test]
     fn test_upgrade_works() {
         let f = Fixture::new();
         f.init();
 
-        let new_hash = BytesN::from_array(&f.env, &[1u8; 32]);
+        // `upgrade()` only needs a WASM hash that actually exists in the
+        // ledger — upload this same contract's own compiled WASM so the
+        // success path can be exercised without a second dummy contract.
+        let new_hash = f.env.deployer().upload_contract_wasm(upgrade_wasm::WASM);
         f.client().upgrade(&new_hash);
     }
 
