@@ -48,6 +48,7 @@
     "@vitest/browser-playwright": "^4.1.5",
     "@vitest/coverage-v8": "^4.1.5",
     "@vitest/ui": "^4.1.5",
+    "axe-core": "4.11.0",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.4",
     "eslint-plugin-storybook": "^10.4.6",
