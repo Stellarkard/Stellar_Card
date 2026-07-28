@@ -41,9 +41,32 @@ jobs:
           cache: npm
           cache-dependency-path: 'stellar_card-sdk/package-lock.json'
 
+      # Explicit npm cache with a content-addressed key so the cache is
+      # invalidated only when package-lock.json actually changes.  The
+      # restore-keys fallback lets a branch reuse a slightly stale cache
+      # rather than starting cold every time.
+      - name: Cache npm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-node${{ matrix.node-version }}-${{ hashFiles('stellar_card-sdk/package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-node${{ matrix.node-version }}-
+            npm-${{ runner.os }}-
+
       - name: Install dependencies
         working-directory: stellar_card-sdk
         run: npm ci
+
+      # Cache the TypeScript incremental build output so subsequent runs that
+      # touch only a few files compile faster.
+      - name: Cache TypeScript build
+        uses: actions/cache@v4
+        with:
+          path: stellar_card-sdk/.tsbuildinfo
+          key: tsbuild-${{ runner.os }}-node${{ matrix.node-version }}-${{ hashFiles('stellar_card-sdk/src/**', 'stellar_card-sdk/tsconfig*.json') }}
+          restore-keys: |
+            tsbuild-${{ runner.os }}-node${{ matrix.node-version }}-
 
       - name: Lint
         working-directory: stellar_card-sdk
@@ -97,6 +120,15 @@ jobs:
           node-version: 20.x
           cache: npm
           cache-dependency-path: 'stellar_card-sdk/package-lock.json'
+
+      - name: Cache npm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-ubuntu-node20-ts${{ matrix.typescript-version }}-${{ hashFiles('stellar_card-sdk/package-lock.json') }}
+          restore-keys: |
+            npm-ubuntu-node20-ts${{ matrix.typescript-version }}-
+            npm-ubuntu-node20-
 
       - name: Install dependencies
         working-directory: stellar_card-sdk
