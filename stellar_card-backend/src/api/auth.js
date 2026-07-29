@@ -15,6 +15,7 @@ const { Router } = require('express');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+const { z } = require('zod');
 const db = require('../db');
 const { sendLoginCode } = require('../lib/email');
 const { isPlatformOwner } = require('../lib/platform');
@@ -169,18 +170,6 @@ router.post(
   // src/middleware/validate.js).
   validateBody(loginBodySchema, { fieldErrorCode: 'invalid_email' }),
   asyncHandler(async (req, res, next) => {
-  const { email } = req.body;
-  const addr = normalizeEmail(email);
-
-  // Bootstrap guard: if OWNER_EMAIL is set and no users exist yet, reject non-matching emails.
-  // Prevents a race where a stranger claims owner on a fresh instance before the real owner.
-  const ownerEmail = process.env.OWNER_EMAIL?.trim().toLowerCase();
-  if (ownerEmail) {
-    const userCount = /** @type {any} */ (db.prepare(`SELECT COUNT(*) AS n FROM users`).get()).n;
-    if (userCount === 0 && addr !== ownerEmail) {
-      // Return generic success to avoid disclosing that the instance is unconfigured
-      return res.json({ ok: true });
-  async (req, res) => {
     const { email } = req.body;
     const addr = normalizeEmail(email);
 
@@ -247,7 +236,7 @@ router.post(
 
     // Generic response — don't reveal whether the email exists or was accepted
     res.json({ ok: true });
-  },
+  }),
 );
 
 // ── POST /auth/verify ────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ src/
 └── api/
     ├── version.js      # GET  /api/version
     ├── status.js       # GET  /status
+    ├── docs.js         # GET  /docs, /openapi.json (Swagger UI)
     ├── agent-claim.js  # POST /v1/agent/claim        (pre-auth)
     ├── agent.js        # POST /v1/agent/status       (post-auth)
     ├── usage.js        # GET  /v1/usage, /v1/policy/check

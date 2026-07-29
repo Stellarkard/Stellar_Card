@@ -47,6 +47,7 @@ const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const auth = require('../middleware/auth');
 const versionRouter = require('../api/version');
 const statusRouter = require('../api/status');
+const docsRouter = require('../api/docs');
 const agentClaimRouter = require('../api/agent-claim');
 const agentRouter = require('../api/agent');
 const usageRouter = require('../api/usage');
@@ -161,6 +162,7 @@ function registerRoutes(app) {
   // ── Unauthenticated surface ────────────────────────────────────────
   app.use(versionRouter);
   app.use(statusRouter);
+  app.use(docsRouter);
 
   // Rule 2: claim redemption predates the api key it hands out.
   app.use('/v1', agentClaimRouter);

@@ -9,8 +9,12 @@
 // errorCode that are reflected in the response. All other unhandled
 // errors fall back to a generic 500 / internal_error response.
 //
-// CORS errors are handled by an earlier inline middleware in app.js
-// and never reach this handler.
+// CORS errors are normally caught by an earlier inline middleware in
+// app.js, but this handler also recognizes the same "CORS: ..." error
+// shape defensively — it is the terminal handler, so any CORS error
+// that reaches it (e.g. thrown by middleware mounted after that inline
+// catch) still gets the standardized 403 response instead of a generic
+// 500.
 
 const { event: bizEvent, log } = require('../lib/logger');
 const { formatRejection } = require('../lib/process-handlers');
@@ -31,15 +35,12 @@ function errorHandler(err, req, res, _next) {
   console.error(logMessage);
   const requestId = req.id || res.getHeader('X-Request-ID');
 
-  // CORS structured denial from the cors() middleware.
   if (err && err.message && err.message.startsWith('CORS:')) {
     return res
       .status(403)
       .json({ error: 'forbidden', message: 'Origin not allowed', req_id: requestId });
   }
 
-  // Use the formatter from process-handlers to handle exotic thrown values safely
-  const payload = formatRejection(err);
   const rawStatus = Number(err?.statusCode ?? err?.status);
   const status =
     Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599 ? rawStatus : 500;
