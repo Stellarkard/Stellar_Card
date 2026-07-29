@@ -122,6 +122,17 @@ cargo test
 cargo fmt --check
 ```
 
+### Docker Development
+
+You can build the contract without installing Rust locally using Docker Compose:
+
+```bash
+# Build contract WASM
+docker compose --profile tools run --rm contract
+```
+
+For comprehensive Docker Compose documentation, see the project's [DOCKER_GUIDE.md](../DOCKER_GUIDE.md).
+
 ## Security & Dependabot
 
 - Dependencies in `Cargo.toml` are monitored automatically by Dependabot (`.github/dependabot.yml`).

@@ -205,6 +205,17 @@ try {
 - [stellar_card.com/llms.txt](https://stellar_card.com/llms.txt) — LLM-index of every docs surface
 - [github.com/CTX-com/Stellar_Card](https://github.com/CTX-com/Stellar_Card) — source
 
+## Docker Development
+
+You can test the SDK without installing Node.js locally using Docker Compose:
+
+```bash
+# Install dependencies and run SDK test suite
+docker compose --profile tools run --rm sdk
+```
+
+For comprehensive Docker Compose documentation, see the project's [DOCKER_GUIDE.md](../DOCKER_GUIDE.md).
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
