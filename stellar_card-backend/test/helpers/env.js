@@ -32,7 +32,7 @@ process.env.SMTP_HOST = 'localhost';
 process.env.SMTP_PORT = '25';
 process.env.SMTP_USER = 'test';
 process.env.SMTP_PASS = 'test';
-process.env.SMTP_FROM = 'noreply@stellar_card.test';
+process.env.SMTP_FROM = 'noreply@example.com';
 
 // Zero out retry delays so failure-path tests don't take 10s+ each
 process.env.RETRY_BACKOFF_MS = '0';

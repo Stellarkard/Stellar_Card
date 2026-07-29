@@ -80,6 +80,8 @@ describe('logger.log — production mode', () => {
     assert.equal(parsed.level, 'info');
     assert.equal(parsed.msg, 'hello world');
     assert.equal(parsed.key, 'value');
+    assert.equal(parsed.service, 'stellar_card-backend');
+    assert.equal(parsed.environment, 'production');
     assert.ok(parsed.ts, 'ts must be set');
   });
 

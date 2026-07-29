@@ -99,7 +99,13 @@ function deepFreeze(value) {
 // safeStringify so BigInt/circular payloads never throw (F2-logger).
 const structuralJsonFormat = winston.format((info) => {
   const { level, message, fields, ...rest } = info;
-  info[Symbol.for('message')] = safeStringify({ ...fields, ...rest, ts: now(), level, msg: message });
+  info[Symbol.for('message')] = safeStringify({
+    ...(fields && typeof fields === 'object' ? fields : {}),
+    ...rest,
+    ts: now(),
+    level,
+    msg: message,
+  });
   return info;
 })();
 
@@ -117,6 +123,11 @@ function safeWritable(targetStream) {
 
 function makeProdLogger() {
   return winston.createLogger({
+    level: process.env.LOG_LEVEL || 'info',
+    defaultMeta: {
+      service: 'stellar_card-backend',
+      environment: process.env.NODE_ENV || 'development',
+    },
     format: structuralJsonFormat,
     transports: [
       new winston.transports.Stream({
@@ -131,6 +142,11 @@ function makeProdLogger() {
 // pre-Winston behavior (error -> stderr, info/warn -> stdout) exactly.
 function makeProdErrorLogger() {
   return winston.createLogger({
+    level: 'error',
+    defaultMeta: {
+      service: 'stellar_card-backend',
+      environment: process.env.NODE_ENV || 'development',
+    },
     format: structuralJsonFormat,
     transports: [
       new winston.transports.Stream({

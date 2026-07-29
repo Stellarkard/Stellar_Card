@@ -9,6 +9,7 @@
 const { Router } = require('express');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const db = require('../db');
+const rateLimitHandler = require('../middleware/rateLimitHandler');
 
 const router = Router();
 
@@ -22,11 +23,7 @@ const claimLimiter = rateLimit({
   keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-  handler: (_, res) =>
-    res.status(429).json({
-      error: 'too_many_requests',
-      message: 'Too many claim attempts. Wait a minute and try again.',
-    }),
+  handler: rateLimitHandler('Too many claim attempts. Wait a minute and try again.'),
 });
 router.post('/agent/claim', claimLimiter, (req, res) => {
   const { event: bizEvent } = require('../lib/logger');
