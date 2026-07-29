@@ -1281,8 +1281,19 @@ module.exports.policyCheck = policyCheck;
 module.exports.openSSEStreamCount = openSSEStreamCount;
 module.exports.tryAcquireStreamSlot = tryAcquireStreamSlot;
 module.exports.releaseStreamSlot = releaseStreamSlot;
-// Exported so app.js can reuse the same per-key bucket on the small
-// read endpoints it still owns (/v1/policy/check, /v1/usage). Keeping
-// a single limiter for "agent reads" means one noisy key can't steal
-// its own poll budget by spamming preview endpoints.
+// Exported so api/usage.js can reuse the same per-key bucket on the small
+// read endpoints (/v1/policy/check, /v1/usage). Keeping a single limiter
+// for "agent reads" means one noisy key can't steal its own poll budget
+// by spamming preview endpoints.
 module.exports.orderPollLimiter = orderPollLimiter;
+
+// Exported for api/openapi.js so the published schema is derived from the
+// same constants the validation enforces. A documented bound that the
+// server does not apply — or applies differently — is worse than no
+// documentation at all, because a client trusts it.
+module.exports.ORDER_STATUSES = ORDER_STATUSES;
+module.exports.AMOUNT_USDC_SHAPE = AMOUNT_USDC_SHAPE;
+module.exports.MIN_ORDER_USDC = MIN_ORDER_USDC;
+module.exports.MAX_ORDER_USDC = MAX_ORDER_USDC;
+module.exports.MAX_METADATA_JSON_BYTES = MAX_METADATA_JSON_BYTES;
+module.exports.MAX_WEBHOOK_URL_CHARS = MAX_WEBHOOK_URL_CHARS;

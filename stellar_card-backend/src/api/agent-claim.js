@@ -7,12 +7,34 @@
 // routes/index.js for the mount ordering that makes that safe.
 
 const { Router } = require('express');
+const { z } = require('zod');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const db = require('../db');
 const { AppError } = require('../lib/app-error');
+const { validate, patternString } = require('../lib/validate');
 const rateLimitHandler = require('../middleware/rateLimitHandler');
 
 const router = Router();
+
+// ── Request schema ─────────────────────────────────────────────────────────
+//
+// One field, but it is the one endpoint on /v1 reachable without a
+// credential, so the shape guard is the only thing standing between an
+// anonymous caller and the redemption transaction. `/\S/` rejects the
+// empty string, a whitespace-only code, and every non-string — the last
+// of which used to fall through the `typeof` ternary to '' and produce
+// the same `missing_code` this schema returns.
+//
+// The code itself is not pattern-matched beyond "non-empty": it is
+// looked up by SHA-256 hash against a UNIQUE column, so an unknown
+// format is indistinguishable from an unknown code and both must return
+// the same generic 401 rather than leaking which one it was.
+const ClaimBody = z.object({ code: patternString(/\S/, 'code is required') }).passthrough();
+
+const validateClaim = validate({
+  body: ClaimBody,
+  errorCodes: { code: 'missing_code' },
+});
 
 // The agent posts a code minted by the dashboard; we return the real
 // api_key once, then mark the code used so it can never be redeemed
@@ -26,15 +48,12 @@ const claimLimiter = rateLimit({
   legacyHeaders: false,
   handler: rateLimitHandler('Too many claim attempts. Wait a minute and try again.'),
 });
-router.post('/agent/claim', claimLimiter, (req, res, next) => {
+router.post('/agent/claim', claimLimiter, validateClaim, (req, res, next) => {
   const { event: bizEvent } = require('../lib/logger');
   const secretBox = require('../lib/secret-box');
   const { hashClaimCode } = require('../lib/claim-hash');
   const { recordAudit } = require('../lib/audit');
-  const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
-  if (!code) {
-    return res.status(400).json({ error: 'missing_code', message: 'code is required' });
-  }
+  const code = req.body.code.trim();
 
   // F1: the DB stores SHA256(code), not the code itself. Hash before
   // lookup so the UNIQUE constraint still matches the mint path.
@@ -121,7 +140,13 @@ router.post('/agent/claim', claimLimiter, (req, res, next) => {
         code_hash_prefix: codeHash.slice(0, 12),
         error: err instanceof Error ? err.message : String(err),
       });
-      return next(new AppError(500, 'claim_decrypt_failed', 'Failed to decrypt claim payload. Contact support if this persists.'));
+      return next(
+        new AppError(
+          500,
+          'claim_decrypt_failed',
+          'Failed to decrypt claim payload. Contact support if this persists.',
+        ),
+      );
     }
     // Any other unexpected throw inside the txn — rethrow so Express
     // emits a 500 via its default error handler. Shouldn't happen in

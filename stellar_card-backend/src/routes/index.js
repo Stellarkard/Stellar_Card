@@ -47,6 +47,7 @@ const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const auth = require('../middleware/auth');
 const versionRouter = require('../api/version');
 const statusRouter = require('../api/status');
+const docsRouter = require('../api/docs');
 const agentClaimRouter = require('../api/agent-claim');
 const agentRouter = require('../api/agent');
 const usageRouter = require('../api/usage');
@@ -161,6 +162,11 @@ function registerRoutes(app) {
   // ── Unauthenticated surface ────────────────────────────────────────
   app.use(versionRouter);
   app.use(statusRouter);
+  // The published contract, and Swagger UI over it. Unauthenticated by
+  // design: an integrator has to be able to read the API before they
+  // have a key to call it with. Only the public and agent-facing routes
+  // are described — see the scope note in api/openapi.js.
+  app.use(docsRouter);
 
   // Rule 2: claim redemption predates the api key it hands out.
   app.use('/v1', agentClaimRouter);

@@ -26,6 +26,8 @@ const { AppError } = require('../lib/app-error');
  * @param {import('express').NextFunction} _next
  */
 function errorHandler(err, req, res, _next) {
+  // formatRejection handles exotic thrown values (strings, null, objects
+  // without a stack) safely, so every branch below can read .name/.message.
   const payload = formatRejection(err);
   const logMessage = `[app] unhandled error on ${req.method} ${req.originalUrl || req.path}: ${payload.name}: ${payload.message}${payload.stack ? `\n${payload.stack}` : ''}`;
   console.error(logMessage);
@@ -38,8 +40,6 @@ function errorHandler(err, req, res, _next) {
       .json({ error: 'forbidden', message: 'Origin not allowed', req_id: requestId });
   }
 
-  // Use the formatter from process-handlers to handle exotic thrown values safely
-  const payload = formatRejection(err);
   const rawStatus = Number(err?.statusCode ?? err?.status);
   const status =
     Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599 ? rawStatus : 500;

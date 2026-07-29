@@ -1041,9 +1041,12 @@ describe('db.js — auth_codes table queries', () => {
   it('inserts and retrieves an auth code by email', () => {
     const id = uuidv4();
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    db.prepare(
-      `INSERT INTO auth_codes (id, email, code_hash, expires_at) VALUES (?, ?, ?, ?)`,
-    ).run(id, 'alice@example.com', 'hashed-code', expiresAt);
+    db.prepare(`INSERT INTO auth_codes (id, email, code_hash, expires_at) VALUES (?, ?, ?, ?)`).run(
+      id,
+      'alice@example.com',
+      'hashed-code',
+      expiresAt,
+    );
 
     const rows = db.prepare(`SELECT * FROM auth_codes WHERE email = ?`).all('alice@example.com');
     assert.equal(rows.length, 1);
@@ -1053,9 +1056,12 @@ describe('db.js — auth_codes table queries', () => {
   it('marking a code used sets used_at', () => {
     const id = uuidv4();
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    db.prepare(
-      `INSERT INTO auth_codes (id, email, code_hash, expires_at) VALUES (?, ?, ?, ?)`,
-    ).run(id, 'alice@example.com', 'hashed-code', expiresAt);
+    db.prepare(`INSERT INTO auth_codes (id, email, code_hash, expires_at) VALUES (?, ?, ?, ?)`).run(
+      id,
+      'alice@example.com',
+      'hashed-code',
+      expiresAt,
+    );
 
     db.prepare(`UPDATE auth_codes SET used_at = datetime('now') WHERE id = ?`).run(id);
     const row = db.prepare(`SELECT used_at FROM auth_codes WHERE id = ?`).get(id);
@@ -1158,9 +1164,7 @@ describe('db.js — webhook_deliveries table queries', () => {
        VALUES (?, ?, ?, ?)`,
     ).run('dash-1', 'https://example.com/hook', 200, 42);
 
-    const row = db
-      .prepare(`SELECT * FROM webhook_deliveries WHERE dashboard_id = ?`)
-      .get('dash-1');
+    const row = db.prepare(`SELECT * FROM webhook_deliveries WHERE dashboard_id = ?`).get('dash-1');
     assert.ok(row);
     assert.equal(row.method, 'POST', 'method should default to POST');
     assert.equal(row.response_status, 200);
@@ -1168,18 +1172,577 @@ describe('db.js — webhook_deliveries table queries', () => {
 
   it('orders deliveries by created_at DESC for the dashboard feed query', () => {
     const insertAt = (url) =>
-      db
-        .prepare(`INSERT INTO webhook_deliveries (dashboard_id, url) VALUES ('dash-1', ?)`)
-        .run(url).lastInsertRowid;
+      db.prepare(`INSERT INTO webhook_deliveries (dashboard_id, url) VALUES ('dash-1', ?)`).run(url)
+        .lastInsertRowid;
     insertAt('https://example.com/first');
     insertAt('https://example.com/second');
 
     const rows = db
-      .prepare(
-        `SELECT url FROM webhook_deliveries WHERE dashboard_id = 'dash-1' ORDER BY id DESC`,
-      )
+      .prepare(`SELECT url FROM webhook_deliveries WHERE dashboard_id = 'dash-1' ORDER BY id DESC`)
       .all();
     assert.equal(rows[0].url, 'https://example.com/second');
     assert.equal(rows[1].url, 'https://example.com/first');
+  });
+});
+
+// ── The retry queue ───────────────────────────────────────────────────────
+//
+// webhook_queue is the one table where a query-shape regression is
+// invisible: a scan that picks up too few rows silently drops customer
+// webhooks, and one that picks up too many re-fires deliveries that
+// already succeeded. Neither changes a function signature and neither
+// throws. These pin the two predicates that decide which rows move.
+
+function queueWebhook({
+  id = uuidv4(),
+  url = 'https://example.com/hook',
+  attempts = 0,
+  nextAttempt = new Date().toISOString(),
+  delivered = 0,
+} = {}) {
+  db.prepare(
+    `INSERT INTO webhook_queue (id, url, payload, attempts, next_attempt, delivered)
+     VALUES (?, ?, '{}', ?, ?, ?)`,
+  ).run(id, url, attempts, nextAttempt, delivered);
+  return id;
+}
+
+describe('db.js — webhook_queue table queries', () => {
+  const MAX_WEBHOOK_ATTEMPTS = 3;
+
+  beforeEach(() => resetDb());
+
+  /** The exact scan jobs.js::retryWebhooks runs on every cycle. */
+  function dueRows(now) {
+    return db
+      .prepare(
+        `SELECT id FROM webhook_queue
+         WHERE delivered = 0 AND attempts <= ? AND next_attempt <= ?`,
+      )
+      .all(MAX_WEBHOOK_ATTEMPTS, now);
+  }
+
+  it('applies the defaults a freshly-queued delivery relies on', () => {
+    db.prepare(
+      `INSERT INTO webhook_queue (id, url, payload, next_attempt)
+       VALUES ('w1', 'https://example.com/hook', '{}', '2026-01-01T00:00:00.000Z')`,
+    ).run();
+
+    const row = db.prepare(`SELECT * FROM webhook_queue WHERE id = 'w1'`).get();
+    assert.equal(row.attempts, 0, 'a new row must start at zero attempts');
+    assert.equal(row.delivered, 0, 'a new row must start undelivered');
+    assert.equal(row.secret, null);
+    assert.equal(row.last_error, null);
+    assert.ok(row.created_at, 'created_at defaults to datetime(now)');
+  });
+
+  it('rejects a queued row with no destination or payload', () => {
+    // Both are NOT NULL: a row missing either is a delivery that can
+    // never fire but keeps getting scanned.
+    assert.throws(
+      () =>
+        db
+          .prepare(`INSERT INTO webhook_queue (id, url, payload, next_attempt) VALUES (?,?,?,?)`)
+          .run('w-null-url', null, '{}', '2026-01-01T00:00:00.000Z'),
+      /NOT NULL/,
+    );
+    assert.throws(
+      () =>
+        db
+          .prepare(`INSERT INTO webhook_queue (id, url, payload, next_attempt) VALUES (?,?,?,?)`)
+          .run('w-null-payload', 'https://example.com', null, '2026-01-01T00:00:00.000Z'),
+      /NOT NULL/,
+    );
+  });
+
+  it('picks up only rows that are undelivered, under the cap, and due', () => {
+    const now = '2026-01-01T12:00:00.000Z';
+    const due = queueWebhook({ nextAttempt: '2026-01-01T11:00:00.000Z' });
+    queueWebhook({ nextAttempt: '2026-01-01T13:00:00.000Z' }); // not due yet
+    queueWebhook({ nextAttempt: '2026-01-01T11:00:00.000Z', delivered: 1 }); // done
+    queueWebhook({ nextAttempt: '2026-01-01T11:00:00.000Z', attempts: 4 }); // abandoned
+
+    const ids = dueRows(now).map((r) => r.id);
+    assert.deepEqual(ids, [due]);
+  });
+
+  it('treats next_attempt as inclusive, so a row due exactly now fires', () => {
+    const now = '2026-01-01T12:00:00.000Z';
+    const exact = queueWebhook({ nextAttempt: now });
+    assert.deepEqual(
+      dueRows(now).map((r) => r.id),
+      [exact],
+    );
+  });
+
+  it('compares next_attempt lexically, which only sorts for ISO-8601', () => {
+    // The column is TEXT and the comparison is a string comparison. A
+    // non-ISO timestamp does not sort chronologically, so a row written
+    // with one is either permanently due or permanently invisible —
+    // this pins that the queue writers must keep using toISOString().
+    queueWebhook({ id: 'iso', nextAttempt: '2026-01-01T11:00:00.000Z' });
+    queueWebhook({ id: 'human', nextAttempt: 'Jan 1 2026 11:00' });
+
+    const ids = dueRows('2026-01-01T12:00:00.000Z').map((r) => r.id);
+    assert.deepEqual(ids, ['iso'], 'a non-ISO next_attempt sorts above every ISO timestamp');
+  });
+
+  it('marks a row delivered without disturbing its attempt history', () => {
+    const id = queueWebhook({ attempts: 2 });
+    db.prepare(`UPDATE webhook_queue SET delivered = 1 WHERE id = ?`).run(id);
+
+    const row = db.prepare(`SELECT * FROM webhook_queue WHERE id = ?`).get(id);
+    assert.equal(row.delivered, 1);
+    assert.equal(row.attempts, 2, 'attempts is forensic history, not a live counter');
+    assert.equal(dueRows('2030-01-01T00:00:00.000Z').length, 0);
+  });
+
+  it('counts permanently-failed deliveries the way /status does', () => {
+    // jobs.js pushes attempts past MAX_WEBHOOK_ATTEMPTS to abandon a
+    // delivery; /status reports how many of those landed in the last
+    // 24h. Before that counter existed, an abandoned webhook was only
+    // visible by querying this table by hand.
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    queueWebhook({ attempts: MAX_WEBHOOK_ATTEMPTS + 1 });
+    queueWebhook({ attempts: MAX_WEBHOOK_ATTEMPTS + 1 });
+    queueWebhook({ attempts: MAX_WEBHOOK_ATTEMPTS + 1, delivered: 1 }); // recovered
+    queueWebhook({ attempts: 1 }); // still retrying
+
+    const n = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM webhook_queue
+         WHERE delivered = 0 AND attempts > ? AND created_at >= ?`,
+      )
+      .get(MAX_WEBHOOK_ATTEMPTS, since).n;
+    assert.equal(n, 2);
+  });
+
+  it('plans the retry scan through idx_webhook_queue_next', () => {
+    // The scan runs on every job cycle over a table that only grows.
+    // A dropped index turns it into a full scan that degrades silently.
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM webhook_queue
+         WHERE delivered = 0 AND attempts <= ? AND next_attempt <= ?`,
+      )
+      .all(MAX_WEBHOOK_ATTEMPTS, '2026-01-01T00:00:00.000Z');
+    const detail = plan.map((r) => r.detail).join(' ');
+    assert.match(detail, /idx_webhook_queue_next/, `expected an index scan, got: ${detail}`);
+  });
+});
+
+// ── The expiry predicate ──────────────────────────────────────────────────
+//
+// Three separate single-use credentials — login codes, agent claim codes,
+// and MPP challenges — are all gated on the same SQL shape:
+//
+//   WHERE used_at IS NULL AND datetime(expires_at) > datetime('now')
+//
+// Its failure mode is quiet in both directions. `datetime()` returns NULL
+// for anything it cannot parse, and a NULL comparison is NULL rather than
+// false, so a malformed expires_at makes a credential permanently
+// unredeemable instead of raising. Getting the comparison the other way
+// round makes an expired credential redeemable forever.
+
+describe('db.js — credential expiry semantics', () => {
+  beforeEach(() => resetDb());
+
+  const future = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const past = () => new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+  function insertAuthCode({ email = 'user@example.com', codeHash = uuidv4(), expiresAt } = {}) {
+    db.prepare(`INSERT INTO auth_codes (id, email, code_hash, expires_at) VALUES (?, ?, ?, ?)`).run(
+      uuidv4(),
+      email,
+      codeHash,
+      expiresAt,
+    );
+    return codeHash;
+  }
+
+  /** The redemption UPDATE from POST /auth/verify, verbatim. */
+  function redeemAuthCode(email, codeHash) {
+    return db
+      .prepare(
+        `UPDATE auth_codes SET used_at = ?
+         WHERE email = ? AND code_hash = ?
+           AND used_at IS NULL
+           AND datetime(expires_at) > datetime('now')`,
+      )
+      .run(new Date().toISOString(), email, codeHash);
+  }
+
+  it('redeems a live, unused code exactly once', () => {
+    const hash = insertAuthCode({ expiresAt: future() });
+    assert.equal(redeemAuthCode('user@example.com', hash).changes, 1);
+    assert.equal(
+      redeemAuthCode('user@example.com', hash).changes,
+      0,
+      'the used_at IS NULL clause is what makes redemption single-use',
+    );
+  });
+
+  it('refuses an expired code', () => {
+    const hash = insertAuthCode({ expiresAt: past() });
+    assert.equal(redeemAuthCode('user@example.com', hash).changes, 0);
+  });
+
+  it('refuses a code whose expires_at datetime() cannot parse', () => {
+    // NULL > datetime('now') is NULL, not true — so the row is excluded.
+    // Failing closed is the correct direction, and this test is here so
+    // a future rewrite to `expires_at > datetime('now')` (a lexical
+    // comparison, which WOULD match) is caught.
+    const hash = insertAuthCode({ expiresAt: 'next tuesday' });
+    assert.equal(redeemAuthCode('user@example.com', hash).changes, 0);
+
+    const parsed = db
+      .prepare(`SELECT datetime(expires_at) AS parsed FROM auth_codes WHERE code_hash = ?`)
+      .get(hash);
+    assert.equal(parsed.parsed, null, 'datetime() yields NULL rather than raising');
+  });
+
+  it('scopes redemption to the email, so a code cannot be replayed across accounts', () => {
+    const hash = insertAuthCode({ email: 'owner@example.com', expiresAt: future() });
+    assert.equal(redeemAuthCode('attacker@example.com', hash).changes, 0);
+    assert.equal(redeemAuthCode('owner@example.com', hash).changes, 1);
+  });
+
+  it('ticks failed_attempts across every live code for an email', () => {
+    // A wrong guess has no matching row to tick, so the lockout counter
+    // increments every active code for that address instead.
+    insertAuthCode({ email: 'user@example.com', expiresAt: future() });
+    insertAuthCode({ email: 'user@example.com', expiresAt: future() });
+    insertAuthCode({ email: 'user@example.com', expiresAt: past() });
+    insertAuthCode({ email: 'other@example.com', expiresAt: future() });
+
+    const touched = db
+      .prepare(
+        `UPDATE auth_codes SET failed_attempts = failed_attempts + 1
+         WHERE email = ? AND used_at IS NULL AND datetime(expires_at) > datetime('now')`,
+      )
+      .run('user@example.com');
+    assert.equal(touched.changes, 2, 'expired codes and other addresses are untouched');
+
+    const max = db
+      .prepare(
+        `SELECT MAX(failed_attempts) AS m FROM auth_codes
+         WHERE email = ? AND used_at IS NULL AND datetime(expires_at) > datetime('now')`,
+      )
+      .get('user@example.com').m;
+    assert.equal(max, 1);
+  });
+
+  it('returns NULL from the MAX lockout probe when no live code remains', () => {
+    // The handler compares this against a threshold, so it has to be
+    // null (not 0) for the "no codes at all" case to stay distinguishable.
+    const m = db
+      .prepare(
+        `SELECT MAX(failed_attempts) AS m FROM auth_codes
+         WHERE email = ? AND used_at IS NULL AND datetime(expires_at) > datetime('now')`,
+      )
+      .get('nobody@example.com').m;
+    assert.equal(m, null);
+  });
+
+  it('applies the same predicate to agent claim redemption', () => {
+    const keyId = insertApiKey();
+    const insertClaim = (code, expiresAt) =>
+      db
+        .prepare(
+          `INSERT INTO agent_claims (id, code, api_key_id, sealed_payload, expires_at)
+           VALUES (?, ?, ?, 'sealed', ?)`,
+        )
+        .run(uuidv4(), code, keyId, expiresAt);
+
+    insertClaim('live', future());
+    insertClaim('expired', past());
+
+    const redeem = (code) =>
+      db
+        .prepare(
+          `UPDATE agent_claims SET used_at = ?, sealed_payload = ''
+           WHERE code = ? AND used_at IS NULL AND datetime(expires_at) > datetime('now')`,
+        )
+        .run(new Date().toISOString(), code).changes;
+
+    assert.equal(redeem('expired'), 0);
+    assert.equal(redeem('live'), 1);
+    assert.equal(redeem('live'), 0, 'a redeemed claim can never be redeemed again');
+
+    const row = db.prepare(`SELECT sealed_payload FROM agent_claims WHERE code = 'live'`).get();
+    assert.equal(row.sealed_payload, '', 'redemption wipes the sealed key in the same statement');
+  });
+
+  it('keeps an unredeemed MPP challenge visible to the expiry sweep', () => {
+    const live = uuidv4();
+    const insertChallenge = (id, expiresAt, redeemedAt = null) =>
+      db
+        .prepare(
+          `INSERT INTO mpp_challenges (id, resource_path, amount_usdc, expires_at, redeemed_at)
+           VALUES (?, '/v1/cards/visa/10', '10.00', ?, ?)`,
+        )
+        .run(id, expiresAt, redeemedAt);
+
+    insertChallenge(live, past());
+    insertChallenge(uuidv4(), past(), new Date().toISOString()); // already redeemed
+    insertChallenge(uuidv4(), future());
+
+    const sweepable = db
+      .prepare(
+        `SELECT id FROM mpp_challenges
+         WHERE redeemed_at IS NULL AND datetime(expires_at) <= datetime('now')`,
+      )
+      .all();
+    assert.deepEqual(
+      sweepable.map((r) => r.id),
+      [live],
+    );
+  });
+});
+
+// ── System state ──────────────────────────────────────────────────────────
+
+describe('db.js — system_state upsert semantics', () => {
+  beforeEach(() => resetDb());
+
+  it('advances a cursor in place rather than accumulating rows', () => {
+    // saveStartLedger runs INSERT OR REPLACE on every watcher tick. If
+    // `key` ever stopped being the primary key, this would grow a row
+    // per ledger and sysStateInt would start reading an arbitrary one.
+    const save = (value) =>
+      db
+        .prepare(
+          `INSERT OR REPLACE INTO system_state (key, value) VALUES ('stellar_start_ledger', ?)`,
+        )
+        .run(value);
+
+    save('100');
+    save('101');
+    save('102');
+
+    const rows = db
+      .prepare(`SELECT value FROM system_state WHERE key = 'stellar_start_ledger'`)
+      .all();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].value, '102');
+  });
+
+  it('coerces a bound number to TEXT, which is why every writer passes a string', () => {
+    // TEXT affinity stringifies whatever is bound, and better-sqlite3
+    // binds a JS number as REAL — so `42` lands as '42.0', not '42'.
+    // sysStateInt survives that via parseInt, but a reader comparing
+    // === '42' would not, which is why saveStartLedger binds
+    // String(ledger) rather than the number.
+    db.prepare(`INSERT OR REPLACE INTO system_state (key, value) VALUES ('probe', ?)`).run(42);
+    const asNumber = db.prepare(`SELECT value FROM system_state WHERE key = 'probe'`).get();
+    assert.equal(typeof asNumber.value, 'string');
+    assert.equal(asNumber.value, '42.0');
+    assert.equal(parseInt(asNumber.value, 10), 42);
+
+    db.prepare(`INSERT OR REPLACE INTO system_state (key, value) VALUES ('probe', ?)`).run('42');
+    const asString = db.prepare(`SELECT value FROM system_state WHERE key = 'probe'`).get();
+    assert.equal(asString.value, '42');
+  });
+
+  it('returns undefined for a key that was never written', () => {
+    // sysStateInt reads `row?.value || '0'`, so the missing-key case has
+    // to be undefined rather than a row with a NULL value.
+    const row = db.prepare(`SELECT value FROM system_state WHERE key = 'never_set'`).get();
+    assert.equal(row, undefined);
+  });
+
+  it('reads the freeze flag as the exact string /status compares against', () => {
+    db.prepare(`UPDATE system_state SET value = '1' WHERE key = 'frozen'`).run();
+    const frozen = db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get();
+    assert.equal(frozen.value, '1', 'the comparison is === "1", so a numeric 1 would not match');
+  });
+});
+
+// ── Silent-failure surfaces ───────────────────────────────────────────────
+
+describe('db.js — stellar_dead_letter table queries', () => {
+  beforeEach(() => resetDb());
+
+  function deadLetter(txHash, ledger = 1) {
+    db.prepare(
+      `INSERT INTO stellar_dead_letter (tx_hash, ledger, raw_event, error)
+       VALUES (?, ?, '{}', 'parse failed')`,
+    ).run(txHash, ledger);
+  }
+
+  it('keys on tx_hash so a replayed ledger cannot double-record an event', () => {
+    // The watcher re-reads ledgers on restart. Without the primary key
+    // the same unparseable event would inflate the /status counter on
+    // every replay and read as an ongoing incident.
+    deadLetter('tx-1');
+    assert.throws(() => deadLetter('tx-1'), /UNIQUE constraint failed/);
+    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM stellar_dead_letter`).get().n, 1);
+  });
+
+  it('counts only the last 24h, the window /status reports on', () => {
+    deadLetter('tx-recent');
+    deadLetter('tx-old');
+    db.prepare(`UPDATE stellar_dead_letter SET created_at = ? WHERE tx_hash = 'tx-old'`).run(
+      '2020-01-01T00:00:00.000Z',
+    );
+
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const n = db
+      .prepare(`SELECT COUNT(*) AS n FROM stellar_dead_letter WHERE created_at >= ?`)
+      .get(since).n;
+    assert.equal(n, 1);
+  });
+
+  it('requires the raw event and the error, so a row is always actionable', () => {
+    assert.throws(
+      () =>
+        db
+          .prepare(
+            `INSERT INTO stellar_dead_letter (tx_hash, ledger, raw_event, error)
+             VALUES ('tx-2', 1, NULL, 'boom')`,
+          )
+          .run(),
+      /NOT NULL/,
+    );
+  });
+});
+
+describe('db.js — unmatched_payments table queries', () => {
+  beforeEach(() => resetDb());
+
+  function unmatched({ id = uuidv4(), reason = 'unknown_order', refundTxid = null } = {}) {
+    db.prepare(
+      `INSERT INTO unmatched_payments (id, stellar_txid, reason, refund_stellar_txid)
+       VALUES (?, ?, ?, ?)`,
+    ).run(id, `tx-${id}`, reason, refundTxid);
+    return id;
+  }
+
+  it('lists the un-refunded backlog through the partial index', () => {
+    const pending = unmatched();
+    unmatched({ refundTxid: 'refund-tx' });
+
+    const rows = db
+      .prepare(
+        `SELECT id FROM unmatched_payments WHERE refund_stellar_txid IS NULL ORDER BY created_at`,
+      )
+      .all();
+    assert.deepEqual(
+      rows.map((r) => r.id),
+      [pending],
+    );
+
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT id FROM unmatched_payments WHERE refund_stellar_txid IS NULL ORDER BY created_at`,
+      )
+      .all();
+    const detail = plan.map((r) => r.detail).join(' ');
+    assert.match(detail, /idx_unmatched_payments_pending/, `expected the partial index: ${detail}`);
+  });
+
+  it('records the reason a payment could not be matched', () => {
+    // reason is NOT NULL because a row without one cannot be triaged —
+    // the operator has no way to tell a wrong-asset payment from a
+    // post-expiry one.
+    assert.throws(
+      () =>
+        db
+          .prepare(
+            `INSERT INTO unmatched_payments (id, stellar_txid, reason) VALUES (?, 'tx-x', NULL)`,
+          )
+          .run(uuidv4()),
+      /NOT NULL/,
+    );
+  });
+
+  it('allows several unmatched payments to claim the same order id', () => {
+    // claimed_order_id is deliberately unconstrained: two senders can
+    // both quote the same memo, and both rows have to survive for the
+    // operator to see the collision.
+    const a = unmatched();
+    const b = unmatched();
+    db.prepare(`UPDATE unmatched_payments SET claimed_order_id = 'order-1' WHERE id IN (?, ?)`).run(
+      a,
+      b,
+    );
+    assert.equal(
+      db
+        .prepare(`SELECT COUNT(*) AS n FROM unmatched_payments WHERE claimed_order_id = 'order-1'`)
+        .get().n,
+      2,
+    );
+  });
+});
+
+describe('db.js — policy_decisions table queries', () => {
+  beforeEach(() => resetDb());
+
+  function decide(apiKeyId, { decision = 'approved', rule = 'under_limit', amount = '5.00' } = {}) {
+    const id = uuidv4();
+    db.prepare(
+      `INSERT INTO policy_decisions (id, api_key_id, decision, rule, reason, amount_usdc)
+       VALUES (?, ?, ?, ?, 'test', ?)`,
+    ).run(id, apiKeyId, decision, rule, amount);
+    return id;
+  }
+
+  it('scopes the decision history to one api key', () => {
+    const mine = insertApiKey();
+    const theirs = insertApiKey();
+    decide(mine);
+    decide(mine, { decision: 'blocked', rule: 'daily_limit_exceeded' });
+    decide(theirs);
+
+    const rows = db
+      .prepare(
+        `SELECT decision FROM policy_decisions WHERE api_key_id = ? ORDER BY created_at DESC`,
+      )
+      .all(mine);
+    assert.equal(rows.length, 2);
+  });
+
+  it('plans the per-key history query through its composite index', () => {
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM policy_decisions WHERE api_key_id = ? ORDER BY created_at DESC`,
+      )
+      .all('some-key');
+    const detail = plan.map((r) => r.detail).join(' ');
+    assert.match(detail, /idx_policy_decisions_api_key/, `expected an index scan: ${detail}`);
+  });
+
+  it('records a blocked decision with no order_id', () => {
+    // A block happens before the order row exists, so order_id has to
+    // stay nullable — making it NOT NULL would drop exactly the
+    // decisions an operator most wants to audit.
+    const keyId = insertApiKey();
+    const id = decide(keyId, { decision: 'blocked', rule: 'daily_limit_exceeded' });
+    const row = db.prepare(`SELECT * FROM policy_decisions WHERE id = ?`).get(id);
+    assert.equal(row.order_id, null);
+    assert.equal(row.decision, 'blocked');
+    assert.ok(row.created_at);
+  });
+
+  it('requires a decision and a rule on every row', () => {
+    const keyId = insertApiKey();
+    for (const [decision, rule] of [
+      [null, 'some_rule'],
+      ['approved', null],
+    ]) {
+      assert.throws(
+        () =>
+          db
+            .prepare(
+              `INSERT INTO policy_decisions (id, api_key_id, decision, rule, reason)
+               VALUES (?, ?, ?, ?, 'test')`,
+            )
+            .run(uuidv4(), keyId, decision, rule),
+        /NOT NULL/,
+      );
+    }
   });
 });
