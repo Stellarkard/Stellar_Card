@@ -15,17 +15,26 @@ Node.js / Express API server for [Stellar_Card](https://stellar_card.com). Handl
 ```
 stellar_card-backend/
 ├── src/
-│   ├── index.js          # Express app entry point
-│   ├── routes/           # API routes (auth, cards, orders, webhooks, admin)
-│   ├── services/         # Soroban listener, VCC client, card issuer
-│   ├── db/               # SQLite database setup & migrations
-│   └── middleware/       # Rate limiting, auth verification, CORS
+│   ├── index.js          # Process entry point — boots jobs, watcher, HTTP listener
+│   ├── app.js            # Express app: application-level middleware only
+│   ├── routes/index.js   # The mount table — see docs/ROUTING.md
+│   ├── api/              # One router per surface (orders, auth, dashboard, status, …)
+│   ├── middleware/       # Auth verification, role guards
+│   ├── payments/         # Soroban watcher, XLM pricing and sending
+│   ├── mpp/              # Machine Payments Protocol (feature-flagged)
+│   ├── lib/              # Logger, crypto, email, SSRF guard, Sentry, helpers
+│   ├── db.js             # SQLite setup, schema and migrations
+│   └── env.js            # Boot-time environment validation
 ├── test/                 # Unit & integration test suites
-├── docs/                 # OpenAPI / API specifications
+├── docs/                 # Architecture and operational guides
 ├── .env.example          # Environment variable template
 ├── Dockerfile            # Container definition
 └── package.json          # Node.js dependencies & scripts
 ```
+
+Routing is documented in [docs/ROUTING.md](docs/ROUTING.md) — in particular
+which paths sit before the `/v1` auth boundary and why the mount order in
+`src/routes/index.js` is behaviour rather than layout.
 
 ## Setup & Development
 
@@ -56,20 +65,20 @@ docker compose up backend
 
 ## Environment Variables
 
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `PORT` | No | `4000` | HTTP port for backend server |
-| `NODE_ENV` | No | `development` | Runtime environment (`development` / `production` / `test`) |
-| `DB_PATH` | No | `./stellar_card.db` | SQLite database file location |
-| `STELLAR_NETWORK` | Yes | `mainnet` | Target Stellar network (`mainnet` / `testnet`) |
-| `STELLAR_USDC_ISSUER` | Yes | — | Stellar USDC asset issuer public key |
-| `STELLAR_XLM_SECRET` | Yes | — | Treasury secret key for processing refunds |
-| `RECEIVER_CONTRACT_ID` | Yes | — | Soroban payment contract ID |
-| `SOROBAN_RPC_URL` | No | default | Custom Soroban RPC endpoint |
-| `VCC_API_BASE` | Yes | `https://vcc.ctx.com` | Base URL for VCC card fulfillment service |
-| `CARDS402_BASE_URL` | Yes | `http://localhost:4000` | Public API base URL for webhooks |
-| `VCC_CALLBACK_SECRET` | Yes | — | HMAC secret for verifying fulfillment webhooks |
-| `CORS_ORIGINS` | No | `*` | Allowed CORS origins for dashboard/agents |
+| Variable               | Required | Default                 | Description                                                 |
+| ---------------------- | -------- | ----------------------- | ----------------------------------------------------------- |
+| `PORT`                 | No       | `4000`                  | HTTP port for backend server                                |
+| `NODE_ENV`             | No       | `development`           | Runtime environment (`development` / `production` / `test`) |
+| `DB_PATH`              | No       | `./stellar_card.db`     | SQLite database file location                               |
+| `STELLAR_NETWORK`      | Yes      | `mainnet`               | Target Stellar network (`mainnet` / `testnet`)              |
+| `STELLAR_USDC_ISSUER`  | Yes      | —                       | Stellar USDC asset issuer public key                        |
+| `STELLAR_XLM_SECRET`   | Yes      | —                       | Treasury secret key for processing refunds                  |
+| `RECEIVER_CONTRACT_ID` | Yes      | —                       | Soroban payment contract ID                                 |
+| `SOROBAN_RPC_URL`      | No       | default                 | Custom Soroban RPC endpoint                                 |
+| `VCC_API_BASE`         | Yes      | `https://vcc.ctx.com`   | Base URL for VCC card fulfillment service                   |
+| `CARDS402_BASE_URL`    | Yes      | `http://localhost:4000` | Public API base URL for webhooks                            |
+| `VCC_CALLBACK_SECRET`  | Yes      | —                       | HMAC secret for verifying fulfillment webhooks              |
+| `CORS_ORIGINS`         | No       | `*`                     | Allowed CORS origins for dashboard/agents                   |
 
 ## API Endpoints
 
