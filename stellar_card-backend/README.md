@@ -66,7 +66,15 @@ The API server runs at `http://localhost:4000` by default.
 ```bash
 # Run backend via Docker Compose from root directory
 docker compose up backend
+
+# Development with hot-reload
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up backend
+
+# With optional PostgreSQL and Redis
+docker compose --profile db up backend
 ```
+
+For comprehensive Docker Compose documentation, see the project's [DOCKER_GUIDE.md](../DOCKER_GUIDE.md).
 
 ## Environment Variables
 

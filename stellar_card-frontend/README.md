@@ -47,7 +47,12 @@ In development the dashboard defaults to `http://localhost:4000` for its API bas
 ```bash
 # Run frontend via Docker Compose from repository root
 docker compose up frontend
+
+# Development with hot-reload
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up frontend
 ```
+
+For comprehensive Docker Compose documentation, see the project's [DOCKER_GUIDE.md](../DOCKER_GUIDE.md).
 
 ## Structure
 
