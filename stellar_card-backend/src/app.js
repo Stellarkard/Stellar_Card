@@ -12,8 +12,8 @@ const {
   sentryErrorHandler,
   setRequestId: setSentryRequestId,
 } = require('./lib/sentry-config');
-const { registerRoutes } = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
+const { registerRoutes } = require('./routes');
 
 const app = express();
 
@@ -251,6 +251,14 @@ app.use((err, req, res, next) => {
 // and the reasoning is documented there rather than here, so the answer to
 // "which paths require an api key" lives in exactly one place.
 registerRoutes(app);
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'not_found',
+    message: 'The requested endpoint does not exist.',
+    req_id: req.id,
+  });
+});
 
 // Issue #29: Sentry's error handler must be mounted after all routes but
 // before the app's own errorHandler, so it can capture the error and then

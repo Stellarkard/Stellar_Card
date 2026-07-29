@@ -12,6 +12,7 @@ const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const db = require('../db');
 const { openSSEStreamCount } = require('./orders');
 const { MAX_WEBHOOK_ATTEMPTS: MAX_WEBHOOK_ATTEMPTS_FOR_STATUS } = require('../fulfillment');
+const rateLimitHandler = require('../middleware/rateLimitHandler');
 
 const router = Router();
 
@@ -26,7 +27,7 @@ const statusLimiter = rateLimit({
   keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-  handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
+  handler: rateLimitHandler('Status endpoint rate limit exceeded. Retry in a minute.'),
 });
 
 const PROCESS_STARTED_AT = Date.now();

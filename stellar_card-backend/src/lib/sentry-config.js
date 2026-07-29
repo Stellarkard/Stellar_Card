@@ -255,6 +255,10 @@ function buildSentryOptions(env = process.env) {
     tracesSampleRate: sampleRate(env.SENTRY_TRACES_SAMPLE_RATE, 0.1),
     profilesSampleRate,
     sendDefaultPii: false,
+    attachStacktrace: true,
+    // See note 2 at the top of the file: index.js owns the process-level
+    // signals so the graceful-shutdown path is not short-circuited by
+    // Sentry's own exit-on-fatal behaviour.
     integrations: (/** @type {any[]} */ defaults) => [
       ...defaults.filter(
         (integration) =>
