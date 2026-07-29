@@ -12,19 +12,8 @@ const {
   sentryErrorHandler,
   setRequestId: setSentryRequestId,
 } = require('./lib/sentry-config');
-const auth = require('./middleware/auth');
-const ordersRouter = require('./api/orders');
-const { buildBudget, policyCheck, orderPollLimiter, openSSEStreamCount } = require('./api/orders');
-// Legacy /admin/* router was retired with the ampersand dashboard rewrite.
-// The new /dashboard surface (mounted below) is the canonical operator API
-// and is what /api/admin-proxy on the web app forwards to.
-const dashboardRouter = require('./api/dashboard');
-const authRouter = require('./api/auth');
-const internalRouter = require('./api/internal');
-const platformRouter = require('./api/platform');
-const vccCallbackRouter = require('./api/vcc-callback');
-const { MAX_WEBHOOK_ATTEMPTS: MAX_WEBHOOK_ATTEMPTS_FOR_STATUS } = require('./fulfillment');
 const errorHandler = require('./middleware/errorHandler');
+const { registerRoutes } = require('./routes');
 
 const app = express();
 
@@ -695,6 +684,14 @@ app.use((err, req, res, next) => {
 // and the reasoning is documented there rather than here, so the answer to
 // "which paths require an api key" lives in exactly one place.
 registerRoutes(app);
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'not_found',
+    message: 'The requested endpoint does not exist.',
+    req_id: req.id,
+  });
+});
 
 // Issue #29: Sentry's error handler must be mounted after all routes but
 // before the app's own errorHandler, so it can capture the error and then

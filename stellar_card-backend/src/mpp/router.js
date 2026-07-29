@@ -20,6 +20,7 @@ const { createChallenge, loadChallenge, loadOrderByReceiptId } = require('./chal
 const { buildDiscoveryDoc, buildChallengeBody, buildWwwAuthenticate } = require('./discovery');
 const { verifyAndCreateMppOrder } = require('./verify');
 const { waitForDelivery } = require('./wait-for-delivery');
+const rateLimitHandler = require('../middleware/rateLimitHandler');
 
 // Rate limiters for public endpoints
 const discoveryLimiter = rateLimit({
@@ -28,6 +29,7 @@ const discoveryLimiter = rateLimit({
   keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
   standardHeaders: 'draft-7',
   legacyHeaders: false,
+  handler: rateLimitHandler('MPP discovery rate limit exceeded. Retry in a minute.'),
 });
 
 const receiptLimiter = rateLimit({
@@ -36,11 +38,7 @@ const receiptLimiter = rateLimit({
   keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-  handler: (_req, res) =>
-    res.status(429).json({
-      error: 'too_many_requests',
-      message: 'Receipt polling rate limit exceeded. Retry in a minute.',
-    }),
+  handler: rateLimitHandler('Receipt polling rate limit exceeded. Retry in a minute.'),
 });
 
 // Per-IP rate limit on challenge creation. An unauthenticated endpoint
@@ -53,11 +51,7 @@ const challengeLimiter = rateLimit({
   keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-  handler: (_req, res) =>
-    res.status(429).json({
-      error: 'too_many_requests',
-      message: 'MPP challenge rate limit exceeded. Retry in a minute.',
-    }),
+  handler: rateLimitHandler('MPP challenge rate limit exceeded. Retry in a minute.'),
 });
 
 const AMOUNT_RE = /^\d+(?:\.\d{1,2})?$/;
@@ -161,7 +155,7 @@ function buildMppRouter(opts = {}) {
 
   // ── Receipt polling (202 → 200 transition) ────────────────────────────
   router.get('/mpp/receipts/:id', receiptLimiter, (req, res) => {
-    const row = loadOrderByReceiptId(req.params.id);
+    const row = loadOrderByReceiptId(String(req.params.id));
     if (!row) {
       return res.status(404).json({
         error: 'receipt_not_found',

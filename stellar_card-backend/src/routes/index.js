@@ -201,4 +201,9 @@ function registerRoutes(app) {
   return app;
 }
 
-module.exports = { registerRoutes };
+module.exports = {
+  registerRoutes,
+  buildAuthFailureLimiter,
+  buildAdminLimiter,
+  buildVccCallbackLimiter,
+};
