@@ -9,6 +9,7 @@
 
 const { Router } = require('express');
 const { rateLimit } = require('express-rate-limit');
+const rateLimitHandler = require('../middleware/rateLimitHandler');
 
 const router = Router();
 
@@ -17,6 +18,7 @@ const versionLimiter = rateLimit({
   limit: 60,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
+  handler: rateLimitHandler('Version endpoint rate limit exceeded. Retry in a minute.'),
 });
 
 router.get('/api/version', versionLimiter, (_req, res) => {

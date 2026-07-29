@@ -112,7 +112,7 @@ describe('requireInternal — domain allow', () => {
 
   it('matches the @stellar_card.com domain case-insensitively', () => {
     const mw = freshMiddleware();
-    const { nextCalled } = runMiddleware(mw, { id: 'u1', email: 'OPS@CARDS402.COM' });
+    const { nextCalled } = runMiddleware(mw, { id: 'u1', email: 'OPS@STELLAR_CARD.COM' });
     assert.equal(nextCalled, true);
   });
 
