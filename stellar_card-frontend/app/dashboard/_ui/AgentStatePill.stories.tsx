@@ -1,4 +1,4 @@
-import type { Meta, StoryObj } from '@storybook/react';
+import type { Meta, StoryObj } from '@storybook/react-vite';
 import { AgentStatePill } from './AgentStatePill';
 import type { AgentStateName } from '../_lib/types';
 

@@ -59,7 +59,7 @@
     "test": "vitest run",
     "check:browser": "node scripts/check-browser-deps.mjs",
     "verify:package": "node scripts/verify-package.mjs",
-    "prepare": "cd .. && ([ -d .git ] && npx husky || true)",
+    "prepare": "node scripts/prepare.mjs",
     "prepublishOnly": "npm run build && npm test && npm run check:browser && npm run verify:package"
   },
   "keywords": [
