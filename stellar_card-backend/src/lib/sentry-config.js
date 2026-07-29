@@ -41,7 +41,7 @@ function initSentry() {
     profilesSampleRate: 0.1, // Sample 10% of transactions for profiling
     integrations: [
       new Sentry.Integrations.OnUncaughtException({
-        exitExit: false, // Don't exit process on uncaught exception
+        exitEvenIfOtherHandlersAreRegistered: false, // Don't exit process on uncaught exception
       }),
       new Sentry.Integrations.OnUnhandledRejection({
         mode: 'strict',
@@ -93,8 +93,8 @@ function captureException(error, context = {}) {
   if (!IS_PROD) return;
 
   Sentry.captureException(error, {
-    tags: context.tags || {},
-    extra: context.extra || {},
+    tags: /** @type {Record<string, string>} */(context.tags || {}),
+    extra: /** @type {Record<string, unknown>} */(context.extra || {}),
   });
 }
 
@@ -109,8 +109,8 @@ function captureMessage(message, level = 'info', context = {}) {
 
   Sentry.captureMessage(message, {
     level,
-    tags: context.tags || {},
-    extra: context.extra || {},
+    tags: /** @type {Record<string, string>} */(context.tags || {}),
+    extra: /** @type {Record<string, unknown>} */(context.extra || {}),
   });
 }
 

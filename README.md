@@ -3,7 +3,7 @@
 Full spend management and virtual Visa cards for AI agents.
 Pay XLM or USDC on Stellar, get a real Visa card number in about 60 seconds.
 
-Stellar_Card gives agents their own funding rails without giving them your personal card details.
+Stellar Card gives agents their own funding rails without giving them your personal card details.
 With one line of code, an agent can deploy an Open Wallet Standard (OWS) wallet with Stellar and Soroban support, then use that wallet to buy anywhere x402 is supported and anywhere Visa is accepted.
 
 [![Tests](https://github.com/devpeter999/Stellar_Card/workflows/Test%20%26%20Lint/badge.svg)](https://github.com/devpeter999/Stellar_Card/actions/workflows/test.yml)
@@ -103,6 +103,28 @@ docker compose logs -f
 docker compose down
 ```
 
+`docker compose up` builds **production-shaped** images: the source is baked
+in, so an edit on the host changes nothing until you rebuild. That is the right
+default for verifying a release candidate, but it is not a development loop.
+
+For hot reload, layer the dev overlay on top:
+
+```bash
+# Bind-mounts host source; backend runs `node --watch`, frontend runs `next dev`
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+```
+
+The overlay is a separate file rather than `docker-compose.override.yml` —
+Compose loads an override file automatically, and keeping the dev stack opt-in
+means `docker compose up` keeps meaning the same thing for everyone.
+
+Optional tooling is profile-gated, so it stays out of the default `up`:
+
+```bash
+docker compose --profile tools run --rm sdk        # install + test the SDK
+docker compose --profile tools run --rm contract   # build the contract wasm
+```
+
 ## Testing & Quality Assurance
 
 - **Unit & SDK Tests**: `npm test` inside `stellar_card-sdk/`
@@ -115,8 +137,10 @@ docker compose down
 
 Security is continuously enforced across all repositories:
 
-- **Dependabot Updates**: Automated security and dependency updates configured in `.github/dependabot.yml` for npm (`stellar_card-sdk`, `stellar_card-backend`, `stellar_card-frontend`), Cargo (`stellar_card-contract`), Docker, and GitHub Actions workflows.
-- **Vulnerability Scanning**: Continuous security scanning with npm audit, cargo audit, Trivy, and CodeQL static analysis in `.github/workflows/security.yml`.
+- **Dependabot Updates**: Automated security and dependency updates configured in `.github/dependabot.yml` for npm (`stellar_card-sdk`, `stellar_card-backend`, `stellar_card-frontend`), Cargo (`stellar_card-contract`), Docker (`stellar_card-backend`, `stellar_card-frontend`), Docker Compose, and GitHub Actions workflows.
+- **Grouped Updates**: Routine dev-dependency and patch bumps are grouped per package, so a weekly run opens a handful of PRs rather than dozens. Majors are never grouped — they always arrive as their own reviewable PR.
+- **Auto-Merge**: `.github/workflows/dependabot-auto-merge.yml` enables auto-merge for patch bumps, dev-dependency minors, and grouped updates once required checks pass. Majors and production-facing minors are always left for a human, so a "security update" can never quietly become a breaking change.
+- **Vulnerability Scanning**: Continuous security scanning with npm audit, `cargo audit` against the RustSec advisory database, Trivy, and CodeQL static analysis in `.github/workflows/security.yml`.
 
 ## Contributing
 

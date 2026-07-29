@@ -8,6 +8,17 @@ updates:
       day: monday
       time: '03:00'
       timezone: UTC
+    # Grouping keeps a weekly run from opening a dozen separate PRs. Security
+    # fixes are deliberately NOT grouped — Dependabot raises those as their own
+    # PRs regardless, and they should stay individually reviewable and
+    # individually revertable.
+    groups:
+      sdk-dev-dependencies:
+        dependency-type: 'development'
+        update-types: ['minor', 'patch']
+      sdk-production-patches:
+        dependency-type: 'production'
+        update-types: ['patch']
     open-pull-requests-limit: 5
     reviewers:
       - 'devpeter999'
@@ -42,6 +53,13 @@ updates:
       day: monday
       time: '03:30'
       timezone: UTC
+    groups:
+      backend-dev-dependencies:
+        dependency-type: 'development'
+        update-types: ['minor', 'patch']
+      backend-production-patches:
+        dependency-type: 'production'
+        update-types: ['patch']
     open-pull-requests-limit: 5
     reviewers:
       - 'devpeter999'
@@ -79,6 +97,13 @@ updates:
       day: monday
       time: '04:00'
       timezone: UTC
+    groups:
+      frontend-dev-dependencies:
+        dependency-type: 'development'
+        update-types: ['minor', 'patch']
+      frontend-production-patches:
+        dependency-type: 'production'
+        update-types: ['patch']
     open-pull-requests-limit: 5
     reviewers:
       - 'devpeter999'
@@ -120,6 +145,9 @@ updates:
       day: monday
       time: '04:30'
       timezone: UTC
+    groups:
+      cargo-patches:
+        update-types: ['patch']
     open-pull-requests-limit: 5
     reviewers:
       - 'devpeter999'
@@ -152,6 +180,9 @@ updates:
       day: monday
       time: '05:00'
       timezone: UTC
+    groups:
+      github-actions:
+        update-types: ['minor', 'patch']
     open-pull-requests-limit: 5
     reviewers:
       - 'devpeter999'
@@ -163,13 +194,64 @@ updates:
       prefix-scope: 'deps'
       include: 'scope'
 
-  # Docker containers
+  # Docker base images — Backend
+  #
+  # The docker ecosystem scans for Dockerfiles in the given directory and does
+  # not recurse. This previously pointed at '/', where there is no Dockerfile,
+  # so the two base images the project actually ships were never checked for
+  # security updates. They live one level down, so each needs its own entry.
   - package-ecosystem: docker
-    directory: '/'
+    directory: '/stellar_card-backend'
     schedule:
       interval: weekly
       day: monday
       time: '05:30'
+      timezone: UTC
+    open-pull-requests-limit: 3
+    reviewers:
+      - 'devpeter999'
+    labels:
+      - 'docker'
+      - 'security'
+      - 'infra'
+      - 'backend'
+    commit-message:
+      prefix: 'chore'
+      prefix-scope: 'deps'
+      include: 'scope'
+
+  # Docker base images — Frontend
+  - package-ecosystem: docker
+    directory: '/stellar_card-frontend'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '05:45'
+      timezone: UTC
+    open-pull-requests-limit: 3
+    reviewers:
+      - 'devpeter999'
+    labels:
+      - 'docker'
+      - 'security'
+      - 'infra'
+      - 'frontend'
+    commit-message:
+      prefix: 'chore'
+      prefix-scope: 'deps'
+      include: 'scope'
+
+  # Docker Compose base images at the repository root.
+  #
+  # Kept so the images pinned directly in docker-compose.yml (node:20-alpine
+  # for the sdk tooling service, rust:1-slim-bookworm for the contract one)
+  # are covered too.
+  - package-ecosystem: docker-compose
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
       timezone: UTC
     open-pull-requests-limit: 3
     reviewers:

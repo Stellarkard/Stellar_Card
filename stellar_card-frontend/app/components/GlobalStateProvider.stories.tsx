@@ -41,7 +41,7 @@ export const Empty: Story = {
   },
 };
 
-export const Error: Story = {
+export const ErrorState: Story = {
   args: {
     status: 'error' as AsyncStatus,
     error: new Error('Failed to load data from server'),
@@ -50,7 +50,7 @@ export const Error: Story = {
   },
 };
 
-export const ErrorWithoutRetry: Story = {
+export const ErrorStateWithoutRetry: Story = {
   args: {
     status: 'error' as AsyncStatus,
     error: new Error('Network error'),

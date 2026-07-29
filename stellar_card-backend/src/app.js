@@ -7,9 +7,34 @@ const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
 const { log } = require('./lib/logger');
-const { registerRoutes } = require('./routes');
+const auth = require('./middleware/auth');
+const ordersRouter = require('./api/orders');
+const { buildBudget, policyCheck, orderPollLimiter, openSSEStreamCount } = require('./api/orders');
+// Legacy /admin/* router was retired with the ampersand dashboard rewrite.
+// The new /dashboard surface (mounted below) is the canonical operator API
+// and is what /api/admin-proxy on the web app forwards to.
+const dashboardRouter = require('./api/dashboard');
+const authRouter = require('./api/auth');
+const internalRouter = require('./api/internal');
+const platformRouter = require('./api/platform');
+const vccCallbackRouter = require('./api/vcc-callback');
+const { MAX_WEBHOOK_ATTEMPTS: MAX_WEBHOOK_ATTEMPTS_FOR_STATUS } = require('./fulfillment');
+const errorHandler = require('./middleware/errorHandler');
+const { sentryRequestHandler, sentryErrorHandler } = require('./lib/sentry-config');
 
 const app = express();
+
+// Issue #29: src/lib/sentry-config.js was fully built (init, request/error
+// handler middleware, capture helpers) but never actually wired into the
+// app — initSentry() had no caller anywhere in src/, so error tracking was
+// silently a no-op in every environment, production included. The request
+// handler must be the very first middleware (per Sentry's own docs) so it
+// can attach its transaction/scope before anything else runs; the error
+// handler must run before (not instead of) the app's own errorHandler so
+// Sentry sees every error the same way that handler does. Both are no-ops
+// outside production (see sentryRequestHandler/sentryErrorHandler in
+// sentry-config.js), so this has no effect on dev/test behavior.
+app.use(sentryRequestHandler());
 
 // B-13: Attach a unique request ID to every request for log correlation.
 //
@@ -215,14 +240,15 @@ app.use(
 // "which paths require an api key" lives in exactly one place.
 registerRoutes(app);
 
-// Structured CORS denial — cors() throws on rejected origins; catch and return clean 403
-app.use((err, req, res, _next) => {
-  if (err.message && err.message.startsWith('CORS:')) {
-    return res.status(403).json({ error: 'forbidden', message: 'Origin not allowed' });
-  }
-  console.error('[app] unhandled error:', err.message);
-  res.status(500).json({ error: 'internal_error' });
-});
+// Issue #29: Sentry's error handler must be mounted after all routes but
+// before the app's own errorHandler, so it can capture the error and then
+// call next(err) to hand off to errorHandler for the actual response —
+// see the app.use(sentryRequestHandler()) comment above for why this was
+// previously dead code.
+app.use(sentryErrorHandler());
+
+// Standardized global error handler
+app.use(errorHandler);
 
 module.exports = app;
 // Test-only exports for the 2026-04-16 audit hardening. Not part of

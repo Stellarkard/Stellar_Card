@@ -15,6 +15,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.85.0",
     "@sentry/node": "^7.111.0",
+    "@sentry/profiling-node": "^7.111.0",
     "@stellar/stellar-sdk": "^15.0.1",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.6.0",
@@ -25,6 +26,7 @@
     "helmet": "^8.1.0",
     "nodemailer": "^8.0.5",
     "uuid": "^11.0.5",
+    "winston": "^3.19.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

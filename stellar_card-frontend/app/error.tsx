@@ -20,7 +20,6 @@ export default function Error({
     // Log to the console for now. Wire up a real reporter (Sentry,
     // OpenTelemetry, self-hosted) when we stand one up — just swap
     // this implementation without touching every call site.
-    // eslint-disable-next-line no-console
     console.error('[stellar_card] unhandled route error', error);
   }, [error]);
 

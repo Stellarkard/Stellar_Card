@@ -54,30 +54,18 @@ export function OnboardingProvider({
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const completed = localStorage.getItem(storageKey);
+      /* eslint-disable react-hooks/set-state-in-effect -- intentional hydration */
       if (completed) {
         setIsCompleted(true);
       } else {
         setIsOpen(true);
       }
+      /* eslint-enable react-hooks/set-state-in-effect */
     }
   }, [storageKey]);
 
   const currentStep = steps[currentStepIndex] || null;
   const progress = currentStep ? ((currentStepIndex + 1) / steps.length) * 100 : 0;
-
-  const nextStep = useCallback(() => {
-    if (currentStepIndex < steps.length - 1) {
-      setCurrentStepIndex(currentStepIndex + 1);
-    } else {
-      completeOnboarding();
-    }
-  }, [currentStepIndex, steps.length]);
-
-  const previousStep = useCallback(() => {
-    if (currentStepIndex > 0) {
-      setCurrentStepIndex(currentStepIndex - 1);
-    }
-  }, [currentStepIndex]);
 
   const completeOnboarding = useCallback(() => {
     setIsCompleted(true);
@@ -87,6 +75,20 @@ export function OnboardingProvider({
     }
     onComplete?.();
   }, [storageKey, onComplete]);
+
+  const nextStep = useCallback(() => {
+    if (currentStepIndex < steps.length - 1) {
+      setCurrentStepIndex(currentStepIndex + 1);
+    } else {
+      completeOnboarding();
+    }
+  }, [currentStepIndex, steps.length, completeOnboarding]);
+
+  const previousStep = useCallback(() => {
+    if (currentStepIndex > 0) {
+      setCurrentStepIndex(currentStepIndex - 1);
+    }
+  }, [currentStepIndex]);
 
   const skipOnboarding = useCallback(() => {
     completeOnboarding();

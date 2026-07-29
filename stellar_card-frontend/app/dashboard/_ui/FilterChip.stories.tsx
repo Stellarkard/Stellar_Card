@@ -60,7 +60,7 @@ export const WithTone: Story = {
         {tones.map((tone) => (
           <FilterChip
             key={tone}
-            active={active[tone]}
+            active={active[tone]!}
             onClick={() => setActive({ ...active, [tone]: !active[tone] })}
             tone={tone}
             count={Math.floor(Math.random() * 100)}
@@ -91,7 +91,7 @@ export const FilterGroup: Story = {
         </legend>
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
           <FilterChip
-            active={active.all}
+            active={active.all!}
             onClick={() => setActive({ all: true, pending: false, completed: false, failed: false })}
             aria-label="Show all statuses"
             aria-pressed={active.all}
@@ -99,7 +99,7 @@ export const FilterGroup: Story = {
             All
           </FilterChip>
           <FilterChip
-            active={active.pending}
+            active={active.pending!}
             onClick={() => setActive({ all: false, pending: true, completed: false, failed: false })}
             tone="yellow"
             count={5}
@@ -109,7 +109,7 @@ export const FilterGroup: Story = {
             Pending
           </FilterChip>
           <FilterChip
-            active={active.completed}
+            active={active.completed!}
             onClick={() => setActive({ all: false, pending: false, completed: true, failed: false })}
             tone="green"
             count={23}
@@ -119,7 +119,7 @@ export const FilterGroup: Story = {
             Completed
           </FilterChip>
           <FilterChip
-            active={active.failed}
+            active={active.failed!}
             onClick={() => setActive({ all: false, pending: false, completed: false, failed: true })}
             tone="red"
             count={2}

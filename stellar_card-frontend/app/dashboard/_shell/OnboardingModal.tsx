@@ -144,17 +144,16 @@ function StepIndicator({ currentStep, totalSteps }: { currentStep: number; total
 // ── Main Modal Component ─────────────────────────────────────────────
 
 export function OnboardingModal() {
-  const [visible, setVisible] = useState(false);
-  const [step, setStep] = useState(1);
-  const [isAnimating, setIsAnimating] = useState(false);
-
-  useEffect(() => {
+  const [visible, setVisible] = useState(() => {
     try {
-      if (!localStorage.getItem(STORAGE_KEY)) setVisible(true);
+      if (typeof window !== 'undefined' && !localStorage.getItem(STORAGE_KEY)) return true;
     } catch {
       /* localStorage blocked (incognito strict mode) — don't show */
     }
-  }, []);
+    return false;
+  });
+  const [step, setStep] = useState(1);
+  const [isAnimating, setIsAnimating] = useState(false);
 
   const dismiss = useCallback(() => {
     try {
