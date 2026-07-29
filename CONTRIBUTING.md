@@ -66,6 +66,31 @@ docker compose up -d
 docker compose down
 ```
 
+For development with hot-reload:
+
+```bash
+# Bind-mounts host source; backend runs `node --watch`, frontend runs `next dev`
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+```
+
+Optional tooling and databases are available via profiles:
+
+```bash
+# Build and test SDK without local Node installation
+docker compose --profile tools run --rm sdk
+
+# Build contract WASM without local Rust installation
+docker compose --profile tools run --rm contract
+
+# Start with PostgreSQL and Redis (optional)
+docker compose --profile db up
+
+# Development with databases
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile db up
+```
+
+For comprehensive Docker Compose documentation, including troubleshooting, advanced usage, and production considerations, see [DOCKER_GUIDE.md](DOCKER_GUIDE.md).
+
 ---
 
 ## Workflow
