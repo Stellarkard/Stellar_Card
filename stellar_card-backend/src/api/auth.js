@@ -22,6 +22,8 @@ const { isPlatformOwner } = require('../lib/platform');
 const { recordAudit } = require('../lib/audit');
 const { validate, patternString } = require('../lib/validate');
 const { validateBody } = require('../middleware/validate');
+const { asyncHandler } = require('../middleware/async-handler');
+const { AppError } = require('../lib/app-error');
 
 const router = Router();
 
@@ -205,7 +207,7 @@ router.post(
   // earlier cycle, now expressed as a reusable Zod schema (see
   // src/middleware/validate.js).
   validateBody(loginBodySchema, { fieldErrorCode: 'invalid_email' }),
-  async (req, res) => {
+  asyncHandler(async (req, res, next) => {
   const { email } = req.body;
   const addr = normalizeEmail(email);
 
@@ -261,10 +263,7 @@ router.post(
   } catch (err) {
     if (process.env.NODE_ENV === 'production') {
       console.error('[auth] email send failed:', err.message);
-      return res.status(500).json({
-        error: 'email_failed',
-        message: 'Failed to send login code. Check SMTP configuration.',
-      });
+      return next(new AppError(500, 'email_failed', 'Failed to send login code. Check SMTP configuration.'));
     }
     // Non-production: code already logged above — proceed without email
     console.warn(`[auth] email skipped (${err.message}) — use the logged code above`);
@@ -272,7 +271,7 @@ router.post(
 
   // Generic response — don't reveal whether the email exists or was accepted
   res.json({ ok: true });
-});
+}));
 
 // ── POST /auth/verify ────────────────────────────────────────────────────────
 

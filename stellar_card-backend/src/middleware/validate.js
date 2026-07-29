@@ -41,13 +41,13 @@ function validateBody(schema, options = {}) {
 
   return (/** @type {any} */ req, /** @type {any} */ res, /** @type {any} */ next) => {
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
-      return res.status(400).json({ error: bodyErrorCode, message: bodyErrorMessage });
+      return res.status(400).json({ error: bodyErrorCode, message: bodyErrorMessage, req_id: req.id || null });
     }
 
     const result = schema.safeParse(req.body);
     if (!result.success) {
       const message = result.error.issues[0]?.message || 'Invalid request body.';
-      return res.status(400).json({ error: fieldErrorCode, message });
+      return res.status(400).json({ error: fieldErrorCode, message, req_id: req.id || null });
     }
 
     req.body = result.data;
