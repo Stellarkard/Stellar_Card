@@ -1,5 +1,6 @@
 // @ts-check
-// Structured logger — emits JSON lines in production, human-readable in development.
+// Structured logger, backed by Winston — emits JSON lines in production,
+// human-readable in development.
 //
 // Usage:
 //   const { log, event } = require('./logger');
@@ -8,9 +9,13 @@
 //   event('order.fulfilled', { order_id: id, amount_usd: '10.00', duration_ms: 1234 });
 //
 // In production (NODE_ENV=production), every call emits a single-line JSON object
-// to stdout so log aggregators (Datadog, Loki, CloudWatch) can ingest it directly.
+// to stdout (info/warn) or stderr (error) so log aggregators (Datadog, Loki,
+// CloudWatch) can ingest it directly.
 //
 // In development/test, emits a compact human-readable string.
+
+const winston = require('winston');
+const { Writable } = require('node:stream');
 
 const IS_PROD = process.env.NODE_ENV === 'production';
 const IS_TEST = process.env.NODE_ENV === 'test';
@@ -88,6 +93,57 @@ function deepFreeze(value) {
   return value;
 }
 
+// Winston format that mirrors the pre-Winston JSON shape exactly:
+// structural fields (ts, level, msg) spread LAST so a caller-supplied
+// `fields` can't overwrite them (F1-logger), serialised through
+// safeStringify so BigInt/circular payloads never throw (F2-logger).
+const structuralJsonFormat = winston.format((info) => {
+  const { level, message, fields, ...rest } = info;
+  info[Symbol.for('message')] = safeStringify({ ...fields, ...rest, ts: now(), level, msg: message });
+  return info;
+})();
+
+// Winston's Stream transport needs a real Writable — wrap safeWrite in
+// one so a closed pipe (EPIPE/EBADF) can never escape into caller code
+// (F3-logger), instead of handing Winston the raw process stream.
+function safeWritable(targetStream) {
+  return new Writable({
+    write(chunk, _enc, callback) {
+      safeWrite(targetStream, chunk);
+      callback();
+    },
+  });
+}
+
+function makeProdLogger() {
+  return winston.createLogger({
+    format: structuralJsonFormat,
+    transports: [
+      new winston.transports.Stream({
+        stream: safeWritable(process.stdout),
+        level: 'info',
+      }),
+    ],
+  });
+}
+
+// Separate stderr-only logger for error level so routing matches the
+// pre-Winston behavior (error -> stderr, info/warn -> stdout) exactly.
+function makeProdErrorLogger() {
+  return winston.createLogger({
+    format: structuralJsonFormat,
+    transports: [
+      new winston.transports.Stream({
+        stream: safeWritable(process.stderr),
+        level: 'error',
+      }),
+    ],
+  });
+}
+
+const prodLogger = IS_PROD ? makeProdLogger() : null;
+const prodErrorLogger = IS_PROD ? makeProdErrorLogger() : null;
+
 /**
  * Emit a structured log line.
  * @param {'info'|'warn'|'error'} level
@@ -110,19 +166,8 @@ function log(level, msg, fields = {}) {
   }
 
   if (IS_PROD) {
-    // F1-logger: structural fields (ts, level, msg) spread LAST so a
-    // caller-supplied `fields` can't overwrite them. Previously the
-    // spread came last, letting any log call with `{ level: 'error' }`
-    // or `{ msg: 'spoofed' }` silently corrupt the aggregated log
-    // line's shape. The routing check uses the parameter `level` not
-    // the merged field, so the JSON would have lied to aggregators
-    // while routing to the correct stream.
-    const line = safeStringify({ ...fields, ts: now(), level, msg });
-    if (level === 'error') {
-      safeWrite(process.stderr, line + '\n');
-    } else {
-      safeWrite(process.stdout, line + '\n');
-    }
+    const target = level === 'error' ? prodErrorLogger : prodLogger;
+    target.log({ level, message: msg, fields });
   } else {
     const prefix = level === 'error' ? '[ERR]' : level === 'warn' ? '[WARN]' : '[INFO]';
     const extra = Object.keys(fields).length ? ' ' + safeStringify(fields) : '';
@@ -148,7 +193,7 @@ function event(name, fields = {}) {
     // F1-logger: same fixed-fields-win discipline as log(). The
     // structural columns (ts, type, event) spread LAST so a caller
     // passing `{ event: 'spoofed', type: 'not-event' }` can't
-    // override them. Previously the spread was at the end.
+    // override them.
     const line = safeStringify({ ...fields, ts: now(), type: 'event', event: name });
     safeWrite(process.stdout, line + '\n');
   }
