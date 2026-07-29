@@ -22,6 +22,8 @@ const platformRouter = require('./api/platform');
 const vccCallbackRouter = require('./api/vcc-callback');
 const { MAX_WEBHOOK_ATTEMPTS: MAX_WEBHOOK_ATTEMPTS_FOR_STATUS } = require('./fulfillment');
 const errorHandler = require('./middleware/errorHandler');
+const swaggerUi = require('swagger-ui-express');
+const { openapiSpec } = require('./docs/openapi');
 
 const app = express();
 
@@ -245,6 +247,28 @@ const versionLimiter = rateLimit({
   standardHeaders: 'draft-7',
   legacyHeaders: false,
 });
+/**
+ * @openapi
+ * /api/version:
+ *   get:
+ *     tags: [System]
+ *     summary: Service version and enabled features
+ *     description: Unauthenticated — used for deploy-time compatibility checks.
+ *     responses:
+ *       200:
+ *         description: Version info.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 service: { type: string, example: stellar_card }
+ *                 version: { type: string, example: 0.1.0 }
+ *                 hmac_protocol: { type: string, example: v3 }
+ *                 features:
+ *                   type: array
+ *                   items: { type: string }
+ */
 app.get('/api/version', versionLimiter, (_req, res) => {
   res.json({
     service: 'stellar_card',
@@ -253,6 +277,27 @@ app.get('/api/version', versionLimiter, (_req, res) => {
     features: ['idempotency_key', 'soroban_contract', 'webhook_circuit_breaker', 'callback_nonce'],
   });
 });
+
+// OpenAPI docs. The global helmet CSP above (default-src 'self', no
+// inline scripts/styles) blocks swagger-ui's bundled assets, so this
+// path gets its own permissive CSP scoped to /docs only — every other
+// route keeps the strict default.
+app.use(
+  '/docs',
+  helmetMiddleware({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+      },
+    },
+  }),
+  swaggerUi.serve,
+  swaggerUi.setup(openapiSpec),
+);
+app.get('/docs.json', (_req, res) => res.json(openapiSpec));
 
 // POST /v1/agent/claim — unauthenticated one-shot claim endpoint.
 // The agent posts a code minted by the dashboard; we return the real
@@ -271,6 +316,51 @@ const claimLimiter = rateLimit({
       message: 'Too many claim attempts. Wait a minute and try again.',
     }),
 });
+/**
+ * @openapi
+ * /v1/agent/claim:
+ *   post:
+ *     tags: [Agent Onboarding]
+ *     summary: Redeem a one-shot claim code for a live API key
+ *     description: >
+ *       Unauthenticated — the code itself is the credential. Each code can be
+ *       redeemed exactly once; the response is the only time the api_key is
+ *       ever returned in plaintext.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [code]
+ *             properties:
+ *               code: { type: string, description: 'Claim code minted by the dashboard.' }
+ *     responses:
+ *       200:
+ *         description: Claim redeemed.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 api_key: { type: string }
+ *                 webhook_secret: { type: string, nullable: true }
+ *                 api_key_id: { type: string, format: uuid }
+ *                 label: { type: string, nullable: true }
+ *                 api_url: { type: string, format: uri }
+ *       400:
+ *         description: Missing code.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Claim code is invalid, expired, or already used.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many claim attempts from this IP.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 app.post('/v1/agent/claim', claimLimiter, (req, res) => {
   const { event: bizEvent } = require('./lib/logger');
   const secretBox = require('./lib/secret-box');
@@ -482,6 +572,40 @@ function sysStateInt(key) {
   return parseInt(row?.value || '0', 10) || 0;
 }
 
+/**
+ * @openapi
+ * /status:
+ *   get:
+ *     tags: [System]
+ *     summary: Public system health and order-volume status
+ *     description: Unauthenticated. Powers the public status page and dashboard banner.
+ *     responses:
+ *       200:
+ *         description: Status snapshot.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 frozen: { type: boolean }
+ *                 consecutive_failures: { type: integer }
+ *                 orders:
+ *                   type: object
+ *                   properties:
+ *                     pending_payment: { type: integer }
+ *                     in_progress: { type: integer }
+ *                 stellar_watcher:
+ *                   type: object
+ *                   properties:
+ *                     stalled: { type: boolean }
+ *                     age_seconds: { type: integer, nullable: true }
+ *                     max_age_seconds: { type: integer }
+ *       429:
+ *         description: Too many requests from this IP.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 app.get('/status', statusLimiter, (req, res) => {
   const frozen =
     /** @type {any} */ (db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get())
@@ -710,6 +834,40 @@ app.use('/v1/orders', ordersRouter);
 // throttle as /v1/orders polling. Before this limiter was added, a
 // compromised key could enumerate the owner's daily spend and bruteforce
 // policy thresholds without burning order-creation budget.
+/**
+ * @openapi
+ * /v1/policy/check:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: Preview whether an order amount would pass spend policy
+ *     description: Read-only — does not persist a policy decision or create an order.
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: amount
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *         description: USD amount to check, e.g. "10.00".
+ *     responses:
+ *       200:
+ *         description: Policy check result.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 allowed: { type: boolean }
+ *                 reason: { type: string, nullable: true }
+ *                 remaining_daily: { type: string, nullable: true }
+ *       400:
+ *         description: Missing or invalid amount.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 app.get('/v1/policy/check', orderPollLimiter, (req, res) => {
   const amount = String(req.query.amount || '');
   if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
@@ -739,6 +897,56 @@ const agentStatusLimiter = rateLimit({
   legacyHeaders: false,
   handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
 });
+/**
+ * @openapi
+ * /v1/agent/status:
+ *   post:
+ *     tags: [Agent API]
+ *     summary: Report an agent's onboarding / lifecycle state
+ *     description: >
+ *       Idempotent — POSTing the same state repeatedly is a no-op side-effect-wise.
+ *       Drives the live onboarding pill in the dashboard via SSE.
+ *     security: [{ ApiKeyAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             description: At least one of state, wallet_public_key, detail must be provided.
+ *             properties:
+ *               state:
+ *                 type: string
+ *                 enum: [initializing, awaiting_funding, funded]
+ *               wallet_public_key:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Stellar G-address (Ed25519, checksum-validated).
+ *               detail:
+ *                 type: string
+ *                 nullable: true
+ *                 maxLength: 500
+ *     responses:
+ *       200:
+ *         description: State updated.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { ok: { type: boolean } }
+ *       400:
+ *         description: Invalid state, wallet_public_key, detail, or nothing to update.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many status reports for this key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 app.post('/v1/agent/status', agentStatusLimiter, (req, res) => {
   const { emit: emitBusEvent } = require('./lib/event-bus');
   const { StrKey } = require('@stellar/stellar-sdk');
@@ -835,6 +1043,39 @@ app.post('/v1/agent/status', agentStatusLimiter, (req, res) => {
 // F3-usage: added explicit expired and rejected counters so agents
 //   can see the full picture — previously both were hidden inside the
 //   wrong in_progress bucket.
+/**
+ * @openapi
+ * /v1/usage:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: Caller's own spend budget and order counts
+ *     security: [{ ApiKeyAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Usage summary for the authenticated API key.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 api_key_id: { type: string, format: uuid }
+ *                 label: { type: string, nullable: true }
+ *                 budget: { type: object }
+ *                 orders:
+ *                   type: object
+ *                   properties:
+ *                     total: { type: integer }
+ *                     delivered: { type: integer }
+ *                     failed: { type: integer }
+ *                     refunded: { type: integer }
+ *                     expired: { type: integer }
+ *                     rejected: { type: integer }
+ *                     in_progress: { type: integer }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 app.get('/v1/usage', orderPollLimiter, (req, res) => {
   const counts = db
     .prepare(

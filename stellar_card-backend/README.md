@@ -73,6 +73,9 @@ docker compose up backend
 
 ## API Endpoints
 
+Full interactive OpenAPI documentation is served at `GET /docs` when the
+server is running (raw spec at `GET /docs.json`).
+
 - `GET /health` — Health check endpoint.
 - `POST /api/v1/orders` — Create a new virtual card order.
 - `GET /api/v1/orders/:id` — Query order status and card details.

@@ -234,6 +234,54 @@ function buildBudget(apiKey) {
 // txn is pure DB reads + writes so it can stay synchronous. Side-effect
 // notifications (approval email / Discord ping / spend-alert email)
 // fire AFTER commit out-of-band.
+/**
+ * @openapi
+ * /v1/orders:
+ *   post:
+ *     tags: [Agent API]
+ *     summary: Create a virtual card order
+ *     description: >
+ *       Returns on-chain payment instructions (USDC or XLM on Stellar). Supports
+ *       an `Idempotency-Key` header — retrying with the same key and an identical
+ *       body returns the original response instead of creating a duplicate order.
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: Idempotency-Key
+ *         in: header
+ *         required: false
+ *         schema: { type: string, maxLength: 255 }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { $ref: '#/components/schemas/OrderCreateRequest' }
+ *     responses:
+ *       201:
+ *         description: Order created.
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/Order' }
+ *       400:
+ *         description: Invalid amount, webhook_url, metadata, or idempotency key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       409:
+ *         description: Idempotency-Key reused with a different request body.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Rate limit exceeded for this API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       503:
+ *         description: Card fulfillment temporarily suspended.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.post('/', orderCreateLimiter, async (req, res) => {
   // Adversarial audit F3-orders (2026-04-15): reject requests with a
   // missing or non-object body upfront. Before this guard, a request
@@ -698,6 +746,50 @@ router.post('/', orderCreateLimiter, async (req, res) => {
 // whole history, plus `offset` for simple pagination and a tighter hard
 // cap on `limit` (200 from the previous 100 to support larger polling
 // windows without exceeding DB response size).
+/**
+ * @openapi
+ * /v1/orders:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: List orders for the authenticated API key
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: status
+ *         in: query
+ *         schema: { type: string }
+ *       - name: limit
+ *         in: query
+ *         schema: { type: integer, default: 20, maximum: 200 }
+ *       - name: offset
+ *         in: query
+ *         schema: { type: integer, default: 0 }
+ *       - name: since_created_at
+ *         in: query
+ *         schema: { type: string, format: date-time }
+ *       - name: since_updated_at
+ *         in: query
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Matching orders, newest first.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   id: { type: string, format: uuid }
+ *                   status: { type: string }
+ *                   amount_usdc: { type: string }
+ *                   payment_asset: { type: string }
+ *                   created_at: { type: string, format: date-time }
+ *                   updated_at: { type: string, format: date-time }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.get('/', orderPollLimiter, (req, res) => {
   const { status, limit = 20, offset = 0, since_created_at, since_updated_at } = req.query;
   let query = `SELECT id, status, amount_usdc, payment_asset, created_at, updated_at FROM orders WHERE api_key_id = ?`;
@@ -853,6 +945,41 @@ const TERMINAL_STATUSES = new Set([
 // immediately. A tight loop could hit 1000+ opens/sec, hammering
 // SQLite and socket setup without breaching any counter. Using the
 // existing 600/min poll limiter caps that axis correctly.
+/**
+ * @openapi
+ * /v1/orders/{id}/stream:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: Server-Sent Events stream of order status updates
+ *     description: >
+ *       `Content-Type: text/event-stream`. Emits the same payload shape as
+ *       `GET /v1/orders/{id}` on each status change, then closes the stream
+ *       once the order reaches a terminal status. Capped per API key and
+ *       globally to bound concurrent open connections.
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: SSE stream opened.
+ *         content:
+ *           text/event-stream: {}
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       404:
+ *         description: Order not found for this API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many concurrent streams for this key or globally.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.get('/:id/stream', orderPollLimiter, (req, res) => {
   const orderId = req.params.id;
   const keyId = req.apiKey.id;
@@ -1043,6 +1170,33 @@ router.get('/:id/stream', orderPollLimiter, (req, res) => {
 });
 
 // GET /orders/:id — poll status, returns card details when delivered
+/**
+ * @openapi
+ * /v1/orders/{id}:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: Get order status and (once delivered) card details
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: Order detail.
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/Order' }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       404:
+ *         description: Order not found for this API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.get('/:id', orderPollLimiter, (req, res) => {
   const order = /** @type {any} */ (
     db
