@@ -1,6 +1,15 @@
 require('dotenv').config();
 require('./env');
 
+// Sentry must be initialised before ./app (and therefore before express,
+// http, and the route modules) is required, so the SDK can patch those
+// modules for automatic request instrumentation. Requiring the app first
+// leaves the instrumentation attached to nothing.
+//
+// initSentry() never throws: a missing DSN, a malformed DSN, or an SDK
+// failure all log and return false. Observability must not be able to
+// take the API down.
+const { initSentry, captureException, flush: flushSentry } = require('./lib/sentry-config');
 // Issue #29: must run before `require('./app')` — sentry-config.js's own
 // doc comment says initSentry() "should be called at the very beginning
 // of the application startup before any other code runs" so the SDK's
@@ -65,12 +74,17 @@ function gracefulShutdown(signal) {
     console.error('[stellar_card] stopJobs error:', err);
   }
   server.close((err) => {
-    if (err) {
-      console.error('[stellar_card] server.close error:', err);
-      process.exit(1);
-    }
-    console.log('[stellar_card] shutdown complete');
-    process.exit(0);
+    // Drain the Sentry queue before exiting. Events are buffered and
+    // sent asynchronously, so a crash report captured moments ago is
+    // still in memory at this point and would be lost to the exit.
+    // flushSentry resolves immediately when Sentry is disabled and
+    // never rejects, so the exit path is unchanged when it is off.
+    const exitCode = err ? 1 : 0;
+    if (err) console.error('[stellar_card] server.close error:', err);
+    flushSentry(2000).then(() => {
+      if (exitCode === 0) console.log('[stellar_card] shutdown complete');
+      process.exit(exitCode);
+    });
   });
   // Fallback hard-exit if server.close() never fires (stuck socket,
   // runaway SSE stream, pm2 grace window about to close). 15 s is
@@ -107,6 +121,12 @@ process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
 // with enough context for post-mortem. Log loudly, then fall back to
 // the graceful shutdown path so in-flight work gets a chance to
 // complete.
+//
+// Sentry's own OnUncaughtException / OnUnhandledRejection integrations
+// are deliberately disabled (see lib/sentry-config.js) — the former
+// calls process.exit() on a fatal error, which would kill in-flight
+// orders before the drain below completes. Reporting explicitly from
+// these handlers gets the event AND the graceful shutdown.
 process.on('uncaughtException', (err, origin) => {
   console.error(`[stellar_card] uncaughtException at ${origin}:`, err);
   try {
@@ -116,6 +136,11 @@ process.on('uncaughtException', (err, origin) => {
     });
   } catch {
     /* observability must never re-crash the handler */
+  }
+  try {
+    captureException(err, { level: 'fatal', tags: { origin: String(origin) } });
+  } catch {
+    /* see above */
   }
   gracefulShutdown('uncaughtException');
 });
@@ -131,6 +156,11 @@ process.on('unhandledRejection', (reason) => {
   );
   try {
     bizEvent('process.unhandled_rejection', payload);
+  } catch {
+    /* see above */
+  }
+  try {
+    captureException(reason, { level: 'error', tags: { source: 'unhandledRejection' } });
   } catch {
     /* see above */
   }
