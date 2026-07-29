@@ -12,6 +12,7 @@ const {
   sentryErrorHandler,
   setRequestId: setSentryRequestId,
 } = require('./lib/sentry-config');
+const { registerRoutes } = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
 const { registerRoutes } = require('./routes');
 
