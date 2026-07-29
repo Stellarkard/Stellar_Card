@@ -21,6 +21,7 @@ const internalRouter = require('./api/internal');
 const platformRouter = require('./api/platform');
 const vccCallbackRouter = require('./api/vcc-callback');
 const { MAX_WEBHOOK_ATTEMPTS: MAX_WEBHOOK_ATTEMPTS_FOR_STATUS } = require('./fulfillment');
+const errorHandler = require('./middleware/errorHandler');
 
 const app = express();
 
@@ -891,14 +892,8 @@ const vccCallbackLimiter = rateLimit({
 });
 app.use('/vcc-callback', vccCallbackLimiter, vccCallbackRouter);
 
-// Structured CORS denial — cors() throws on rejected origins; catch and return clean 403
-app.use((err, req, res, _next) => {
-  if (err.message && err.message.startsWith('CORS:')) {
-    return res.status(403).json({ error: 'forbidden', message: 'Origin not allowed' });
-  }
-  console.error('[app] unhandled error:', err.message);
-  res.status(500).json({ error: 'internal_error' });
-});
+// Standardized global error handler
+app.use(errorHandler);
 
 module.exports = app;
 // Test-only exports for the 2026-04-16 audit hardening. Not part of
