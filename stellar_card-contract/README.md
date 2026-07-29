@@ -111,3 +111,18 @@ Each successful payment emits one Soroban event. The `topic[0]` symbol identifie
 | `value`    | `i128`    | Amount in stroops (1 XLM = 10,000,000) |
 
 The backend event watcher filters on both `pay_usdc` and `pay_xlm` symbols.
+
+## Testing & Verification
+
+```bash
+# Run Soroban contract unit & integration tests
+cargo test
+
+# Format contract source files
+cargo fmt --check
+```
+
+## Security & Dependabot
+
+- Dependencies in `Cargo.toml` are monitored automatically by Dependabot (`.github/dependabot.yml`).
+- Automated Rust vulnerability checks run via `cargo-audit` in security workflows.

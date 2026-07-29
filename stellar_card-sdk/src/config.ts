@@ -208,7 +208,10 @@ export function assertSafeBaseUrl(url: string, opts: { context?: string } = {}):
  * We fsync+rename so the temp path is always freshly created with
  * 0600, then the rename replaces the target atomically.
  */
-export function saveStellar_CardConfig(config: Stellar_CardConfig, configPath?: string): { path: string } {
+export function saveStellar_CardConfig(
+  config: Stellar_CardConfig,
+  configPath?: string,
+): { path: string } {
   const p = configPath || defaultConfigPath();
   const dir = path.dirname(p);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });

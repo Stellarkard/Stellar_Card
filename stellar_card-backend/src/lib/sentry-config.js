@@ -77,8 +77,11 @@ function initSentry() {
     },
   });
 
-  console.log('[sentry] Initialized error tracking (dsn=%s, env=%s)',
-    SENTRY_DSN.substring(0, 20) + '...', process.env.NODE_ENV);
+  console.log(
+    '[sentry] Initialized error tracking (dsn=%s, env=%s)',
+    SENTRY_DSN.substring(0, 20) + '...',
+    process.env.NODE_ENV,
+  );
 }
 
 /**

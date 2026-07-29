@@ -1,1 +1,0 @@
-core::option::Option<soroban_sdk::Map<soroban_sdk::Address, Role>>
