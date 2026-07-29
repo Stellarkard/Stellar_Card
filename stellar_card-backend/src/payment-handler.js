@@ -514,4 +514,5 @@ module.exports = {
   // Test-only exports for the 2026-04-15 audit hardening.
   _parseStrictPositiveStroops: parseStrictPositiveStroops,
   _safeErrorMessage: safeErrorMessage,
+  _stroopsToDecimal: stroopsToDecimal,
 };

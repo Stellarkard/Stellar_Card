@@ -10,9 +10,9 @@
 // surfaces under /dashboard/platform/*. See src/lib/platform.js.
 
 module.exports = function requirePlatformOwner(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'unauthorized' });
+  if (!req.user) return res.status(401).json({ error: 'unauthorized', req_id: req.id || null });
   if (!req.user.is_platform_owner) {
-    return res.status(403).json({ error: 'forbidden', message: 'Platform owner only' });
+    return res.status(403).json({ error: 'forbidden', message: 'Platform owner only', req_id: req.id || null });
   }
   next();
 };

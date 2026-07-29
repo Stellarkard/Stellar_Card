@@ -12,8 +12,10 @@ on:
     branches:
       - main
       - develop
+      - 'feature/**'
     paths:
       - 'stellar_card-frontend/**'
+      - '.github/workflows/e2e.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,7 +23,7 @@ concurrency:
 
 jobs:
   e2e:
-    name: Playwright E2E (${{ matrix.shard }})
+    name: Playwright E2E (${{ matrix.project }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -30,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        project: [chromium, firefox, webkit, 'Mobile Chrome', 'Mobile Safari', 'Microsoft Edge']
 
     steps:
       - uses: actions/checkout@v4
@@ -45,19 +47,62 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright browsers
-        run: npx playwright install chromium --with-deps
+      # Project names like "Mobile Chrome" / "Mobile Safari" are device
+      # emulation presets, not installable browser engines — they run on
+      # the underlying chromium/webkit engine. "Microsoft Edge" runs on
+      # the `msedge` channel, which Playwright installs as its own binary
+      # (not plain chromium). Resolve the engine name so `playwright
+      # install` gets a name it understands.
+      - name: Resolve browser engine for project
+        id: engine
+        run: |
+          case "${{ matrix.project }}" in
+            "Mobile Chrome") ENGINE=chromium ;;
+            "Mobile Safari") ENGINE=webkit ;;
+            "Microsoft Edge") ENGINE=msedge ;;
+            *) ENGINE="${{ matrix.project }}" ;;
+          esac
+          echo "name=$ENGINE" >> "$GITHUB_OUTPUT"
 
-      - name: Run E2E tests (shard ${{ matrix.shard }}/2)
-        run: npx playwright test --shard=${{ matrix.shard }}/2
+      # Playwright browser binaries are large (~100s of MB) and rarely
+      # change between runs — cache them keyed on the installed
+      # @playwright/test version and the resolved engine (device-emulation
+      # projects share their engine's cache; matrix jobs run on isolated
+      # runners so there's no cross-project contamination to worry about).
+      - name: Get installed Playwright version
+        id: playwright-version
+        run: |
+          echo "version=$(node -e "console.log(require('./node_modules/@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ steps.engine.outputs.name }}-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers & dependencies (${{ matrix.project }})
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps ${{ steps.engine.outputs.name }}
+
+      # Even on a cache hit for the browser binary itself, the OS-level
+      # shared libraries Playwright needs (from `--with-deps`) live outside
+      # the cached path and won't survive a fresh runner — install just
+      # those cheaply.
+      - name: Install OS dependencies for Playwright (${{ matrix.project }})
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps ${{ steps.engine.outputs.name }}
+
+      - name: Run E2E tests (${{ matrix.project }})
+        run: npx playwright test --project=${{ matrix.project }}
         env:
           CI: true
 
-      - name: Upload test results
+      - name: Upload test results (${{ matrix.project }})
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-results-shard-${{ matrix.shard }}
+          name: e2e-results-${{ matrix.project }}
           path: |
             stellar_card-frontend/test-results/
             stellar_card-frontend/playwright-report/

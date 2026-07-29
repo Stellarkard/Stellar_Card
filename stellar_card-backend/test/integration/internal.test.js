@@ -199,7 +199,8 @@ describe('GET /internal/orders/:id/card — F1 audit row shape', () => {
     // order from each. The audit rows must reflect the different
     // roles. Pre-fix they'd both be 'internal_card_reveal' and
     // an ops query filtering by role couldn't distinguish them.
-    process.env.CARDS402_CARD_REVEAL_EMAILS = 'owner-test@stellar_card.com,admin-test@stellar_card.com';
+    process.env.CARDS402_CARD_REVEAL_EMAILS =
+      'owner-test@stellar_card.com,admin-test@stellar_card.com';
 
     const owner = createTestSession({ email: 'owner-test@stellar_card.com', role: 'owner' });
     const admin = createTestSession({ email: 'admin-test@stellar_card.com', role: 'admin' });
@@ -246,5 +247,80 @@ describe('GET /internal/orders/:id/card — F1 audit row shape', () => {
       .set('Authorization', authHeader(token));
     assert.equal(res.status, 409);
     assert.equal(res.body.error, 'no_card');
+  });
+});
+
+// ── GET /internal/orders — filter and PII guard ────────────────────────
+
+describe('GET /internal/orders — status and key filters', () => {
+  beforeEach(() => resetDb());
+
+  it('filters orders by status', async () => {
+    const { token } = createTestSession();
+    const key = await createTestKey({ label: 'filter-agent' });
+    seedOrder({ api_key_id: key.id, status: 'delivered' });
+    seedOrder({ api_key_id: key.id, status: 'failed' });
+    const res = await request
+      .get('/internal/orders?status=delivered')
+      .set('Authorization', authHeader(token));
+    assert.equal(res.status, 200);
+    assert.equal(res.body.length, 1);
+    assert.equal(res.body[0].status, 'delivered');
+  });
+
+  it('filters orders by api_key_id', async () => {
+    const { token } = createTestSession();
+    const key1 = await createTestKey({ label: 'agent-a' });
+    const key2 = await createTestKey({ label: 'agent-b' });
+    seedOrder({ api_key_id: key1.id, status: 'delivered' });
+    seedOrder({ api_key_id: key2.id, status: 'delivered' });
+    const res = await request
+      .get(`/internal/orders?api_key_id=${key1.id}`)
+      .set('Authorization', authHeader(token));
+    assert.equal(res.status, 200);
+    assert.equal(res.body.length, 1);
+  });
+
+  it('returns empty list when status matches no orders', async () => {
+    const { token } = createTestSession();
+    const key = await createTestKey({ label: 'no-match-agent' });
+    seedOrder({ api_key_id: key.id, status: 'delivered' });
+    const res = await request
+      .get('/internal/orders?status=expired')
+      .set('Authorization', authHeader(token));
+    assert.equal(res.status, 200);
+    assert.equal(res.body.length, 0);
+  });
+
+  it('does NOT return card_number / card_cvv / card_expiry in the list (PII guard)', async () => {
+    const { token } = createTestSession();
+    const key = await createTestKey({ label: 'pii-guard-agent' });
+    const orderId = seedOrder({ api_key_id: key.id, status: 'delivered' });
+    db.prepare(
+      `UPDATE orders SET card_number = '4111111111111111', card_cvv = '123', card_expiry = '12/27', card_brand = 'Visa' WHERE id = ?`,
+    ).run(orderId);
+    const res = await request
+      .get('/internal/orders')
+      .set('Authorization', authHeader(token));
+    assert.equal(res.status, 200);
+    const row = res.body.find((r) => r.id === orderId);
+    assert.ok(row, 'seeded order must appear in the list');
+    assert.equal(row.card_number, undefined, 'card_number must not appear in list');
+    assert.equal(row.card_cvv, undefined, 'card_cvv must not appear in list');
+    assert.equal(row.card_expiry, undefined, 'card_expiry must not appear in list');
+    // Instead, a has_card boolean flag indicates presence.
+    assert.equal(row.has_card, 1, 'has_card flag must be 1 when card data exists');
+  });
+
+  it('reports has_card=0 when order has no card data', async () => {
+    const { token } = createTestSession();
+    const key = await createTestKey({ label: 'no-card-agent' });
+    seedOrder({ api_key_id: key.id, status: 'pending_payment' });
+    const res = await request
+      .get('/internal/orders')
+      .set('Authorization', authHeader(token));
+    assert.equal(res.status, 200);
+    const row = res.body.find((r) => r.api_key_id === key.id);
+    assert.equal(row.has_card, 0);
   });
 });

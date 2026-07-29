@@ -1,14 +1,25 @@
 // @ts-check
 // Express application — importable without starting the Stellar watcher or jobs.
 // index.js is the entry point that wires everything up for production.
+//
+// This file owns exactly three things, in this order:
+//
+//   1. The application-level middleware every request passes through:
+//      Sentry scope, request-id correlation, helmet, the HTTPS guard,
+//      CORS, and JSON body parsing.
+//   2. `registerRoutes(app)` — every mount lives in src/routes/index.js.
+//   3. The terminal chain: the 404 fallback and the error handlers.
+//
+// There are no route handlers here. "Which paths require an api key"
+// is answered in one place (src/routes/index.js) rather than being
+// spread across four screens of handler bodies — see docs/ROUTING.md.
 
 const crypto = require('crypto');
 const express = require('express');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const helmet = require('helmet');
 const cors = require('cors');
-const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const db = require('./db');
-const { log } = require('./lib/logger');
 const auth = require('./middleware/auth');
 const ordersRouter = require('./api/orders');
 const { buildBudget, policyCheck, orderPollLimiter, openSSEStreamCount } = require('./api/orders');
@@ -21,8 +32,35 @@ const internalRouter = require('./api/internal');
 const platformRouter = require('./api/platform');
 const vccCallbackRouter = require('./api/vcc-callback');
 const { MAX_WEBHOOK_ATTEMPTS: MAX_WEBHOOK_ATTEMPTS_FOR_STATUS } = require('./fulfillment');
+const { log } = require('./lib/logger');
+const {
+  sentryRequestHandler,
+  sentryErrorHandler,
+  setRequestId: setSentryRequestId,
+} = require('./lib/sentry-config');
+const { registerRoutes } = require('./routes');
+const errorHandler = require('./middleware/errorHandler');
+const swaggerUi = require('swagger-ui-express');
+const { openapiSpec } = require('./docs/openapi');
 
 const app = express();
+
+// Sentry's request handler must be the very first middleware: it opens
+// the per-request scope that every later captureException() attaches
+// itself to, and anything mounted above it reports without request
+// context. It is a pass-through no-op when SENTRY_DSN is unset, which is
+// the case in development and across the whole test suite.
+// Issue #29: src/lib/sentry-config.js was fully built (init, request/error
+// handler middleware, capture helpers) but never actually wired into the
+// app — initSentry() had no caller anywhere in src/, so error tracking was
+// silently a no-op in every environment, production included. The request
+// handler must be the very first middleware (per Sentry's own docs) so it
+// can attach its transaction/scope before anything else runs; the error
+// handler must run before (not instead of) the app's own errorHandler so
+// Sentry sees every error the same way that handler does. Both are no-ops
+// outside production (see sentryRequestHandler/sentryErrorHandler in
+// sentry-config.js), so this has no effect on dev/test behavior.
+app.use(sentryRequestHandler());
 
 // B-13: Attach a unique request ID to every request for log correlation.
 //
@@ -92,6 +130,10 @@ app.use((req, res, next) => {
   }
   req.id = validated || crypto.randomUUID();
   res.setHeader('X-Request-ID', req.id);
+  // Tag the Sentry scope with the same correlation id the structured
+  // logs carry, so an event in Sentry can be joined back to the log
+  // lines for the request that produced it. No-op when Sentry is off.
+  setSentryRequestId(req.id);
   log('info', 'request', { req_id: req.id, method: req.method, path: req.path });
   next();
 });
@@ -219,14 +261,13 @@ app.use(
   }),
 );
 
-const adminLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 100,
-  keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
-});
+// ── Routes ────────────────────────────────────────────────────────────────────
+// Every route lives in its own module under api/, and routes/index.js owns
+// the mount table. Three of those mounts are order-sensitive (the
+// unauthenticated MPP and claim endpoints, and the pre-auth failure limiter)
+// and the reasoning is documented there rather than here, so the answer to
+// "which paths require an api key" lives in exactly one place.
+registerRoutes(app);
 
 // Note: /auth/login and /auth/verify carry their own per-path rate
 // limiters in api/auth.js. We used to mount a blanket `authLimiter`
@@ -238,12 +279,43 @@ const adminLimiter = rateLimit({
 // endpoints (minting codes, verifying codes) get throttled.
 
 // Audit C-9: API version endpoint for deploy-time compatibility checks.
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 100,
+  keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
+});
+
 const versionLimiter = rateLimit({
   windowMs: 60000,
   limit: 60,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
 });
+/**
+ * @openapi
+ * /api/version:
+ *   get:
+ *     tags: [System]
+ *     summary: Service version and enabled features
+ *     description: Unauthenticated — used for deploy-time compatibility checks.
+ *     responses:
+ *       200:
+ *         description: Version info.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 service: { type: string, example: stellar_card }
+ *                 version: { type: string, example: 0.1.0 }
+ *                 hmac_protocol: { type: string, example: v3 }
+ *                 features:
+ *                   type: array
+ *                   items: { type: string }
+ */
 app.get('/api/version', versionLimiter, (_req, res) => {
   res.json({
     service: 'stellar_card',
@@ -252,6 +324,27 @@ app.get('/api/version', versionLimiter, (_req, res) => {
     features: ['idempotency_key', 'soroban_contract', 'webhook_circuit_breaker', 'callback_nonce'],
   });
 });
+
+// OpenAPI docs. The global helmet CSP above (default-src 'self', no
+// inline scripts/styles) blocks swagger-ui's bundled assets, so this
+// path gets its own permissive CSP scoped to /docs only — every other
+// route keeps the strict default.
+app.use(
+  '/docs',
+  helmetMiddleware({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+      },
+    },
+  }),
+  swaggerUi.serve,
+  swaggerUi.setup(openapiSpec),
+);
+app.get('/docs.json', (_req, res) => res.json(openapiSpec));
 
 // POST /v1/agent/claim — unauthenticated one-shot claim endpoint.
 // The agent posts a code minted by the dashboard; we return the real
@@ -270,6 +363,51 @@ const claimLimiter = rateLimit({
       message: 'Too many claim attempts. Wait a minute and try again.',
     }),
 });
+/**
+ * @openapi
+ * /v1/agent/claim:
+ *   post:
+ *     tags: [Agent Onboarding]
+ *     summary: Redeem a one-shot claim code for a live API key
+ *     description: >
+ *       Unauthenticated — the code itself is the credential. Each code can be
+ *       redeemed exactly once; the response is the only time the api_key is
+ *       ever returned in plaintext.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [code]
+ *             properties:
+ *               code: { type: string, description: 'Claim code minted by the dashboard.' }
+ *     responses:
+ *       200:
+ *         description: Claim redeemed.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 api_key: { type: string }
+ *                 webhook_secret: { type: string, nullable: true }
+ *                 api_key_id: { type: string, format: uuid }
+ *                 label: { type: string, nullable: true }
+ *                 api_url: { type: string, format: uri }
+ *       400:
+ *         description: Missing code.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Claim code is invalid, expired, or already used.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many claim attempts from this IP.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 app.post('/v1/agent/claim', claimLimiter, (req, res) => {
   const { event: bizEvent } = require('./lib/logger');
   const secretBox = require('./lib/secret-box');
@@ -481,6 +619,40 @@ function sysStateInt(key) {
   return parseInt(row?.value || '0', 10) || 0;
 }
 
+/**
+ * @openapi
+ * /status:
+ *   get:
+ *     tags: [System]
+ *     summary: Public system health and order-volume status
+ *     description: Unauthenticated. Powers the public status page and dashboard banner.
+ *     responses:
+ *       200:
+ *         description: Status snapshot.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 frozen: { type: boolean }
+ *                 consecutive_failures: { type: integer }
+ *                 orders:
+ *                   type: object
+ *                   properties:
+ *                     pending_payment: { type: integer }
+ *                     in_progress: { type: integer }
+ *                 stellar_watcher:
+ *                   type: object
+ *                   properties:
+ *                     stalled: { type: boolean }
+ *                     age_seconds: { type: integer, nullable: true }
+ *                     max_age_seconds: { type: integer }
+ *       429:
+ *         description: Too many requests from this IP.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 app.get('/status', statusLimiter, (req, res) => {
   const frozen =
     /** @type {any} */ (db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get())
@@ -709,6 +881,40 @@ app.use('/v1/orders', ordersRouter);
 // throttle as /v1/orders polling. Before this limiter was added, a
 // compromised key could enumerate the owner's daily spend and bruteforce
 // policy thresholds without burning order-creation budget.
+/**
+ * @openapi
+ * /v1/policy/check:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: Preview whether an order amount would pass spend policy
+ *     description: Read-only — does not persist a policy decision or create an order.
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: amount
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *         description: USD amount to check, e.g. "10.00".
+ *     responses:
+ *       200:
+ *         description: Policy check result.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 allowed: { type: boolean }
+ *                 reason: { type: string, nullable: true }
+ *                 remaining_daily: { type: string, nullable: true }
+ *       400:
+ *         description: Missing or invalid amount.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 app.get('/v1/policy/check', orderPollLimiter, (req, res) => {
   const amount = String(req.query.amount || '');
   if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
@@ -738,6 +944,56 @@ const agentStatusLimiter = rateLimit({
   legacyHeaders: false,
   handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
 });
+/**
+ * @openapi
+ * /v1/agent/status:
+ *   post:
+ *     tags: [Agent API]
+ *     summary: Report an agent's onboarding / lifecycle state
+ *     description: >
+ *       Idempotent — POSTing the same state repeatedly is a no-op side-effect-wise.
+ *       Drives the live onboarding pill in the dashboard via SSE.
+ *     security: [{ ApiKeyAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             description: At least one of state, wallet_public_key, detail must be provided.
+ *             properties:
+ *               state:
+ *                 type: string
+ *                 enum: [initializing, awaiting_funding, funded]
+ *               wallet_public_key:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Stellar G-address (Ed25519, checksum-validated).
+ *               detail:
+ *                 type: string
+ *                 nullable: true
+ *                 maxLength: 500
+ *     responses:
+ *       200:
+ *         description: State updated.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { ok: { type: boolean } }
+ *       400:
+ *         description: Invalid state, wallet_public_key, detail, or nothing to update.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many status reports for this key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 app.post('/v1/agent/status', agentStatusLimiter, (req, res) => {
   const { emit: emitBusEvent } = require('./lib/event-bus');
   const { StrKey } = require('@stellar/stellar-sdk');
@@ -834,6 +1090,39 @@ app.post('/v1/agent/status', agentStatusLimiter, (req, res) => {
 // F3-usage: added explicit expired and rejected counters so agents
 //   can see the full picture — previously both were hidden inside the
 //   wrong in_progress bucket.
+/**
+ * @openapi
+ * /v1/usage:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: Caller's own spend budget and order counts
+ *     security: [{ ApiKeyAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Usage summary for the authenticated API key.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 api_key_id: { type: string, format: uuid }
+ *                 label: { type: string, nullable: true }
+ *                 budget: { type: object }
+ *                 orders:
+ *                   type: object
+ *                   properties:
+ *                     total: { type: integer }
+ *                     delivered: { type: integer }
+ *                     failed: { type: integer }
+ *                     refunded: { type: integer }
+ *                     expired: { type: integer }
+ *                     rejected: { type: integer }
+ *                     in_progress: { type: integer }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 app.get('/v1/usage', orderPollLimiter, (req, res) => {
   const counts = db
     .prepare(
@@ -891,14 +1180,28 @@ const vccCallbackLimiter = rateLimit({
 });
 app.use('/vcc-callback', vccCallbackLimiter, vccCallbackRouter);
 
-// Structured CORS denial — cors() throws on rejected origins; catch and return clean 403
-app.use((err, req, res, _next) => {
-  if (err.message && err.message.startsWith('CORS:')) {
-    return res.status(403).json({ error: 'forbidden', message: 'Origin not allowed' });
-  }
-  console.error('[app] unhandled error:', err.message);
-  res.status(500).json({ error: 'internal_error' });
+// Standardized global error handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'not_found',
+    message: 'The requested endpoint does not exist.',
+    req_id: req.id,
+  });
 });
+
+// ── Terminal error chain ──────────────────────────────────────────────────────
+// Issue #29: Sentry's error handler must be mounted after all routes but
+// before the app's own errorHandler, so it can capture the error and then
+// call next(err) to hand off to errorHandler for the actual response —
+// see the app.use(sentryRequestHandler()) comment above for why this was
+// previously dead code.
+app.use(sentryErrorHandler());
+
+// Standardized global error handler. Owns every error response shape,
+// including the structured 403 for a CORS-rejected origin — cors() throws
+// on a disallowed origin and errorHandler turns that into
+// `{ error: 'forbidden', message: 'Origin not allowed' }`.
+app.use(errorHandler);
 
 module.exports = app;
 // Test-only exports for the 2026-04-16 audit hardening. Not part of

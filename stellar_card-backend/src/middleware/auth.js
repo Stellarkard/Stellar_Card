@@ -51,16 +51,20 @@ module.exports = async function auth(req, res, next) {
   // Coerce to a single string. Express hands duplicated headers through
   // as either a joined string or (for some header names) an array; reject
   // arrays outright rather than risk `.startsWith` throwing below.
-  if (!rawKey) return res.status(401).json({ error: 'missing_api_key' });
-  if (typeof rawKey !== 'string') return res.status(401).json({ error: 'invalid_api_key' });
+  if (!rawKey) return res.status(401).json({ error: 'missing_api_key', req_id: req.id || null });
+  if (typeof rawKey !== 'string') return res.status(401).json({ error: 'invalid_api_key', req_id: req.id || null });
   const key = rawKey;
 
   // Early rejections — no DB work, no bcrypt work. A malformed key used
   // to trigger a full-table scan with a bcrypt compare against every row,
   // which let an attacker turn one HTTP request into O(n) bcrypt work on
   // our box. Now we bail before touching the DB.
-  if (!key.startsWith('stellar_card_') || key.length < KEY_MIN_LENGTH || key.length > KEY_MAX_LENGTH) {
-    return res.status(401).json({ error: 'invalid_api_key' });
+  if (
+    !key.startsWith('stellar_card_') ||
+    key.length < KEY_MIN_LENGTH ||
+    key.length > KEY_MAX_LENGTH
+  ) {
+    return res.status(401).json({ error: 'invalid_api_key', req_id: req.id || null });
   }
   const keyPrefix = key.slice(9, 21);
 
@@ -120,12 +124,12 @@ module.exports = async function auth(req, res, next) {
         );
         return res
           .status(401)
-          .json({ error: 'api_key_expired', message: 'This API key has expired.' });
+          .json({ error: 'api_key_expired', message: 'This API key has expired.', req_id: req.id || null });
       }
       if (expiresAtMs < Date.now()) {
         return res
           .status(401)
-          .json({ error: 'api_key_expired', message: 'This API key has expired.' });
+          .json({ error: 'api_key_expired', message: 'This API key has expired.', req_id: req.id || null });
       }
     }
     if (candidate.suspended) {
@@ -137,6 +141,7 @@ module.exports = async function auth(req, res, next) {
       return res.status(401).json({
         error: 'api_key_suspended',
         message: 'This API key has been suspended by the operator.',
+        req_id: req.id || null,
       });
     }
 
@@ -164,5 +169,5 @@ module.exports = async function auth(req, res, next) {
     return next();
   }
 
-  return res.status(401).json({ error: 'invalid_api_key' });
+  return res.status(401).json({ error: 'invalid_api_key', req_id: req.id || null });
 };

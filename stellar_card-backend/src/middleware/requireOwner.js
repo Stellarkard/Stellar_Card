@@ -4,11 +4,11 @@
 // Applied to destructive admin operations that only owners should perform.
 
 module.exports = function requireOwner(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'unauthenticated' });
+  if (!req.user) return res.status(401).json({ error: 'unauthenticated', req_id: req.id || null });
   if (req.user.role !== 'owner') {
     return res
       .status(403)
-      .json({ error: 'owner_only', message: 'This action requires owner access.' });
+      .json({ error: 'owner_only', message: 'This action requires owner access.', req_id: req.id || null });
   }
   next();
 };

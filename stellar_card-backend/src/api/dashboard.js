@@ -21,6 +21,7 @@ const { recordAuditFromReq, listAudit } = require('../lib/audit');
 const alerts = require('../lib/alerts');
 const enabledMerchants = require('../lib/enabled-merchants');
 const webhookLog = require('../lib/webhook-log');
+const { AppError } = require('../lib/app-error');
 
 const router = Router();
 
@@ -1172,7 +1173,7 @@ router.get('/webhook-deliveries', requirePermission('webhook:read'), (req, res) 
 // verify their endpoint works before an agent goes live. Uses the
 // same `fireWebhook` helper so SSRF protection + signing + logging
 // all apply uniformly.
-router.post('/webhook-deliveries/test', requirePermission('webhook:test'), async (req, res) => {
+router.post('/webhook-deliveries/test', requirePermission('webhook:test'), async (req, res, next) => {
   const { url, webhook_secret } = req.body || {};
   if (!url) return res.status(400).json({ error: 'missing_url' });
 
@@ -1202,10 +1203,7 @@ router.post('/webhook-deliveries/test', requirePermission('webhook:test'), async
     });
     res.json({ ok: true, note: 'Delivered — check webhook log for details' });
   } catch (err) {
-    res.status(502).json({
-      error: 'delivery_failed',
-      message: /** @type {Error} */ (err).message,
-    });
+    return next(new AppError(502, 'delivery_failed', err.message));
   }
 });
 
@@ -1257,23 +1255,18 @@ router.get('/policy-decisions', requirePermission('audit:read'), (req, res) => {
 // see treasury internals — only the email that runs the stellar_card instance
 // can pull this. Balance is fetched client-side from Horizon so the
 // backend never has to touch the network on every poll.
-router.get('/platform-wallet', requirePlatformOwner, (req, res) => {
+router.get('/platform-wallet', requirePlatformOwner, (req, res, next) => {
   try {
     const { Keypair } = require('@stellar/stellar-sdk');
     const secret = process.env.STELLAR_XLM_SECRET;
-    if (!secret) {
-      return res.status(503).json({ error: 'STELLAR_XLM_SECRET not configured' });
-    }
+    if (!secret) return next(new AppError(503, 'STELLAR_XLM_SECRET not configured'));
     const keypair = Keypair.fromSecret(secret);
     res.json({
       public_key: keypair.publicKey(),
       network: process.env.STELLAR_NETWORK || 'mainnet',
     });
   } catch (err) {
-    res.status(500).json({
-      error: 'failed_to_derive_platform_wallet',
-      message: err instanceof Error ? err.message : String(err),
-    });
+    next(new AppError(500, 'failed_to_derive_platform_wallet', err.message));
   }
 });
 

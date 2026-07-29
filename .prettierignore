@@ -1,9 +1,6 @@
-node_modules
-dist
-build
-.next
-out
-coverage
-*.min.js
-pnpm-lock.yaml
-package-lock.json
+**/.next
+**/coverage
+**/dist
+**/node_modules
+**/package-lock.json
+stellar_card-contract/target

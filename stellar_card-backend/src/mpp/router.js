@@ -20,6 +20,26 @@ const { createChallenge, loadChallenge, loadOrderByReceiptId } = require('./chal
 const { buildDiscoveryDoc, buildChallengeBody, buildWwwAuthenticate } = require('./discovery');
 const { verifyAndCreateMppOrder } = require('./verify');
 const { waitForDelivery } = require('./wait-for-delivery');
+const rateLimitHandler = require('../middleware/rateLimitHandler');
+
+// Rate limiters for public endpoints
+const discoveryLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: rateLimitHandler('MPP discovery rate limit exceeded. Retry in a minute.'),
+});
+
+const receiptLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: rateLimitHandler('Receipt polling rate limit exceeded. Retry in a minute.'),
+});
 
 // Per-IP rate limit on challenge creation. An unauthenticated endpoint
 // must never be a free DoS amplifier — each GET creates a row in
@@ -31,11 +51,7 @@ const challengeLimiter = rateLimit({
   keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-  handler: (_req, res) =>
-    res.status(429).json({
-      error: 'too_many_requests',
-      message: 'MPP challenge rate limit exceeded. Retry in a minute.',
-    }),
+  handler: rateLimitHandler('MPP challenge rate limit exceeded. Retry in a minute.'),
 });
 
 const AMOUNT_RE = /^\d+(?:\.\d{1,2})?$/;
@@ -53,7 +69,7 @@ function buildMppRouter(opts = {}) {
   const ttlMs = opts.ttlMs ?? (() => parseInt(process.env.MPP_CHALLENGE_TTL_MS || '600000', 10));
 
   // ── Discovery ─────────────────────────────────────────────────────────
-  router.get('/.well-known/mpp', (_req, res) => {
+  router.get('/.well-known/mpp', discoveryLimiter, (_req, res) => {
     res.set('Cache-Control', 'public, max-age=60');
     return res.json(buildDiscoveryDoc());
   });
@@ -138,8 +154,8 @@ function buildMppRouter(opts = {}) {
   });
 
   // ── Receipt polling (202 → 200 transition) ────────────────────────────
-  router.get('/mpp/receipts/:id', (req, res) => {
-    const row = loadOrderByReceiptId(req.params.id);
+  router.get('/mpp/receipts/:id', receiptLimiter, (req, res) => {
+    const row = loadOrderByReceiptId(String(req.params.id));
     if (!row) {
       return res.status(404).json({
         error: 'receipt_not_found',

@@ -31,14 +31,45 @@ require('../helpers/env');
 
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
-const { db, resetDb, createTestKey } = require('../helpers/app');
+const bcrypt = require('bcryptjs');
+const db = require('../../src/db');
 
 const {
   handlePayment,
   _parseStrictPositiveStroops,
   _safeErrorMessage,
+  _stroopsToDecimal,
 } = require('../../src/payment-handler');
+
+/** Minimal test helper: create an API key directly in the DB. */
+async function createTestKey({ label = 'test-agent' } = {}) {
+  const rawKey = `stellar_card_${crypto.randomBytes(24).toString('hex')}`;
+  const keyHash = await bcrypt.hash(rawKey, 4);
+  const id = uuidv4();
+  const webhookSecret = `whsec_${crypto.randomBytes(32).toString('hex')}`;
+  const keyPrefix = rawKey.slice(9, 21);
+  db.prepare(
+    `INSERT INTO api_keys (id, key_hash, key_prefix, label, webhook_secret)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(id, keyHash, keyPrefix, label, webhookSecret);
+  return { id, key: rawKey, webhookSecret };
+}
+
+/** Wipe test data between cases. */
+function resetDb() {
+  for (const tbl of [
+    'orders', 'api_keys', 'idempotency_keys', 'webhook_queue',
+    'unmatched_payments', 'sessions', 'users', 'auth_codes',
+    'audit_log', 'alert_rules', 'alert_firings', 'webhook_deliveries',
+  ]) {
+    db.prepare(`DELETE FROM ${tbl}`).run();
+  }
+  for (const tbl of ['policy_decisions', 'approval_requests', 'agent_claims', 'stellar_dead_letter']) {
+    try { db.prepare(`DELETE FROM ${tbl}`).run(); } catch (_) { /* table may not exist */ }
+  }
+}
 
 // ── F1-payment-handler: safeErrorMessage ────────────────────────────────────
 
@@ -353,6 +384,297 @@ describe('F3-payment-handler: usdc_overpaid bizEvent', () => {
 
       const overpaid = events.filter((e) => e.name === 'payment.usdc_overpaid');
       assert.equal(overpaid.length, 0, 'exact match must not emit overpaid bizEvent');
+    } finally {
+      logger.event = origEvent;
+      console.error = origError;
+    }
+  });
+});
+
+// ── stroopsToDecimal ────────────────────────────────────────────────────────
+//
+// Inverse of toStroops. Converts BigInt stroops back to a decimal string.
+
+describe('stroopsToDecimal', () => {
+  it('converts a positive integer stroop value', () => {
+    assert.equal(_stroopsToDecimal(100_000_000n), '10.0000000');
+  });
+
+  it('converts a fractional stroop value', () => {
+    assert.equal(_stroopsToDecimal(123_456n), '0.0123456');
+  });
+
+  it('converts zero', () => {
+    assert.equal(_stroopsToDecimal(0n), '0.0000000');
+  });
+
+  it('converts 1 stroop', () => {
+    assert.equal(_stroopsToDecimal(1n), '0.0000001');
+  });
+
+  it('converts a negative stroop value', () => {
+    assert.equal(_stroopsToDecimal(-50_000_000n), '-5.0000000');
+  });
+
+  it('round-trips with toStroops', () => {
+    const cases = [
+      ['10.00', '10.0000000'],
+      ['0.0123456', '0.0123456'],
+      ['100.0000000', '100.0000000'],
+      ['0.0000001', '0.0000001'],
+      ['999999.9999999', '999999.9999999'],
+    ];
+    for (const [input, expected] of cases) {
+      const stroops = _parseStrictPositiveStroops(input);
+      assert.ok(stroops !== null, `parseStrictPositiveStroops(${input}) should not be null`);
+      const back = _stroopsToDecimal(stroops);
+      assert.equal(back, expected, `round-trip ${input} → ${stroops} → ${back}`);
+    }
+  });
+});
+
+// ── Pre-claim validation paths ──────────────────────────────────────────────
+//
+// HandlePayment's Phase-1 guards that route invalid payment events to
+// unmatched_payments without claiming the order. Each path is tested
+// independently with a DB-backed order row.
+
+describe('handlePayment — pre-claim validation paths', () => {
+  let apiKeyId;
+
+  beforeEach(async () => {
+    resetDb();
+    const key = await createTestKey({ label: 'validation-test' });
+    apiKeyId = key.id;
+  });
+
+  function seedOrder({
+    id = uuidv4(),
+    amountUsdc = '10.00',
+    expectedXlm = null,
+    status = 'pending_payment',
+  } = {}) {
+    db.prepare(
+      `INSERT INTO orders (id, status, amount_usdc, expected_xlm_amount, payment_asset, api_key_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'usdc', ?, datetime('now'), datetime('now'))`,
+    ).run(id, status, amountUsdc, expectedXlm, apiKeyId);
+    return id;
+  }
+
+  function findUnmatched(txid) {
+    return db.prepare(`SELECT * FROM unmatched_payments WHERE stellar_txid = ?`).get(txid);
+  }
+
+  it('routes to unknown_order when orderId does not exist', async () => {
+    const txid = 'TX_NO_ORDER';
+    await handlePayment({
+      txid,
+      paymentAsset: 'usdc_soroban',
+      amountUsdc: '10.00',
+      amountXlm: null,
+      senderAddress: 'GUNKNOWN',
+      orderId: 'nonexistent-order-id',
+    });
+    const unmatched = findUnmatched(txid);
+    assert.ok(unmatched, 'expected unmatched_payments row');
+    assert.equal(unmatched.reason, 'unknown_order');
+  });
+
+  it('routes to order_status_failed when order is already failed', async () => {
+    const orderId = seedOrder({ status: 'failed' });
+    const txid = 'TX_FAILED';
+    await handlePayment({
+      txid,
+      paymentAsset: 'usdc_soroban',
+      amountUsdc: '10.00',
+      amountXlm: null,
+      senderAddress: 'GFAILED',
+      orderId,
+    });
+    const unmatched = findUnmatched(txid);
+    assert.ok(unmatched, 'expected unmatched_payments row');
+    assert.equal(unmatched.reason, 'order_status_failed');
+  });
+
+  it('routes to order_status_expired when order has expired', async () => {
+    const orderId = seedOrder({ status: 'expired' });
+    const txid = 'TX_EXPIRED';
+    await handlePayment({
+      txid,
+      paymentAsset: 'usdc_soroban',
+      amountUsdc: '10.00',
+      amountXlm: null,
+      senderAddress: 'GEXPIRED',
+      orderId,
+    });
+    const unmatched = findUnmatched(txid);
+    assert.ok(unmatched, 'expected unmatched_payments row');
+    assert.equal(unmatched.reason, 'order_status_expired');
+  });
+
+  it('routes to unknown_asset when paymentAsset is not usdc_soroban or xlm_soroban', async () => {
+    const orderId = seedOrder();
+    const txid = 'TX_BADASSET';
+    await handlePayment({
+      txid,
+      paymentAsset: 'bitcoin',
+      amountUsdc: null,
+      amountXlm: null,
+      senderAddress: 'GBAD',
+      orderId,
+    });
+    const unmatched = findUnmatched(txid);
+    assert.ok(unmatched, 'expected unmatched_payments row');
+    assert.equal(unmatched.reason, 'unknown_asset');
+  });
+
+  it('routes to underpaid_xlm when on-chain XLM is less than expected', async () => {
+    const orderId = seedOrder({ expectedXlm: '50.0000000' });
+    const txid = 'TX_XLM_UNDER';
+    await handlePayment({
+      txid,
+      paymentAsset: 'xlm_soroban',
+      amountUsdc: null,
+      amountXlm: '40.0000000',
+      senderAddress: 'GXLMUNDER',
+      orderId,
+    });
+    const unmatched = findUnmatched(txid);
+    assert.ok(unmatched, 'expected unmatched_payments row');
+    assert.equal(unmatched.reason, 'underpaid_xlm');
+  });
+
+  it('routes to xlm_not_quoted when expected_xlm_amount is null', async () => {
+    const orderId = seedOrder({ expectedXlm: null });
+    const txid = 'TX_XLM_NOQUOTE';
+    await handlePayment({
+      txid,
+      paymentAsset: 'xlm_soroban',
+      amountUsdc: null,
+      amountXlm: '50.0000000',
+      senderAddress: 'GXLMNQ',
+      orderId,
+    });
+    const unmatched = findUnmatched(txid);
+    assert.ok(unmatched, 'expected unmatched_payments row');
+    assert.equal(unmatched.reason, 'xlm_not_quoted');
+  });
+});
+
+// ── Duplicate payment ───────────────────────────────────────────────────────
+//
+// If two payment events for the same order arrive, the second should find the
+// order already claimed and route to unmatched_payments with reason
+// 'duplicate_payment'.
+
+describe('handlePayment — already-claimed order', () => {
+  let apiKeyId;
+
+  beforeEach(async () => {
+    resetDb();
+    const key = await createTestKey({ label: 'claimed-test' });
+    apiKeyId = key.id;
+  });
+
+  it('routes to order_status_ordering when order is already claimed', async () => {
+    const orderId = uuidv4();
+    db.prepare(
+      `INSERT INTO orders (id, status, amount_usdc, payment_asset, api_key_id, created_at, updated_at)
+       VALUES (?, 'ordering', '10.00', 'usdc', ?, datetime('now'), datetime('now'))`,
+    ).run(orderId, apiKeyId);
+
+    const txid = 'TX_ALREADY_CLAIMED';
+    await handlePayment({
+      txid,
+      paymentAsset: 'usdc_soroban',
+      amountUsdc: '10.00',
+      amountXlm: null,
+      senderAddress: 'GCLAIMED',
+      orderId,
+    });
+    const unmatched = db
+      .prepare(`SELECT * FROM unmatched_payments WHERE stellar_txid = ?`)
+      .get(txid);
+    assert.ok(unmatched, 'expected unmatched_payments row');
+    assert.equal(unmatched.reason, 'order_status_ordering');
+  });
+});
+
+// ── XLM overpayment bizEvent ────────────────────────────────────────────────
+//
+// Symmetric to the F3 USDC overpayment test: when an agent pays in XLM and
+// overpays, a payment.xlm_overpaid bizEvent must fire with the correct excess.
+
+describe('handlePayment — XLM overpayment bizEvent', () => {
+  let apiKeyId;
+
+  beforeEach(async () => {
+    resetDb();
+    const key = await createTestKey({ label: 'xlm-overpaid-test' });
+    apiKeyId = key.id;
+  });
+
+  it('emits payment.xlm_overpaid when agent pays more XLM than expected', async () => {
+    const logger = require('../../src/lib/logger');
+    const origEvent = logger.event;
+    const events = [];
+    logger.event = (name, fields) => events.push({ name, fields });
+    const origError = console.error;
+    console.error = () => {};
+
+    try {
+      const orderId = uuidv4();
+      db.prepare(
+        `INSERT INTO orders (id, status, amount_usdc, expected_xlm_amount, payment_asset, api_key_id, created_at, updated_at)
+         VALUES (?, 'pending_payment', '10.00', '50.0000000', 'usdc', ?, datetime('now'), datetime('now'))`,
+      ).run(orderId, apiKeyId);
+
+      await handlePayment({
+        txid: 'TX_XLM_OVER',
+        paymentAsset: 'xlm_soroban',
+        amountUsdc: null,
+        amountXlm: '55.0000000',
+        senderAddress: 'GXLMOVER',
+        orderId,
+      });
+
+      const overpaid = events.find((e) => e.name === 'payment.xlm_overpaid');
+      assert.ok(overpaid, 'expected payment.xlm_overpaid bizEvent');
+      assert.equal(overpaid.fields.order_id, orderId);
+      assert.match(overpaid.fields.excess_xlm, /^5\.0000000$/);
+      assert.equal(overpaid.fields.txid, 'TX_XLM_OVER');
+    } finally {
+      logger.event = origEvent;
+      console.error = origError;
+    }
+  });
+
+  it('does NOT emit payment.xlm_overpaid on an exact XLM match', async () => {
+    const logger = require('../../src/lib/logger');
+    const origEvent = logger.event;
+    const events = [];
+    logger.event = (name, fields) => events.push({ name, fields });
+    const origError = console.error;
+    console.error = () => {};
+
+    try {
+      const orderId = uuidv4();
+      db.prepare(
+        `INSERT INTO orders (id, status, amount_usdc, expected_xlm_amount, payment_asset, api_key_id, created_at, updated_at)
+         VALUES (?, 'pending_payment', '10.00', '50.0000000', 'usdc', ?, datetime('now'), datetime('now'))`,
+      ).run(orderId, apiKeyId);
+
+      await handlePayment({
+        txid: 'TX_XLM_EXACT',
+        paymentAsset: 'xlm_soroban',
+        amountUsdc: null,
+        amountXlm: '50.0000000',
+        senderAddress: 'GXLME',
+        orderId,
+      });
+
+      const overpaid = events.filter((e) => e.name === 'payment.xlm_overpaid');
+      assert.equal(overpaid.length, 0, 'exact XLM match must not emit overpaid bizEvent');
     } finally {
       logger.event = origEvent;
       console.error = origError;

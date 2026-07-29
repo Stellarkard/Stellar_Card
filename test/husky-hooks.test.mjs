@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const rootDir = resolve(import.meta.dirname, '../..');
+const rootDir = resolve(import.meta.dirname, '..');
 
 describe('Husky hooks', () => {
   const huskyDir = resolve(rootDir, '.husky');

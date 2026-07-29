@@ -7,15 +7,14 @@
 //   - aria-pressed reflects the active/inactive toggle state.
 
 import type { ReactNode } from 'react';
-import type { PillTone } from './Pill';
-import { toneTokens, token } from './tokens';
-import { typography } from './tokens';
+import type { Tone } from './tokens';
+import { TONE_VARS, typography } from './tokens';
 
 interface Props {
   active: boolean;
   onClick: () => void;
   count?: number;
-  tone?: PillTone;
+  tone?: Tone;
   children: ReactNode;
 }
 
@@ -30,12 +29,12 @@ export function FilterChip({ active, onClick, count, tone, children }: Props) {
         alignItems: 'center',
         gap: '0.45rem',
         padding: '0.35rem 0.7rem',
-        background: active ? token.surface : 'transparent',
-        border: `1px solid ${active ? token.borderStrong : token.border}`,
+        background: active ? 'var(--surface)' : 'transparent',
+        border: `1px solid ${active ? 'var(--border-strong)' : 'var(--border)'}`,
         borderRadius: 999,
         fontSize: '0.72rem',
         lineHeight: 1,
-        color: active ? token.fg : token.fgMuted,
+        color: active ? 'var(--fg)' : 'var(--fg-muted)',
         cursor: 'pointer',
         fontWeight: active ? 600 : 500,
         whiteSpace: 'nowrap',
@@ -47,7 +46,7 @@ export function FilterChip({ active, onClick, count, tone, children }: Props) {
             width: 6,
             height: 6,
             borderRadius: '50%',
-            background: toneTokens[tone].fg,
+            background: TONE_VARS[tone].fg,
             display: 'inline-block',
             flexShrink: 0,
           }}
@@ -59,9 +58,6 @@ export function FilterChip({ active, onClick, count, tone, children }: Props) {
       {count !== undefined && (
         <span
           style={{
-            color: token.fgDim,
-            fontFamily: token.fontMono,
-            fontSize: '0.66rem',
             color: 'var(--fg-dim)',
             fontFamily: typography.fontMono,
             fontSize: typography.size.xs,

@@ -13,7 +13,7 @@ function getAllowedEmails() {
 }
 
 module.exports = function requireInternal(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'unauthenticated' });
+  if (!req.user) return res.status(401).json({ error: 'unauthenticated', req_id: req.id || null });
 
   // F1-require-internal: defensive type check on req.user.email. requireAuth
   // always populates it from a NOT NULL UNIQUE column in practice, but any
@@ -21,7 +21,7 @@ module.exports = function requireInternal(req, res, next) {
   // a .toLowerCase() TypeError into a 500. Fail closed to 401 instead.
   // Same guard was added to requireCardReveal in the 2026-04-15 audit.
   if (typeof req.user.email !== 'string' || req.user.email.length === 0) {
-    return res.status(401).json({ error: 'unauthenticated', message: 'Missing email in session' });
+    return res.status(401).json({ error: 'unauthenticated', message: 'Missing email in session', req_id: req.id || null });
   }
 
   const email = req.user.email.toLowerCase();
@@ -31,7 +31,7 @@ module.exports = function requireInternal(req, res, next) {
   const isAllowedEmail = allowedEmails.includes(email);
 
   if (!isAllowedDomain && !isAllowedEmail) {
-    return res.status(403).json({ error: 'forbidden', message: 'Internal access only' });
+    return res.status(403).json({ error: 'forbidden', message: 'Internal access only', req_id: req.id || null });
   }
 
   next();
