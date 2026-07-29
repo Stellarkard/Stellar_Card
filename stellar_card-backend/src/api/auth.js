@@ -192,6 +192,44 @@ function extractBearerToken(req) {
 
 // ── POST /auth/login ─────────────────────────────────────────────────────────
 
+/**
+ * @openapi
+ * /auth/login:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Request a 6-digit login code by email
+ *     description: >
+ *       Always returns 200 with {ok: true} regardless of whether the email is
+ *       recognised, to avoid disclosing account existence. Codes expire after
+ *       15 minutes.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email: { type: string, format: email }
+ *     responses:
+ *       200:
+ *         description: Code sent (or silently accepted).
+ *         content:
+ *           application/json:
+ *             schema: { type: object, properties: { ok: { type: boolean } } }
+ *       400:
+ *         description: Missing or invalid email.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many active codes requested for this email.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       500:
+ *         description: Email delivery failed (production only).
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.post(
   '/login',
   loginLimiter,
@@ -268,6 +306,60 @@ router.post(
 
 // ── POST /auth/verify ────────────────────────────────────────────────────────
 
+/**
+ * @openapi
+ * /auth/verify:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Verify a login code and create a dashboard session
+ *     description: >
+ *       The first user ever verified on an instance becomes role=owner; every
+ *       subsequent user is role=user. Creates a users/dashboards row on first
+ *       login for that email.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, code]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               code: { type: string, description: '6-digit login code.' }
+ *     responses:
+ *       200:
+ *         description: Session created.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 token: { type: string, description: 'Bearer session token, valid 7 days.' }
+ *                 user:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string, format: uuid }
+ *                     email: { type: string, format: email }
+ *                     role: { type: string, enum: [owner, user] }
+ *                     is_platform_owner: { type: boolean }
+ *                 dashboard:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string, format: uuid }
+ *                     name: { type: string }
+ *       400:
+ *         description: Missing email or code.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Invalid or expired code.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many incorrect codes — request a new one.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.post('/verify', verifyLimiter, validateVerify, (req, res) => {
   const { email, code } = req.body;
   const addr = normalizeEmail(email);
@@ -429,6 +521,20 @@ router.post('/verify', verifyLimiter, validateVerify, (req, res) => {
 
 // ── POST /auth/logout ────────────────────────────────────────────────────────
 
+/**
+ * @openapi
+ * /auth/logout:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Invalidate the current dashboard session
+ *     security: [{ DashboardSession: [] }]
+ *     responses:
+ *       200:
+ *         description: Always returns ok, even if the token was already invalid.
+ *         content:
+ *           application/json:
+ *             schema: { type: object, properties: { ok: { type: boolean } } }
+ */
 router.post('/logout', (req, res) => {
   const token = extractBearerToken(req);
   if (token) {
@@ -465,6 +571,29 @@ router.post('/logout', (req, res) => {
 
 // ── GET /auth/me ─────────────────────────────────────────────────────────────
 
+/**
+ * @openapi
+ * /auth/me:
+ *   get:
+ *     tags: [Auth]
+ *     summary: Current user from the session token
+ *     security: [{ DashboardSession: [] }]
+ *     responses:
+ *       200:
+ *         description: Current user.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string, format: uuid }
+ *                 email: { type: string, format: email }
+ *                 role: { type: string, enum: [owner, user] }
+ *       401:
+ *         description: Missing, invalid, or expired session token.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.get('/me', (req, res) => {
   const token = extractBearerToken(req);
   if (!token) return res.status(401).json({ error: 'unauthorized' });
