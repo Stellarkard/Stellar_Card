@@ -221,3 +221,206 @@ describe('db.js — pragma settings', () => {
     assert.equal(row.foreign_keys, 1);
   });
 });
+
+// ── Issue #28 (Part 3): coverage for tables that previously had none ──────
+//
+// db.js defines 21 tables; before this change only orders/api_keys/
+// idempotency_keys had query-level tests (schema/seed/pragma checks
+// covered a few more by table-existence alone). This adds CRUD + constraint
+// coverage for the auth path (users/auth_codes/sessions — the tables that
+// back every login) plus audit_log and webhook_deliveries (the two
+// append-only tables the dashboard's security/observability surfaces read
+// from). The remaining untested tables (admin_actions, agent_claims,
+// alert_firings, alert_rules, approval_requests, dashboards,
+// mpp_challenges, policy_decisions, stellar_dead_letter,
+// unmatched_payments, schema_migrations) are follow-up work — each needs
+// its own careful read of the owning module's insert shape, which wasn't
+// rushed here for the sake of covering more tables shallowly.
+
+function insertUser({ id = uuidv4(), email = `user-${uuidv4()}@example.com`, role = 'user' } = {}) {
+  db.prepare(`INSERT INTO users (id, email, role) VALUES (?, ?, ?)`).run(id, email, role);
+  return id;
+}
+
+describe('db.js — users table queries', () => {
+  beforeEach(() => resetDb());
+
+  it('inserts and retrieves a user by id', () => {
+    const id = insertUser({ email: 'alice@example.com', role: 'owner' });
+    const row = db.prepare(`SELECT * FROM users WHERE id = ?`).get(id);
+    assert.ok(row);
+    assert.equal(row.email, 'alice@example.com');
+    assert.equal(row.role, 'owner');
+  });
+
+  it('defaults role to "user"', () => {
+    const id = uuidv4();
+    db.prepare(`INSERT INTO users (id, email) VALUES (?, ?)`).run(id, 'bob@example.com');
+    const row = db.prepare(`SELECT role FROM users WHERE id = ?`).get(id);
+    assert.equal(row.role, 'user');
+  });
+
+  it('enforces UNIQUE constraint on email', () => {
+    insertUser({ email: 'dup@example.com' });
+    assert.throws(
+      () => insertUser({ email: 'dup@example.com' }),
+      /UNIQUE constraint failed: users\.email/,
+    );
+  });
+
+  it('defaults created_at and leaves last_login_at null', () => {
+    const id = insertUser();
+    const row = db.prepare(`SELECT created_at, last_login_at FROM users WHERE id = ?`).get(id);
+    assert.ok(row.created_at);
+    assert.equal(row.last_login_at, null);
+  });
+});
+
+describe('db.js — auth_codes table queries', () => {
+  beforeEach(() => resetDb());
+
+  it('inserts and retrieves an auth code by email', () => {
+    const id = uuidv4();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO auth_codes (id, email, code_hash, expires_at) VALUES (?, ?, ?, ?)`,
+    ).run(id, 'alice@example.com', 'hashed-code', expiresAt);
+
+    const rows = db.prepare(`SELECT * FROM auth_codes WHERE email = ?`).all('alice@example.com');
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].used_at, null);
+  });
+
+  it('marking a code used sets used_at', () => {
+    const id = uuidv4();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO auth_codes (id, email, code_hash, expires_at) VALUES (?, ?, ?, ?)`,
+    ).run(id, 'alice@example.com', 'hashed-code', expiresAt);
+
+    db.prepare(`UPDATE auth_codes SET used_at = datetime('now') WHERE id = ?`).run(id);
+    const row = db.prepare(`SELECT used_at FROM auth_codes WHERE id = ?`).get(id);
+    assert.ok(row.used_at);
+  });
+});
+
+describe('db.js — sessions table queries', () => {
+  beforeEach(() => resetDb());
+
+  it('inserts a session referencing a valid user', () => {
+    const userId = insertUser();
+    const sessionId = uuidv4();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`,
+    ).run(sessionId, userId, 'hashed-token', expiresAt);
+
+    const row = db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(sessionId);
+    assert.ok(row);
+    assert.equal(row.user_id, userId);
+  });
+
+  it('enforces UNIQUE constraint on token_hash', () => {
+    const userId = insertUser();
+    const expiresAt = new Date(Date.now() + 1000).toISOString();
+    db.prepare(
+      `INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`,
+    ).run(uuidv4(), userId, 'dup-token', expiresAt);
+
+    assert.throws(
+      () =>
+        db
+          .prepare(`INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`)
+          .run(uuidv4(), userId, 'dup-token', expiresAt),
+      /UNIQUE constraint failed: sessions\.token_hash/,
+    );
+  });
+
+  it('deletes sessions when the owning user is deleted (ON DELETE CASCADE)', () => {
+    const userId = insertUser();
+    const sessionId = uuidv4();
+    const expiresAt = new Date(Date.now() + 1000).toISOString();
+    db.prepare(
+      `INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`,
+    ).run(sessionId, userId, 'token-to-cascade', expiresAt);
+
+    db.prepare(`DELETE FROM users WHERE id = ?`).run(userId);
+    const row = db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(sessionId);
+    assert.equal(row, undefined, 'session should be cascade-deleted with its user');
+  });
+
+  it('rejects a session for a non-existent user_id (foreign key enforcement)', () => {
+    const expiresAt = new Date(Date.now() + 1000).toISOString();
+    assert.throws(
+      () =>
+        db
+          .prepare(`INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`)
+          .run(uuidv4(), 'no-such-user', 'orphan-token', expiresAt),
+      /FOREIGN KEY constraint failed/,
+    );
+  });
+});
+
+describe('db.js — audit_log table queries', () => {
+  beforeEach(() => resetDb());
+
+  it('inserts and retrieves an audit entry', () => {
+    db.prepare(
+      `INSERT INTO audit_log (dashboard_id, actor_email, actor_role, action)
+       VALUES (?, ?, ?, ?)`,
+    ).run('dash-1', 'owner@example.com', 'owner', 'api_key.create');
+
+    const rows = db.prepare(`SELECT * FROM audit_log WHERE dashboard_id = ?`).all('dash-1');
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].action, 'api_key.create');
+    assert.ok(rows[0].created_at);
+  });
+
+  it('id auto-increments across inserts (append-only ordering)', () => {
+    const insert = () =>
+      db
+        .prepare(
+          `INSERT INTO audit_log (dashboard_id, actor_email, actor_role, action)
+           VALUES ('dash-1', 'owner@example.com', 'owner', 'noop')`,
+        )
+        .run().lastInsertRowid;
+    const first = insert();
+    const second = insert();
+    assert.ok(second > first);
+  });
+});
+
+describe('db.js — webhook_deliveries table queries', () => {
+  beforeEach(() => resetDb());
+
+  it('inserts and retrieves a delivery attempt', () => {
+    db.prepare(
+      `INSERT INTO webhook_deliveries (dashboard_id, url, response_status, latency_ms)
+       VALUES (?, ?, ?, ?)`,
+    ).run('dash-1', 'https://example.com/hook', 200, 42);
+
+    const row = db
+      .prepare(`SELECT * FROM webhook_deliveries WHERE dashboard_id = ?`)
+      .get('dash-1');
+    assert.ok(row);
+    assert.equal(row.method, 'POST', 'method should default to POST');
+    assert.equal(row.response_status, 200);
+  });
+
+  it('orders deliveries by created_at DESC for the dashboard feed query', () => {
+    const insertAt = (url) =>
+      db
+        .prepare(`INSERT INTO webhook_deliveries (dashboard_id, url) VALUES ('dash-1', ?)`)
+        .run(url).lastInsertRowid;
+    insertAt('https://example.com/first');
+    insertAt('https://example.com/second');
+
+    const rows = db
+      .prepare(
+        `SELECT url FROM webhook_deliveries WHERE dashboard_id = 'dash-1' ORDER BY id DESC`,
+      )
+      .all();
+    assert.equal(rows[0].url, 'https://example.com/second');
+    assert.equal(rows[1].url, 'https://example.com/first');
+  });
+});

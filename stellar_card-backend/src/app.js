@@ -22,8 +22,21 @@ const platformRouter = require('./api/platform');
 const vccCallbackRouter = require('./api/vcc-callback');
 const { MAX_WEBHOOK_ATTEMPTS: MAX_WEBHOOK_ATTEMPTS_FOR_STATUS } = require('./fulfillment');
 const errorHandler = require('./middleware/errorHandler');
+const { sentryRequestHandler, sentryErrorHandler } = require('./lib/sentry-config');
 
 const app = express();
+
+// Issue #29: src/lib/sentry-config.js was fully built (init, request/error
+// handler middleware, capture helpers) but never actually wired into the
+// app — initSentry() had no caller anywhere in src/, so error tracking was
+// silently a no-op in every environment, production included. The request
+// handler must be the very first middleware (per Sentry's own docs) so it
+// can attach its transaction/scope before anything else runs; the error
+// handler must run before (not instead of) the app's own errorHandler so
+// Sentry sees every error the same way that handler does. Both are no-ops
+// outside production (see sentryRequestHandler/sentryErrorHandler in
+// sentry-config.js), so this has no effect on dev/test behavior.
+app.use(sentryRequestHandler());
 
 // B-13: Attach a unique request ID to every request for log correlation.
 //
@@ -891,6 +904,13 @@ const vccCallbackLimiter = rateLimit({
   handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
 });
 app.use('/vcc-callback', vccCallbackLimiter, vccCallbackRouter);
+
+// Issue #29: Sentry's error handler must be mounted after all routes but
+// before the app's own errorHandler, so it can capture the error and then
+// call next(err) to hand off to errorHandler for the actual response —
+// see the app.use(sentryRequestHandler()) comment above for why this was
+// previously dead code.
+app.use(sentryErrorHandler());
 
 // Standardized global error handler
 app.use(errorHandler);
