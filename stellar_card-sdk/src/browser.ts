@@ -37,12 +37,7 @@ export { calculateExponentialBackoffDelay, parseRetryAfterMs, sleep } from './re
 export type { ExponentialBackoffDelayOptions } from './retry';
 
 // Pagination utilities — pure functions, no Node.js deps.
-export {
-  paginate,
-  iteratePages,
-  collectAllPages,
-  mapPaginated,
-} from './pagination';
+export { paginate, iteratePages, collectAllPages, mapPaginated } from './pagination';
 export type {
   PaginationCursor,
   PaginatedResult,

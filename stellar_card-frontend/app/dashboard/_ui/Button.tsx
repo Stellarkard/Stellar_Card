@@ -81,8 +81,8 @@ export function Button({
       border: '1px solid var(--red-border)',
     },
   };
-  const ariaLabel = rest['aria-label'] || (typeof children === 'string' ? children : undefined);
-  
+  const resolvedAriaLabel = ariaLabel || (typeof children === 'string' ? children : undefined);
+
   return (
     <button
       {...rest}
@@ -91,16 +91,14 @@ export function Button({
       disabled={disabled}
       aria-disabled={disabled}
       // Allow callers to annotate icon-only buttons.
-      aria-label={ariaLabel}
+      aria-label={resolvedAriaLabel}
       style={{ ...base, ...variants[variant], ...style }}
     >
-      {icon ? <span aria-hidden="true" style={{ display: 'inline-flex', alignItems: 'center' }}>{icon}</span> : null}
-    <button 
-      {...rest} 
-      aria-label={ariaLabel}
-      style={{ ...base, ...variants[variant], ...style }}
-    >
-      {icon && <span aria-hidden="true" style={{ display: 'inline-flex', alignItems: 'center' }}>{icon}</span>}
+      {icon ? (
+        <span aria-hidden="true" style={{ display: 'inline-flex', alignItems: 'center' }}>
+          {icon}
+        </span>
+      ) : null}
       {children}
     </button>
   );

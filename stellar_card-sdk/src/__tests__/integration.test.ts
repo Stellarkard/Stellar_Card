@@ -22,7 +22,10 @@ describe('SDK integration (sandbox mode)', () => {
   it('Stellar_CardClient constructor validates API key', () => {
     expect(() => new Stellar_CardClient({ apiKey: '' })).toThrow();
     expect(() => new Stellar_CardClient({ apiKey: '  ' })).toThrow();
-    const client = new Stellar_CardClient({ apiKey: 'test_key', baseUrl: 'http://localhost:1234/v1' });
+    const client = new Stellar_CardClient({
+      apiKey: 'test_key',
+      baseUrl: 'http://localhost:1234/v1',
+    });
     expect(client).toBeDefined();
   });
 

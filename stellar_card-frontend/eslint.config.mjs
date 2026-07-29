@@ -1,5 +1,6 @@
 // For more info, see https://github.com/storybookjs/eslint-plugin-storybook#configuration-flat-config-format
 import storybook from "eslint-plugin-storybook";
+import prettierConfig from "eslint-config-prettier";
 
 import { defineConfig, globalIgnores } from 'eslint/config';
 import nextVitals from 'eslint-config-next/core-web-vitals';
@@ -16,7 +17,9 @@ const eslintConfig = defineConfig([
     'build/**',
     'next-env.d.ts',
   ]),
-  ...storybook.configs["flat/recommended"]
+  ...storybook.configs["flat/recommended"],
+  // Prettier must be last to disable conflicting ESLint rules.
+  prettierConfig,
 ]);
 
 export default eslintConfig;

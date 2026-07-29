@@ -44,6 +44,14 @@ jobs:
         working-directory: stellar_card-sdk
         run: npm ci
 
+      - name: Cache TypeScript build
+        uses: actions/cache@v4
+        with:
+          path: stellar_card-sdk/.tsbuildinfo
+          key: tsbuild-${{ runner.os }}-node${{ matrix.node-version }}-${{ hashFiles('stellar_card-sdk/src/**', 'stellar_card-sdk/tsconfig*.json') }}
+          restore-keys: |
+            tsbuild-${{ runner.os }}-node${{ matrix.node-version }}-
+
       - name: Lint
         working-directory: stellar_card-sdk
         run: npm run lint
