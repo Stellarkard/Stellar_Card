@@ -36,6 +36,10 @@ Routing is documented in [docs/ROUTING.md](docs/ROUTING.md) — in particular
 which paths sit before the `/v1` auth boundary and why the mount order in
 `src/routes/index.js` is behaviour rather than layout.
 
+API failures use a JSON envelope with `error` and `req_id`; safe client errors
+may also include `message`. Public endpoints advertise quotas with the standard
+`RateLimit` response header and use the same traceable envelope when throttled.
+
 ## Setup & Development
 
 ### Local Setup
@@ -69,6 +73,7 @@ docker compose up backend
 | ---------------------- | -------- | ----------------------- | ----------------------------------------------------------- |
 | `PORT`                 | No       | `4000`                  | HTTP port for backend server                                |
 | `NODE_ENV`             | No       | `development`           | Runtime environment (`development` / `production` / `test`) |
+| `LOG_LEVEL`            | No       | `info`                  | Minimum Winston level emitted in production                 |
 | `DB_PATH`              | No       | `./stellar_card.db`     | SQLite database file location                               |
 | `STELLAR_NETWORK`      | Yes      | `mainnet`               | Target Stellar network (`mainnet` / `testnet`)              |
 | `STELLAR_USDC_ISSUER`  | Yes      | —                       | Stellar USDC asset issuer public key                        |

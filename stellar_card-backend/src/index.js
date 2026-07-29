@@ -16,7 +16,6 @@ const { initSentry, captureException, flush: flushSentry } = require('./lib/sent
 // uncaughtException/unhandledRejection hooks are registered before
 // anything that could throw. Previously nothing called this at all (see
 // app.js for the request/error handler middleware wiring).
-const { initSentry } = require('./lib/sentry-config');
 initSentry();
 
 const app = require('./app');
