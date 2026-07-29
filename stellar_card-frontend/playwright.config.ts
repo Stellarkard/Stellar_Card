@@ -25,7 +25,47 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: { 
+        ...devices['Desktop Chrome'],
+        contextOptions: {
+          permissions: ['clipboard-read', 'clipboard-write'],
+        },
+      },
+    },
+    {
+      name: 'firefox',
+      use: { 
+        ...devices['Desktop Firefox'],
+        launchOptions: {
+          firefoxUserPrefs: {
+            'dom.webnotifications.enabled': false,
+          },
+        },
+      },
+    },
+    {
+      name: 'webkit',
+      use: { 
+        ...devices['Desktop Safari'],
+        // WebKit can be slower, increase timeout
+        timeout: 40_000,
+      },
+    },
+    {
+      name: 'Mobile Chrome',
+      use: { 
+        ...devices['Pixel 5'],
+        // Mobile browsers can be slower, increase timeout
+        timeout: 45_000,
+      },
+    },
+    {
+      name: 'Mobile Safari',
+      use: { 
+        ...devices['iPhone 12'],
+        // Mobile Safari can be slower, increase timeout
+        timeout: 45_000,
+      },
     },
   ],
   // Start Next.js dev server before running tests.
