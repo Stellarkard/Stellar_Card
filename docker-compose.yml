@@ -1,15 +1,46 @@
-version: '3.8'
+# Stellar_Card — unified local stack.
+#
+# The default `docker compose up` builds production-shaped images: the same
+# artefacts a deployment would produce. That makes this file useful for
+# verifying a release candidate locally, but it is deliberately NOT a
+# development loop — the source is baked into the image, so an edit on the host
+# changes nothing until you rebuild.
+#
+# For an actual development loop (bind mounts, hot reload, dev dependencies),
+# layer the dev overlay on top:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# The overlay is a separate file rather than `docker-compose.override.yml`
+# because Compose loads an override file automatically; making the dev stack
+# opt-in keeps `docker compose up` meaning the same thing for everyone.
+#
+# Optional tooling is gated behind a profile so the default `up` stays lean:
+#
+#   docker compose --profile tools run --rm sdk        # SDK install + test
+#   docker compose --profile tools run --rm contract   # contract wasm build
+#
+# `version:` is intentionally absent — it is obsolete under Compose v2 and
+# emits a deprecation warning on every invocation.
 
 services:
   backend:
     build:
       context: ./stellar_card-backend
       dockerfile: Dockerfile
+      target: base
+    image: stellar_card-backend:local
     container_name: stellar_card-backend
     ports:
       - "4000:4000"
+    # `.env.example` supplies committed defaults; a developer's own `.env`
+    # layers on top and wins. Both are optional so the stack still starts for
+    # anyone who has not created one.
     env_file:
-      - ./stellar_card-backend/.env.example
+      - path: ./stellar_card-backend/.env.example
+        required: false
+      - path: ./stellar_card-backend/.env
+        required: false
     environment:
       - PORT=4000
       - NODE_ENV=development
@@ -32,6 +63,8 @@ services:
     build:
       context: ./stellar_card-frontend
       dockerfile: Dockerfile
+      target: runner
+    image: stellar_card-frontend:local
     container_name: stellar_card-frontend
     ports:
       - "3000:3000"
@@ -42,12 +75,67 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    # The frontend had no healthcheck, so `docker compose up --wait` — and any
+    # service that later depends on it — would treat "container started" as
+    # ready, before Next.js could actually serve a request.
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
+    networks:
+      - stellar_card-net
+
+  # ── Tooling (profile-gated, run-to-completion) ────────────────────────────
+  #
+  # Not long-running services: these exist so a contributor can build and test
+  # the SDK and the contract without installing Node or the Rust toolchain on
+  # the host. `profiles` keeps them out of the default `up`.
+
+  sdk:
+    profiles: ["tools"]
+    image: node:20-alpine
+    container_name: stellar_card-sdk
+    working_dir: /app
+    volumes:
+      - ./stellar_card-sdk:/app
+      # The root `test/` suite is pulled in by the SDK's vitest config via
+      # `../test/**/*.test.mjs`, so it has to be mounted at the sibling path
+      # the config expects.
+      - ./test:/test:ro
+      - sdk-node-modules:/app/node_modules
+    environment:
+      # The SDK rejects a plaintext base URL unless told this is a local run.
+      - CARDS402_ALLOW_INSECURE_BASE_URL=1
+    command: ["sh", "-c", "npm ci && npm test"]
+    networks:
+      - stellar_card-net
+
+  contract:
+    profiles: ["tools"]
+    image: rust:1-slim-bookworm
+    container_name: stellar_card-contract
+    working_dir: /contract
+    volumes:
+      - ./stellar_card-contract:/contract
+      - cargo-registry:/usr/local/cargo/registry
+      - contract-target:/contract/target
+    command: ["sh", "-c", "rustup target add wasm32-unknown-unknown && cargo build --release --target wasm32-unknown-unknown"]
     networks:
       - stellar_card-net
 
 volumes:
   backend-data:
+    driver: local
+  # Holding node_modules and Cargo state in named volumes stops a bind mount
+  # from shadowing them with the host tree, and keeps repeat runs fast.
+  sdk-node-modules:
+    driver: local
+  cargo-registry:
+    driver: local
+  contract-target:
     driver: local
 
 networks:

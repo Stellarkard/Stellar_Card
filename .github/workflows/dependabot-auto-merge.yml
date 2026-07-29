@@ -1,0 +1,105 @@
+name: Dependabot Auto-Merge
+
+# Closes the loop on automated security updates: Dependabot opens the PR, CI
+# proves it is safe, and this enables auto-merge so the fix lands without a
+# human round trip.
+#
+# Scope is deliberately narrow. Only three classes merge themselves:
+#
+#   * any patch-level bump,
+#   * minor bumps of development-only dependencies,
+#   * grouped updates, which dependabot.yml already restricts to those two.
+#
+# Everything else — every major, and any minor that reaches production code —
+# is left for a human. An automated major upgrade is how a "security update"
+# quietly becomes a breaking change.
+#
+# Auto-merge is *enabled*, not forced: GitHub still waits for required status
+# checks to pass, so a failing test blocks the merge exactly as it would for a
+# human-authored PR. That makes branch protection with required checks a
+# prerequisite for this to be meaningful.
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    name: Auto-merge Dependabot PR
+    runs-on: ubuntu-latest
+    # `github.actor` is the gate that matters: without it, anyone could open a
+    # PR titled like a Dependabot bump and have it merged for them.
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      # Parses the structured metadata Dependabot attaches to the PR, so the
+      # decision below reads real update-type data instead of scraping the title.
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@d7267f607e9d3fb96fc2fbe83e0af444713e90b7 # v2.3.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decide whether this update may merge itself
+        id: decision
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDENCY_TYPE: ${{ steps.metadata.outputs.dependency-type }}
+          GROUP_NAME: ${{ steps.metadata.outputs.dependency-group }}
+        run: |
+          eligible=false
+
+          # A grouped PR only ever contains what dependabot.yml allowed into
+          # the group (dev minor/patch, or production patch).
+          if [ -n "$GROUP_NAME" ]; then
+            eligible=true
+          fi
+
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch)
+              eligible=true
+              ;;
+            version-update:semver-minor)
+              # Minor bumps only auto-merge when they cannot reach production.
+              if [ "$DEPENDENCY_TYPE" = "direct:development" ] || \
+                 [ "$DEPENDENCY_TYPE" = "indirect:development" ]; then
+                eligible=true
+              fi
+              ;;
+          esac
+
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+          echo "Update type: ${UPDATE_TYPE:-<none>}"
+          echo "Dependency type: ${DEPENDENCY_TYPE:-<none>}"
+          echo "Group: ${GROUP_NAME:-<none>}"
+          echo "Eligible for auto-merge: $eligible"
+
+      - name: Approve
+        if: steps.decision.outputs.eligible == 'true'
+        run: gh pr review --approve "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Squash keeps the history one-commit-per-update, matching the
+      # conventional-commit prefixes dependabot.yml configures.
+      - name: Enable auto-merge
+        if: steps.decision.outputs.eligible == 'true'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Explain why this PR needs a human
+        if: steps.decision.outputs.eligible != 'true'
+        run: |
+          echo "::notice::Left for manual review — ${{ steps.metadata.outputs.update-type }}" \
+               "on ${{ steps.metadata.outputs.dependency-type }} is outside the auto-merge policy."
