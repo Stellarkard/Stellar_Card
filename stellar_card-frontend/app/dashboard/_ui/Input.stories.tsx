@@ -86,7 +86,7 @@ export const Required: Story = {
         placeholder="This field is required"
         required
         aria-label="Required Field"
-        aria-required="true"
+        aria-required={true}
       />
     </div>
   ),

@@ -80,11 +80,6 @@ export function GlobalSearch() {
     return out.slice(0, 14);
   }, [query, agents, orders]);
 
-  // Reset cursor when results change
-  useEffect(() => {
-    setCursor(0);
-  }, [query]);
-
   function handleKey(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'Escape') {
       setQuery('');
@@ -143,6 +138,7 @@ export function GlobalSearch() {
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);
+            setCursor(0);
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}

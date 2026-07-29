@@ -166,6 +166,7 @@ async function stage1_selectStore(page: Page): Promise<{ storeId: string; storeS
 // ── stage 2: add pizza to basket via UI — intercept the basket API call ────────
 
 async function stage2_addToBasket(page: Page, _storeId: string): Promise<string> {
+  void _storeId;
   log('basket', 'intercepting API calls to capture product/basket format…');
 
   // Capture basket API calls so we can learn the real add-item format

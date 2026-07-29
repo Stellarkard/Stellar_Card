@@ -82,6 +82,7 @@ docker compose down
    - Backend: `npm test` in `stellar_card-backend/`
    - Frontend Unit: `npm test` in `stellar_card-frontend/`
    - Cross-Browser E2E: `npm run test:e2e` in `stellar_card-frontend/` (Playwright across Chromium, Firefox, WebKit, Mobile Chrome, Mobile Safari)
+   - Repo configuration checks: `npm test` at the repo root (validates `dependabot.yml`, CI workflows, docs, Docker, and Husky hooks stay consistent — see `test/`)
 5. **Open a PR** — fill in the pull request template and link the issue with `Closes #N`.
 
 ---

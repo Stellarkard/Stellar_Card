@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
 interface NavItem {
@@ -27,7 +27,6 @@ export function ResponsiveNav({
 }: ResponsiveNavProps) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (variant === 'horizontal' && mobileOpen) {
@@ -38,11 +37,15 @@ export function ResponsiveNav({
         document.body.style.overflow = '';
       };
     }
+    return;
   }, [mobileOpen, variant]);
 
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- intentional route change reset */
     setMobileOpen(false);
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [pathname]);
+
 
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/');
 
