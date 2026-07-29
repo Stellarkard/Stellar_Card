@@ -254,29 +254,7 @@ function buildSentryOptions(env = process.env) {
     release: env.SENTRY_RELEASE || undefined,
     tracesSampleRate: sampleRate(env.SENTRY_TRACES_SAMPLE_RATE, 0.1),
     profilesSampleRate,
-    // Never let the SDK attach IPs, cookies, or request bodies on its
-    // own initiative — scrubEvent below is the only thing that decides
-    // what request data ships.
     sendDefaultPii: false,
-  Sentry.init({
-    dsn: SENTRY_DSN,
-    environment: process.env.NODE_ENV,
-    tracesSampleRate: 0.1, // Sample 10% of transactions for performance monitoring
-    profilesSampleRate: 0.1, // Sample 10% of transactions for profiling
-    integrations: [
-      new Sentry.Integrations.OnUncaughtException({
-        exitEvenIfOtherHandlersAreRegistered: false, // Don't exit process on uncaught exception
-      }),
-      new Sentry.Integrations.OnUnhandledRejection({
-        mode: 'strict',
-      }),
-      nodeProfilingIntegration(),
-    ],
-    // Attachment options for additional context
-    attachStacktrace: true,
-    // See note 2 at the top of the file: index.js owns the process-level
-    // signals so the graceful-shutdown path is not short-circuited by
-    // Sentry's own exit-on-fatal behaviour.
     integrations: (/** @type {any[]} */ defaults) => [
       ...defaults.filter(
         (integration) =>
@@ -284,8 +262,6 @@ function buildSentryOptions(env = process.env) {
       ),
       ...optionalProfilingIntegration(profilesSampleRate),
     ],
-    // Client-side noise that reaches the API through SDK error
-    // forwarding and is never actionable server-side.
     ignoreErrors: ['NetworkError: Failed to fetch', 'NotSupportedError', 'AbortError'],
     beforeSend: (/** @type {any} */ event) => scrubEvent(event),
     beforeBreadcrumb: (/** @type {any} */ crumb) =>
@@ -364,11 +340,6 @@ function captureException(error, context = {}) {
     tags: context.tags,
     extra: context.extra,
     level: context.level,
-  if (!IS_PROD) return;
-
-  Sentry.captureException(error, {
-    tags: /** @type {Record<string, string>} */(context.tags || {}),
-    extra: /** @type {Record<string, unknown>} */(context.extra || {}),
   });
 }
 
@@ -386,8 +357,6 @@ function captureMessage(message, level = 'info', context = {}) {
     level,
     tags: context.tags,
     extra: context.extra,
-    tags: /** @type {Record<string, string>} */(context.tags || {}),
-    extra: /** @type {Record<string, unknown>} */(context.extra || {}),
   });
 }
 

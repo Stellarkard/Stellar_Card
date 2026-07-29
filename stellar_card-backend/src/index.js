@@ -10,13 +10,6 @@ require('./env');
 // failure all log and return false. Observability must not be able to
 // take the API down.
 const { initSentry, captureException, flush: flushSentry } = require('./lib/sentry-config');
-// Issue #29: must run before `require('./app')` — sentry-config.js's own
-// doc comment says initSentry() "should be called at the very beginning
-// of the application startup before any other code runs" so the SDK's
-// uncaughtException/unhandledRejection hooks are registered before
-// anything that could throw. Previously nothing called this at all (see
-// app.js for the request/error handler middleware wiring).
-const { initSentry } = require('./lib/sentry-config');
 initSentry();
 
 const app = require('./app');

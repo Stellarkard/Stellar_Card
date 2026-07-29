@@ -25,7 +25,6 @@ const platformRouter = require('./api/platform');
 const vccCallbackRouter = require('./api/vcc-callback');
 const { MAX_WEBHOOK_ATTEMPTS: MAX_WEBHOOK_ATTEMPTS_FOR_STATUS } = require('./fulfillment');
 const errorHandler = require('./middleware/errorHandler');
-const { sentryRequestHandler, sentryErrorHandler } = require('./lib/sentry-config');
 
 const app = express();
 
@@ -681,22 +680,14 @@ const vccCallbackLimiter = rateLimit({
 });
 app.use('/vcc-callback', vccCallbackLimiter, vccCallbackRouter);
 
-// Sentry's error handler runs before the application's own responder
-// because the responder terminates the chain — it writes a 500 and never
-// calls next(), so anything mounted after it would never see the error.
-// Sentry's handler reports and then re-throws into the next error
-// middleware, leaving the response contract below untouched. Its
-// shouldHandleError predicate (see lib/sentry-config.js) filters out CORS
-// rejections and 4xx so only genuine server faults are reported.
-app.use(sentryErrorHandler());
-
-// Structured CORS denial — cors() throws on rejected origins; catch and return clean 403
-app.use((err, req, res, _next) => {
+// Structured CORS denial — cors() throws on rejected origins; catch and return clean 403.
+// Non-CORS errors are forwarded to the next error handler (sentryErrorHandler then errorHandler)
+// so they are reported and responded to by the proper chain.
+app.use((err, req, res, next) => {
   if (err.message && err.message.startsWith('CORS:')) {
     return res.status(403).json({ error: 'forbidden', message: 'Origin not allowed' });
   }
-  console.error('[app] unhandled error:', err.message);
-  res.status(500).json({ error: 'internal_error' });
+  next(err);
 });
 // Every route lives in its own module under api/, and routes/index.js owns
 // the mount table. Three of those mounts are order-sensitive (the
