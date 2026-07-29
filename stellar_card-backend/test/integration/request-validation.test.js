@@ -325,4 +325,195 @@ describe('POST /auth/verify — body validation contract', () => {
     const noEmail = await post({ code: '123456' });
     assert.equal(noCode.body.message, noEmail.body.message);
   });
+
+  it('rejects a whitespace-only code with missing_fields', async () => {
+    // The handler hashes `code.trim()`, so a whitespace-only code
+    // previously passed the truthiness guard and hashed to the empty
+    // string — one shared hash for every such request.
+    const res = await post({ email: 'a@b.com', code: '   ' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'missing_fields');
+  });
+});
+
+describe('POST /v1/agent/status — body validation contract', () => {
+  /** @type {any} */ let key;
+
+  beforeEach(async () => {
+    resetDb();
+    key = await createTestKey({ label: 'validation-agent' });
+  });
+
+  function post(body) {
+    return request.post('/v1/agent/status').set('X-Api-Key', key.key).send(body);
+  }
+
+  it('rejects a JSON array body with invalid_request', async () => {
+    const res = await post([{ state: 'funded' }]);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_request');
+  });
+
+  it('rejects an unknown state with invalid_state', async () => {
+    const res = await post({ state: 'bogus' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_state');
+    assert.match(res.body.message, /must be one of/);
+  });
+
+  it('rejects a derived state that the agent may not set itself', async () => {
+    for (const state of ['minted', 'active']) {
+      const res = await post({ state });
+      assert.equal(res.status, 400, state);
+      assert.equal(res.body.error, 'invalid_state', state);
+    }
+  });
+
+  it('rejects a non-string state', async () => {
+    const res = await post({ state: 42 });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_state');
+  });
+
+  it('rejects a wallet key with a bad checksum, not just a bad shape', async () => {
+    // 56 chars from the base32 alphabet, so a shape-only regex accepts
+    // it. StrKey checks the Ed25519 checksum, which is what stops a
+    // typo'd address from reaching the xlm-sender path.
+    const res = await post({ wallet_public_key: `G${'A'.repeat(55)}` });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_wallet_public_key');
+  });
+
+  it('rejects a non-string wallet key', async () => {
+    const res = await post({ wallet_public_key: 12345 });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_wallet_public_key');
+  });
+
+  it('accepts an explicit null wallet key as a clear', async () => {
+    // Absent means "leave the column alone"; null means "clear it".
+    // The schema has to preserve that distinction.
+    const res = await post({ wallet_public_key: null });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+  });
+
+  it('rejects an object detail with invalid_detail', async () => {
+    const res = await post({ detail: { msg: 'oops' } });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_detail');
+  });
+
+  it('rejects an empty body with nothing_to_update', async () => {
+    const res = await post({});
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'nothing_to_update');
+    assert.match(res.body.message, /at least one of/);
+  });
+
+  it('reports a field error before the nothing_to_update rule', async () => {
+    // The cross-field check runs after the per-field ones, so a request
+    // with exactly one — invalid — field names that field.
+    const res = await post({ state: 'bogus' });
+    assert.equal(res.body.error, 'invalid_state');
+  });
+});
+
+describe('POST /v1/agent/claim — body validation contract', () => {
+  beforeEach(() => resetDb());
+
+  function post(body) {
+    return request.post('/v1/agent/claim').send(body);
+  }
+
+  it('rejects a JSON array body with invalid_request', async () => {
+    const res = await post([{ code: 'c402_x' }]);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_request');
+  });
+
+  it('rejects a missing code with missing_code', async () => {
+    const res = await post({});
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'missing_code');
+  });
+
+  it('rejects a non-string code with missing_code', async () => {
+    const res = await post({ code: ['c402_x'] });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'missing_code');
+  });
+
+  it('rejects a whitespace-only code with missing_code', async () => {
+    const res = await post({ code: '   ' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'missing_code');
+  });
+
+  it('answers an unknown but well-formed code with the generic 401', async () => {
+    // Shape and existence must be indistinguishable to an anonymous
+    // caller past the "did you send a code at all" check.
+    const res = await post({ code: 'not-a-real-code' });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.error, 'invalid_claim');
+  });
+});
+
+describe('GET /v1/policy/check — query validation contract', () => {
+  /** @type {any} */ let key;
+
+  beforeEach(async () => {
+    resetDb();
+    key = await createTestKey({ label: 'validation-policy' });
+  });
+
+  function get(qs) {
+    return request.get(`/v1/policy/check${qs}`).set('X-Api-Key', key.key);
+  }
+
+  it('accepts a well-formed amount', async () => {
+    const res = await get('?amount=5');
+    assert.equal(res.status, 200);
+    assert.ok('decision' in res.body);
+  });
+
+  it('accepts a two-decimal amount', async () => {
+    const res = await get('?amount=5.25');
+    assert.equal(res.status, 200);
+  });
+
+  for (const [label, qs] of [
+    ['a missing amount', ''],
+    ['an empty amount', '?amount='],
+    ['a non-numeric amount', '?amount=abc'],
+    ['a zero amount', '?amount=0'],
+    ['a negative amount', '?amount=-5'],
+  ]) {
+    it(`rejects ${label} with invalid_amount`, async () => {
+      const res = await get(qs);
+      assert.equal(res.status, 400);
+      assert.equal(res.body.error, 'invalid_amount');
+    });
+  }
+
+  it('rejects trailing garbage that parseFloat would have accepted', async () => {
+    // The old guard used isNaN(parseFloat(...)), which reads "10abc" as
+    // 10 — so the preview answered a question about an amount POST
+    // /v1/orders would have rejected outright.
+    const res = await get('?amount=10abc');
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_amount');
+  });
+
+  it('rejects sub-cent precision, matching POST /v1/orders', async () => {
+    const res = await get('?amount=10.12345');
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_amount');
+  });
+
+  it('takes the first value when the client repeats the parameter', async () => {
+    const res = await get('?amount=5&amount=abc');
+    assert.equal(res.status, 400, 'a repeated key parses as an array, which is not a valid amount');
+    assert.equal(res.body.error, 'invalid_amount');
+  });
 });

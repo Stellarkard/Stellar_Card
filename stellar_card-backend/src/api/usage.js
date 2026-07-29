@@ -10,10 +10,39 @@
 // thresholds without burning order-creation budget.
 
 const { Router } = require('express');
+const { z } = require('zod');
 const db = require('../db');
+const { validate, patternString } = require('../lib/validate');
 const { buildBudget, policyCheck, orderPollLimiter } = require('./orders');
 
 const router = Router();
+
+// ── Request schema ─────────────────────────────────────────────────────────
+//
+// The same decimal shape POST /v1/orders enforces on amount_usdc, so a
+// dry-run preview and the order it previews agree on what a valid amount
+// is. The hand-written guard this replaces used
+// `isNaN(parseFloat(amount))`, which accepts "10abc" as 10 and
+// "10.12345" as sub-cent precision the issuer cannot represent — a
+// preview that answers a question the real endpoint would reject.
+const AMOUNT_SHAPE = /^\d+(\.\d{1,2})?$/;
+const AMOUNT_MESSAGE = 'Query param ?amount= must be a positive number';
+
+const PolicyCheckQuery = z.object({
+  amount: patternString(AMOUNT_SHAPE, AMOUNT_MESSAGE, { trim: true }).superRefine((value, ctx) => {
+    // Shape and range need separate checks but share one message: the
+    // endpoint has always returned a single `invalid_amount` code and
+    // clients match on it.
+    if (!(parseFloat(String(value)) > 0)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: AMOUNT_MESSAGE });
+    }
+  }),
+});
+
+const validatePolicyCheck = validate({
+  query: PolicyCheckQuery,
+  errorCodes: { amount: 'invalid_amount' },
+});
 
 // GET /v1/usage — agent's own spend and order summary
 // Runs COUNT + SUM over orders. Same per-key throttle as the rest of
@@ -61,14 +90,8 @@ router.get('/usage', orderPollLimiter, (req, res) => {
 // throttle as /v1/orders polling. Before this limiter was added, a
 // compromised key could enumerate the owner's daily spend and bruteforce
 // policy thresholds without burning order-creation budget.
-router.get('/policy/check', orderPollLimiter, (req, res) => {
-  const amount = String(req.query.amount || '');
-  if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
-    return res
-      .status(400)
-      .json({ error: 'invalid_amount', message: 'Query param ?amount= must be a positive number' });
-  }
-  return res.json(policyCheck(req.apiKey.id, parseFloat(amount)));
+router.get('/policy/check', orderPollLimiter, validatePolicyCheck, (req, res) => {
+  return res.json(policyCheck(req.apiKey.id, parseFloat(String(req.query.amount).trim())));
 });
 
 module.exports = router;
