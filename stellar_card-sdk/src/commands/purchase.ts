@@ -391,9 +391,7 @@ Your operator can mint a claim code from https://stellar_card.com/dashboard.
   // --resume defaulted to "wait the full timeout" even when the
   // original tx was provably dropped pre-apply.
   let resumeArg:
-    | string
-    | { orderId: string; txHash?: string; phase?: 'unpaid' | 'paid' }
-    | undefined;
+    string | { orderId: string; txHash?: string; phase?: 'unpaid' | 'paid' } | undefined;
   if (args.resume) {
     const saved = loadLastOrder();
     if (saved && saved.orderId === args.resume) {
