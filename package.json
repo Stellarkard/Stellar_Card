@@ -1,12 +1,14 @@
 {
-  "name": "stellar_card-repo-checks",
+  "name": "stellar-card-workspace",
   "private": true,
-  "description": "Repo-wide configuration checks (dependabot, CI workflows, docs, docker, husky) — not published, not part of any sub-package.",
   "scripts": {
-    "test": "vitest run test/"
+    "prepare": "husky",
+    "commitlint": "commitlint",
+    "test:commitlint": "node --test tooling/commitlint.test.mjs"
   },
   "devDependencies": {
-    "vitest": "^3.2.7",
-    "yaml": "^2.8.1"
+    "@commitlint/cli": "^19.8.1",
+    "@commitlint/config-conventional": "^19.8.1",
+    "husky": "^9.1.7"
   }
 }
