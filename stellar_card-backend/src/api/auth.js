@@ -14,7 +14,6 @@
 const { Router } = require('express');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
-const { z } = require('zod');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const db = require('../db');
 const { sendLoginCode } = require('../lib/email');
@@ -150,6 +149,10 @@ function extractBearerToken(req) {
 
 // ── POST /auth/login ─────────────────────────────────────────────────────────
 
+// validateLogin covers adversarial audit F1-auth (a body with no
+// Content-Type, an array body, or a null body used to crash the
+// destructure with "Cannot destructure property 'email' of 'undefined'"
+// and return 500 instead of a clear 400) as well as the address shape.
 router.post(
   '/login',
   loginLimiter,

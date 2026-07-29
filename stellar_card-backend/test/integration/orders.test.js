@@ -225,6 +225,157 @@ describe('POST /v1/orders', () => {
   });
 });
 
+describe('POST /v1/orders — sandbox mode', () => {
+  let key;
+
+  beforeEach(async () => {
+    resetDb();
+    key = await createTestKey({ label: 'sandbox-agent' });
+    const { db } = require('../helpers/app');
+    db.prepare(`UPDATE api_keys SET mode = 'sandbox' WHERE id = ?`).run(key.id);
+  });
+
+  it('returns 201 with immediate card details', async () => {
+    const res = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .send({ amount_usdc: '10.00' });
+    assert.equal(res.status, 201);
+    assert.ok(res.body.order_id);
+    assert.equal(res.body.status, 'delivered');
+    assert.equal(res.body.phase, 'ready');
+    assert.equal(res.body.sandbox, true);
+    assert.equal(res.body.card.number, '4111111111111111');
+    assert.equal(res.body.card.cvv, '123');
+  });
+
+  it('inserts a delivered order in the DB', async () => {
+    const { db } = require('../helpers/app');
+    const res = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .send({ amount_usdc: '25.00' });
+    const row = db.prepare(`SELECT status, amount_usdc FROM orders WHERE id = ?`).get(res.body.order_id);
+    assert.equal(row.status, 'delivered');
+    assert.equal(row.amount_usdc, '25');
+  });
+
+  it('honours Idempotency-Key in sandbox mode', async () => {
+    const iKey = 'sandbox-idem-key';
+    const body = { amount_usdc: '10.00' };
+    const first = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .set('Idempotency-Key', iKey)
+      .send(body);
+    const second = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .set('Idempotency-Key', iKey)
+      .send(body);
+    assert.equal(first.status, 201);
+    assert.equal(second.status, 201);
+    assert.equal(first.body.order_id, second.body.order_id);
+  });
+});
+
+describe('POST /v1/orders — metadata and webhook validation', () => {
+  let key;
+
+  beforeEach(async () => {
+    resetDb();
+    key = await createTestKey({ label: 'validation-agent' });
+  });
+
+  it('rejects metadata exceeding 8KB', async () => {
+    const { db } = require('../helpers/app');
+    const oversized = { data: 'x'.repeat(9 * 1024) };
+    const res = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .send({ amount_usdc: '10.00', metadata: oversized });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_metadata');
+  });
+
+  it('rejects metadata that is not a JSON object', async () => {
+    const res = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .send({ amount_usdc: '10.00', metadata: 'just a string' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_metadata');
+  });
+
+  it('rejects a webhook_url pointing to a private IP (SSRF)', async () => {
+    const res = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .send({ amount_usdc: '10.00', webhook_url: 'http://169.254.169.254/metadata' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_webhook_url');
+  });
+
+  it('accepts a valid webhook_url', async () => {
+    const { db } = require('../helpers/app');
+    const res = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .send({ amount_usdc: '10.00', webhook_url: 'https://example.com/hook' });
+    assert.equal(res.status, 201);
+  });
+
+  it('accepts metadata as a valid JSON object', async () => {
+    const res = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .send({ amount_usdc: '10.00', metadata: { ref: 'abc', purpose: 'test' } });
+    assert.equal(res.status, 201);
+  });
+});
+
+describe('POST /v1/orders — approval flow', () => {
+  let key;
+
+  beforeEach(async () => {
+    resetDb();
+    // Create a key that would trigger the approval branch.
+    // The policy engine is stubbed in tests to return 'pending_approval'
+    // for amounts above the daily limit. We set the daily limit on the
+    // key and seed enough daily spend to push past it.
+    key = await createTestKey({ label: 'approval-agent' });
+    const { db } = require('../helpers/app');
+    // Set an approval threshold — amounts above this trigger pending_approval.
+    db.prepare(`UPDATE api_keys SET policy_require_approval_above_usdc = '5.00' WHERE id = ?`).run(key.id);
+  });
+
+  it('returns 202 awaiting_approval when amount exceeds approval threshold', async () => {
+    const res = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .send({ amount_usdc: '10.00' });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.phase, 'awaiting_approval');
+    assert.ok(res.body.order_id);
+    assert.ok(res.body.approval_request_id);
+    assert.ok(res.body.expires_at);
+    assert.ok(res.body.message);
+  });
+
+  it('inserts an approval_requests row', async () => {
+    const { db } = require('../helpers/app');
+    const res = await request
+      .post('/v1/orders')
+      .set('X-Api-Key', key.key)
+      .send({ amount_usdc: '10.00' });
+    const approvalRow = db
+      .prepare(`SELECT id, order_id, amount_usdc FROM approval_requests WHERE order_id = ?`)
+      .get(res.body.order_id);
+    assert.ok(approvalRow, 'approval_requests row must exist');
+    assert.equal(approvalRow.amount_usdc, '10');
+  });
+});
+
 describe('GET /v1/orders/:id', () => {
   let key;
 
@@ -330,6 +481,128 @@ describe('GET /v1/orders/:id', () => {
     const res = await request.get(`/v1/orders/${orderId}`).set('X-Api-Key', key.key);
     assert.equal(res.status, 404);
   });
+
+  // ── Adversarial audit F1-orders (2026-04-15): phase coverage for
+  // every non-terminal and terminal status not yet covered above ───────
+
+  it('returns phase=awaiting_approval with approval_request_id and expires_at', async () => {
+    const { db } = require('../helpers/app');
+    const { v4: uuidv4 } = require('uuid');
+    const orderId = seedOrder({ api_key_id: key.id, status: 'awaiting_approval', amount_usdc: '25.00' });
+    const approvalId = uuidv4();
+    const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO approval_requests (id, api_key_id, order_id, amount_usdc, agent_note, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(approvalId, key.id, orderId, '25.00', 'test note', expiresAt);
+
+    const res = await request.get(`/v1/orders/${orderId}`).set('X-Api-Key', key.key);
+    assert.equal(res.body.phase, 'awaiting_approval');
+    assert.equal(res.body.status, 'awaiting_approval');
+    assert.equal(res.body.approval_request_id, approvalId);
+    assert.equal(res.body.expires_at, expiresAt);
+    assert.ok(res.body.note);
+  });
+
+  it('returns phase=refunded with refund.stellar_txid', async () => {
+    const { db } = require('../helpers/app');
+    const orderId = seedOrder({ api_key_id: key.id, status: 'refunded' });
+    db.prepare(`UPDATE orders SET refund_stellar_txid = 'abc123def456' WHERE id = ?`).run(orderId);
+
+    const res = await request.get(`/v1/orders/${orderId}`).set('X-Api-Key', key.key);
+    assert.equal(res.body.phase, 'refunded');
+    assert.equal(res.body.refund.stellar_txid, 'abc123def456');
+  });
+
+  it('returns phase=rejected with error', async () => {
+    const { db } = require('../helpers/app');
+    const orderId = seedOrder({ api_key_id: key.id, status: 'rejected' });
+    db.prepare(`UPDATE orders SET error = 'rejected_by_owner' WHERE id = ?`).run(orderId);
+
+    const res = await request.get(`/v1/orders/${orderId}`).set('X-Api-Key', key.key);
+    assert.equal(res.body.phase, 'rejected');
+    assert.equal(res.body.error, 'rejected_by_owner');
+    assert.ok(res.body.note);
+  });
+
+  it('returns phase=pending_recovery with note for pending_manual_recovery', async () => {
+    const orderId = seedOrder({ api_key_id: key.id, status: 'pending_manual_recovery' });
+
+    const res = await request.get(`/v1/orders/${orderId}`).set('X-Api-Key', key.key);
+    assert.equal(res.body.phase, 'pending_recovery');
+    assert.ok(res.body.note);
+  });
+});
+
+describe('GET /v1/orders/:id/stream', () => {
+  let key;
+
+  beforeEach(async () => {
+    resetDb();
+    key = await createTestKey();
+  });
+
+  it('returns 404 for an unknown order', async () => {
+    const res = await request
+      .get('/v1/orders/nonexistent-order-id/stream')
+      .set('X-Api-Key', key.key);
+    assert.equal(res.status, 404);
+    assert.equal(res.body.error, 'order_not_found');
+  });
+
+  it('closes the stream for a terminal-status order (delivered)', async () => {
+    const orderId = seedOrder({ api_key_id: key.id, status: 'delivered' });
+    const { db } = require('../helpers/app');
+    db.prepare(
+      `UPDATE orders SET card_number='4111111111111111', card_cvv='123', card_expiry='12/27', card_brand='Visa' WHERE id=?`,
+    ).run(orderId);
+
+    // The stream should resolve (close) after the initial emit
+    // because delivered is a terminal status.
+    const res = await request
+      .get(`/v1/orders/${orderId}/stream`)
+      .set('X-Api-Key', key.key);
+    assert.equal(res.status, 200);
+    assert.ok(res.headers['content-type'].includes('text/event-stream'));
+  });
+
+  it('closes the stream for a terminal-status order (failed)', async () => {
+    const orderId = seedOrder({ api_key_id: key.id, status: 'failed' });
+
+    const res = await request
+      .get(`/v1/orders/${orderId}/stream`)
+      .set('X-Api-Key', key.key);
+    assert.equal(res.status, 200);
+  });
+
+  it('closes the stream for a terminal-status order (expired)', async () => {
+    const orderId = seedOrder({ api_key_id: key.id, status: 'expired' });
+
+    const res = await request
+      .get(`/v1/orders/${orderId}/stream`)
+      .set('X-Api-Key', key.key);
+    assert.equal(res.status, 200);
+  });
+
+  it('closes the stream for a terminal-status order (refunded)', async () => {
+    const { db } = require('../helpers/app');
+    const orderId = seedOrder({ api_key_id: key.id, status: 'refunded' });
+    db.prepare(`UPDATE orders SET refund_stellar_txid = 'abc' WHERE id = ?`).run(orderId);
+
+    const res = await request
+      .get(`/v1/orders/${orderId}/stream`)
+      .set('X-Api-Key', key.key);
+    assert.equal(res.status, 200);
+  });
+
+  it('closes the stream for a terminal-status order (rejected)', async () => {
+    const orderId = seedOrder({ api_key_id: key.id, status: 'rejected' });
+
+    const res = await request
+      .get(`/v1/orders/${orderId}/stream`)
+      .set('X-Api-Key', key.key);
+    assert.equal(res.status, 200);
+  });
 });
 
 describe('GET /v1/orders (list)', () => {
@@ -366,6 +639,75 @@ describe('GET /v1/orders (list)', () => {
     const res = await request.get('/v1/orders?status=delivered').set('X-Api-Key', key.key);
     assert.equal(res.body.length, 1);
     assert.equal(res.body[0].status, 'delivered');
+  });
+
+  it('rejects an unknown status filter with 400', async () => {
+    seedOrder({ api_key_id: key.id, status: 'pending_payment' });
+    seedOrder({ api_key_id: key.id, status: 'delivered' });
+    const res = await request.get('/v1/orders?status=unknown').set('X-Api-Key', key.key);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_status');
+  });
+
+  it('filters by since_created_at', async () => {
+    const { db } = require('../helpers/app');
+    seedOrder({ api_key_id: key.id, status: 'delivered' });
+    // Manually set created_at to a past timestamp
+    const oldId = seedOrder({ api_key_id: key.id, status: 'delivered' });
+    db.prepare(`UPDATE orders SET created_at = '2024-01-01T00:00:00.000Z' WHERE id = ?`).run(oldId);
+    const res = await request
+      .get('/v1/orders?since_created_at=2024-06-01T00:00:00.000Z')
+      .set('X-Api-Key', key.key);
+    assert.equal(res.body.length, 1, 'only the newer order should appear');
+  });
+
+  it('filters by since_updated_at', async () => {
+    const { db } = require('../helpers/app');
+    seedOrder({ api_key_id: key.id, status: 'delivered' });
+    const oldId = seedOrder({ api_key_id: key.id, status: 'delivered' });
+    db.prepare(`UPDATE orders SET updated_at = '2024-01-01T00:00:00.000Z' WHERE id = ?`).run(oldId);
+    const res = await request
+      .get('/v1/orders?since_updated_at=2024-06-01T00:00:00.000Z')
+      .set('X-Api-Key', key.key);
+    assert.equal(res.body.length, 1);
+  });
+
+  it('respects limit parameter', async () => {
+    for (let i = 0; i < 5; i++) {
+      seedOrder({ api_key_id: key.id, status: 'delivered' });
+    }
+    const res = await request.get('/v1/orders?limit=2').set('X-Api-Key', key.key);
+    assert.equal(res.body.length, 2);
+  });
+
+  it('clamps limit to max 200', async () => {
+    for (let i = 0; i < 5; i++) {
+      seedOrder({ api_key_id: key.id, status: 'delivered' });
+    }
+    // A limit > 200 should be clamped — but with 5 rows we just get 5.
+    const res = await request.get('/v1/orders?limit=999').set('X-Api-Key', key.key);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.length, 5);
+  });
+
+  it('honours offset parameter', async () => {
+    const { db } = require('../helpers/app');
+    for (let i = 0; i < 3; i++) {
+      const id = seedOrder({ api_key_id: key.id, status: 'delivered' });
+      db.prepare(`UPDATE orders SET created_at = datetime('now', ?) WHERE id = ?`).run(
+        `-${i} minutes`,
+        id,
+      );
+    }
+    // First page with limit=2 returns 2 orders
+    const first = await request.get('/v1/orders?limit=2&offset=0').set('X-Api-Key', key.key);
+    assert.equal(first.body.length, 2);
+    // Second page with offset=2 returns the remaining 1
+    const second = await request.get('/v1/orders?limit=2&offset=2').set('X-Api-Key', key.key);
+    assert.equal(second.body.length, 1);
+    // Offset beyond total returns empty
+    const empty = await request.get('/v1/orders?limit=2&offset=10').set('X-Api-Key', key.key);
+    assert.equal(empty.body.length, 0);
   });
 });
 
@@ -480,5 +822,53 @@ describe('GET /v1/usage', () => {
     assert.equal(res.body.orders.rejected, 1);
     // Total still counts everything
     assert.equal(res.body.orders.total, 4);
+  });
+});
+
+describe('GET /v1/policy/check', () => {
+  let key;
+
+  beforeEach(async () => {
+    resetDb();
+    key = await createTestKey({ label: 'policy-agent', spendLimit: '100.00' });
+  });
+
+  it('returns policy decision for a valid amount', async () => {
+    const res = await request.get('/v1/policy/check?amount=5').set('X-Api-Key', key.key);
+    assert.equal(res.status, 200);
+    assert.ok('decision' in res.body);
+    assert.ok('remaining_daily' in res.body);
+  });
+
+  it('returns 400 for missing amount query param', async () => {
+    const res = await request.get('/v1/policy/check').set('X-Api-Key', key.key);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_amount');
+  });
+
+  it('returns 400 for zero amount', async () => {
+    const res = await request.get('/v1/policy/check?amount=0').set('X-Api-Key', key.key);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_amount');
+  });
+
+  it('returns 400 for negative amount', async () => {
+    const res = await request.get('/v1/policy/check?amount=-5').set('X-Api-Key', key.key);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_amount');
+  });
+
+  it('includes remaining_daily when a daily limit is configured', async () => {
+    const { db } = require('../helpers/app');
+    db.prepare(`UPDATE api_keys SET policy_daily_limit_usdc = '50.00' WHERE id = ?`).run(key.id);
+    const res = await request.get('/v1/policy/check?amount=10').set('X-Api-Key', key.key);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.remaining_daily, '50.00');
+  });
+
+  it('returns plan_allowed from policy preview when no limit breached', async () => {
+    const res = await request.get('/v1/policy/check?amount=1').set('X-Api-Key', key.key);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.decision, 'approved');
   });
 });
