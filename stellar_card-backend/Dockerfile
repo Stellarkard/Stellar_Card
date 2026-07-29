@@ -1,4 +1,8 @@
-# Stage 1: Build & Dependencies
+# Stage 1: Dependencies
+#
+# better-sqlite3 is a native module, so the toolchain has to be present when
+# `npm ci` runs. It is confined to this stage so the runtime image does not
+# ship a C compiler.
 FROM node:20-alpine AS base
 
 WORKDIR /app
@@ -26,3 +30,20 @@ ENV PORT=4000 \
     DB_PATH=/app/data/stellar_card.db
 
 CMD ["npm", "start"]
+
+# Stage 2: Development
+#
+# Target this stage from docker-compose.dev.yml. It reuses the dependency
+# layer above, then relies on a bind mount for `src/`, so an edit on the host
+# restarts the server in the container without a rebuild.
+#
+# The CMD deliberately does not reuse the `dev` npm script: that script passes
+# `--env-file=.env`, and Node exits non-zero when that file is missing. Under
+# Compose the environment arrives from `environment:`/`env_file:` instead, and
+# a developer who has not created a local `.env` should still get a working
+# container.
+FROM base AS dev
+
+ENV NODE_ENV=development
+
+CMD ["node", "--watch", "src/index.js"]
