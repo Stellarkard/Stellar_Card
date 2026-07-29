@@ -254,9 +254,6 @@ function buildSentryOptions(env = process.env) {
     release: env.SENTRY_RELEASE || undefined,
     tracesSampleRate: sampleRate(env.SENTRY_TRACES_SAMPLE_RATE, 0.1),
     profilesSampleRate,
-    // Never let the SDK attach IPs, cookies, or request bodies on its
-    // own initiative — scrubEvent below is the only thing that decides
-    // what request data ships.
     sendDefaultPii: false,
     attachStacktrace: true,
     // See note 2 at the top of the file: index.js owns the process-level
@@ -269,8 +266,6 @@ function buildSentryOptions(env = process.env) {
       ),
       ...optionalProfilingIntegration(profilesSampleRate),
     ],
-    // Client-side noise that reaches the API through SDK error
-    // forwarding and is never actionable server-side.
     ignoreErrors: ['NetworkError: Failed to fetch', 'NotSupportedError', 'AbortError'],
     beforeSend: (/** @type {any} */ event) => scrubEvent(event),
     beforeBreadcrumb: (/** @type {any} */ crumb) =>
