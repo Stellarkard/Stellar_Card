@@ -12,6 +12,7 @@
 // Codes expire after 15 minutes. Sessions last 7 days.
 
 const { Router } = require('express');
+const { z } = require('zod');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
@@ -19,6 +20,8 @@ const db = require('../db');
 const { sendLoginCode } = require('../lib/email');
 const { isPlatformOwner } = require('../lib/platform');
 const { recordAudit } = require('../lib/audit');
+const { validate, patternString } = require('../lib/validate');
+const { asyncHandler } = require('../middleware/async-handler');
 
 const router = Router();
 
@@ -84,6 +87,58 @@ function generateCode() {
 function normalizeEmail(email) {
   return email.trim().toLowerCase();
 }
+
+// ── Request schemas ────────────────────────────────────────────────────────
+//
+// Declared with the non-coercing primitives from lib/validate.js, for the
+// same reason the order schemas are: `validate()` writes the parsed value
+// back onto `req.body`, and a coercing schema would hand the handler a
+// value that is no longer the one the client sent. `normalizeEmail()` owns
+// the trim + lowercase, so the schema tests the trimmed form without
+// rewriting it.
+
+// A plain local-part@domain.tld shape. Deliberately not RFC 5322
+// exhaustive: this is a login-code destination, not a mailbox existence
+// check, and the code that gets mailed is the real proof of ownership.
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Adversarial audit F1-auth (2026-04-15): a body with no Content-Type, an
+// array body, or a null body used to crash `const { email } = req.body`
+// with "Cannot destructure property 'email' of 'undefined'" and return a
+// 500 instead of a clear 400. `validate({ body })` performs that guard
+// before the schema runs, so it now applies to both routes uniformly.
+const LoginBody = z
+  .object({
+    email: patternString(EMAIL_SHAPE, 'A valid email address is required.', { trim: true }),
+  })
+  .passthrough();
+
+const validateLogin = validate({
+  body: LoginBody,
+  errorCodes: { email: 'invalid_email' },
+});
+
+// /auth/verify is an authentication boundary, so both fields share one
+// error code AND one message: telling a caller which half was wrong
+// tells them which half was right. The pre-schema guard checked
+// truthiness before type, so an array email reached
+// `normalizeEmail(email).trim()` — a method arrays do not have — and
+// returned 500. `patternString` rejects a non-string with the field's own
+// message rather than Zod's "Expected string", which is what keeps the
+// two responses byte-identical.
+const VERIFY_FIELDS_MESSAGE = 'email and code are required strings.';
+
+const VerifyBody = z
+  .object({
+    email: patternString(/\S/, VERIFY_FIELDS_MESSAGE),
+    code: patternString(/\S/, VERIFY_FIELDS_MESSAGE),
+  })
+  .passthrough();
+
+const validateVerify = validate({
+  body: VerifyBody,
+  errorCodes: { email: 'missing_fields', code: 'missing_fields' },
+});
 
 // Adversarial audit F2-auth (2026-04-15): coerce client IP to a
 // single string. `req.headers['x-forwarded-for']` is typed
@@ -175,94 +230,79 @@ function extractBearerToken(req) {
  *         content:
  *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
  */
-router.post('/login', loginLimiter, async (req, res) => {
-  // Adversarial audit F1-auth (2026-04-15): reject requests whose
-  // body isn't a plain JSON object upfront. Without this guard a
-  // request with no Content-Type, an array body, or a null body
-  // crashed the destructure `const { email } = req.body` with
-  // `Cannot destructure property 'email' of 'undefined'` — Express
-  // returned 500 instead of a clear 400. Same shape guard as the
-  // one added to POST /v1/orders in an earlier cycle.
-  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'Request body must be a JSON object (set Content-Type: application/json).',
-    });
-  }
+router.post(
+  '/login',
+  loginLimiter,
+  validateLogin,
+  asyncHandler(async (req, res) => {
+    const { email } = req.body;
+    const addr = normalizeEmail(email);
 
-  const { email } = req.body;
-  if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
-    return res
-      .status(400)
-      .json({ error: 'invalid_email', message: 'A valid email address is required.' });
-  }
-
-  const addr = normalizeEmail(email);
-
-  // Bootstrap guard: if OWNER_EMAIL is set and no users exist yet, reject non-matching emails.
-  // Prevents a race where a stranger claims owner on a fresh instance before the real owner.
-  const ownerEmail = process.env.OWNER_EMAIL?.trim().toLowerCase();
-  if (ownerEmail) {
-    const userCount = /** @type {any} */ (db.prepare(`SELECT COUNT(*) AS n FROM users`).get()).n;
-    if (userCount === 0 && addr !== ownerEmail) {
-      // Return generic success to avoid disclosing that the instance is unconfigured
-      return res.json({ ok: true });
+    // Bootstrap guard: if OWNER_EMAIL is set and no users exist yet, reject non-matching emails.
+    // Prevents a race where a stranger claims owner on a fresh instance before the real owner.
+    const ownerEmail = process.env.OWNER_EMAIL?.trim().toLowerCase();
+    if (ownerEmail) {
+      const userCount = /** @type {any} */ (db.prepare(`SELECT COUNT(*) AS n FROM users`).get()).n;
+      if (userCount === 0 && addr !== ownerEmail) {
+        // Return generic success to avoid disclosing that the instance is unconfigured
+        return res.json({ ok: true });
+      }
     }
-  }
 
-  // Rate limit: max 3 active (unused, unexpired) codes per email per window
-  const recentCount = /** @type {any} */ (
-    db
-      .prepare(
-        `
+    // Rate limit: max 3 active (unused, unexpired) codes per email per window
+    const recentCount = /** @type {any} */ (
+      db
+        .prepare(
+          `
     SELECT COUNT(*) AS n FROM auth_codes
     WHERE email = ?
       AND used_at IS NULL
       AND datetime(expires_at) > datetime('now')
   `,
-      )
-      .get(addr)
-  ).n;
+        )
+        .get(addr)
+    ).n;
 
-  if (recentCount >= CODE_MAX_PER_WINDOW) {
-    return res.status(429).json({
-      error: 'too_many_requests',
-      message: 'Too many login attempts. Wait a few minutes and try again.',
-    });
-  }
+    if (recentCount >= CODE_MAX_PER_WINDOW) {
+      return res.status(429).json({
+        error: 'too_many_requests',
+        message: 'Too many login attempts. Wait a few minutes and try again.',
+      });
+    }
 
-  const code = generateCode();
-  const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000).toISOString();
+    const code = generateCode();
+    const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000).toISOString();
 
-  db.prepare(
-    `
+    db.prepare(
+      `
     INSERT INTO auth_codes (id, email, code_hash, expires_at)
     VALUES (?, ?, ?, ?)
   `,
-  ).run(uuidv4(), addr, hashToken(code), expiresAt);
+    ).run(uuidv4(), addr, hashToken(code), expiresAt);
 
-  // In non-production, log that a code was sent (but not the value itself).
-  if (process.env.NODE_ENV !== 'production') {
-    console.log(`[auth] LOGIN CODE sent to ${addr} (expires in ${CODE_TTL_MINUTES}min)`);
-  }
-
-  try {
-    await sendLoginCode(addr, code);
-  } catch (err) {
-    if (process.env.NODE_ENV === 'production') {
-      console.error('[auth] email send failed:', err.message);
-      return res.status(500).json({
-        error: 'email_failed',
-        message: 'Failed to send login code. Check SMTP configuration.',
-      });
+    // In non-production, log that a code was sent (but not the value itself).
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[auth] LOGIN CODE sent to ${addr} (expires in ${CODE_TTL_MINUTES}min)`);
     }
-    // Non-production: code already logged above — proceed without email
-    console.warn(`[auth] email skipped (${err.message}) — use the logged code above`);
-  }
 
-  // Generic response — don't reveal whether the email exists or was accepted
-  res.json({ ok: true });
-});
+    try {
+      await sendLoginCode(addr, code);
+    } catch (err) {
+      if (process.env.NODE_ENV === 'production') {
+        console.error('[auth] email send failed:', err.message);
+        return res.status(500).json({
+          error: 'email_failed',
+          message: 'Failed to send login code. Check SMTP configuration.',
+        });
+      }
+      // Non-production: code already logged above — proceed without email
+      console.warn(`[auth] email skipped (${err.message}) — use the logged code above`);
+    }
+
+    // Generic response — don't reveal whether the email exists or was accepted
+    res.json({ ok: true });
+  }),
+);
 
 // ── POST /auth/verify ────────────────────────────────────────────────────────
 
@@ -320,25 +360,8 @@ router.post('/login', loginLimiter, async (req, res) => {
  *         content:
  *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
  */
-router.post('/verify', verifyLimiter, (req, res) => {
-  // F1-auth: same shape guard as /auth/login. Additionally check
-  // that email and code are strings — the previous code only checked
-  // truthiness, so an array email like `["a@b.com"]` would reach
-  // `normalizeEmail(email).trim()`, which doesn't exist on arrays
-  // and crashes with 500.
-  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'Request body must be a JSON object (set Content-Type: application/json).',
-    });
-  }
+router.post('/verify', verifyLimiter, validateVerify, (req, res) => {
   const { email, code } = req.body;
-  if (!email || !code || typeof email !== 'string' || typeof code !== 'string') {
-    return res
-      .status(400)
-      .json({ error: 'missing_fields', message: 'email and code are required strings.' });
-  }
-
   const addr = normalizeEmail(email);
   const codeHash = hashToken(code.trim());
 

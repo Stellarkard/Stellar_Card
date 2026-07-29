@@ -28,11 +28,12 @@ export default function AnalyticsPage() {
   const isPlatformOwner = !!user?.is_platform_owner;
   const [windowKey, setWindowKey] = useState<'24h' | '7d' | '30d'>('7d');
   const windowDays = WINDOWS[windowKey]!.days;
+  const [now] = useState(() => Date.now());
   const windowMs = windowDays * 86_400_000;
 
   const windowOrders = useMemo(
-    () => orders.filter((o) => Date.now() - parseTimestamp(o.created_at) < windowMs),
-    [orders, windowMs],
+    () => orders.filter((o) => now - parseTimestamp(o.created_at) < windowMs),
+    [orders, now, windowMs],
   );
 
   const agentSpend = useMemo(

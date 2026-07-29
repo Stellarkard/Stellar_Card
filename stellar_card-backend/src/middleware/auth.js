@@ -51,8 +51,8 @@ module.exports = async function auth(req, res, next) {
   // Coerce to a single string. Express hands duplicated headers through
   // as either a joined string or (for some header names) an array; reject
   // arrays outright rather than risk `.startsWith` throwing below.
-  if (!rawKey) return res.status(401).json({ error: 'missing_api_key' });
-  if (typeof rawKey !== 'string') return res.status(401).json({ error: 'invalid_api_key' });
+  if (!rawKey) return res.status(401).json({ error: 'missing_api_key', req_id: req.id || null });
+  if (typeof rawKey !== 'string') return res.status(401).json({ error: 'invalid_api_key', req_id: req.id || null });
   const key = rawKey;
 
   // Early rejections — no DB work, no bcrypt work. A malformed key used
@@ -64,7 +64,7 @@ module.exports = async function auth(req, res, next) {
     key.length < KEY_MIN_LENGTH ||
     key.length > KEY_MAX_LENGTH
   ) {
-    return res.status(401).json({ error: 'invalid_api_key' });
+    return res.status(401).json({ error: 'invalid_api_key', req_id: req.id || null });
   }
   const keyPrefix = key.slice(9, 21);
 
@@ -124,12 +124,12 @@ module.exports = async function auth(req, res, next) {
         );
         return res
           .status(401)
-          .json({ error: 'api_key_expired', message: 'This API key has expired.' });
+          .json({ error: 'api_key_expired', message: 'This API key has expired.', req_id: req.id || null });
       }
       if (expiresAtMs < Date.now()) {
         return res
           .status(401)
-          .json({ error: 'api_key_expired', message: 'This API key has expired.' });
+          .json({ error: 'api_key_expired', message: 'This API key has expired.', req_id: req.id || null });
       }
     }
     if (candidate.suspended) {
@@ -141,6 +141,7 @@ module.exports = async function auth(req, res, next) {
       return res.status(401).json({
         error: 'api_key_suspended',
         message: 'This API key has been suspended by the operator.',
+        req_id: req.id || null,
       });
     }
 
@@ -168,5 +169,5 @@ module.exports = async function auth(req, res, next) {
     return next();
   }
 
-  return res.status(401).json({ error: 'invalid_api_key' });
+  return res.status(401).json({ error: 'invalid_api_key', req_id: req.id || null });
 };

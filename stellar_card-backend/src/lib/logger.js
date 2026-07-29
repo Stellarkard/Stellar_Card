@@ -99,7 +99,13 @@ function deepFreeze(value) {
 // safeStringify so BigInt/circular payloads never throw (F2-logger).
 const structuralJsonFormat = winston.format((info) => {
   const { level, message, fields, ...rest } = info;
-  info[Symbol.for('message')] = safeStringify({ ...fields, ...rest, ts: now(), level, msg: message });
+  info[Symbol.for('message')] = safeStringify({
+    ...(fields && typeof fields === 'object' ? fields : {}),
+    ...rest,
+    ts: now(),
+    level,
+    msg: message,
+  });
   return info;
 })();
 
@@ -117,6 +123,11 @@ function safeWritable(targetStream) {
 
 function makeProdLogger() {
   return winston.createLogger({
+    level: process.env.LOG_LEVEL || 'info',
+    defaultMeta: {
+      service: 'stellar_card-backend',
+      environment: process.env.NODE_ENV || 'development',
+    },
     format: structuralJsonFormat,
     transports: [
       new winston.transports.Stream({
@@ -131,6 +142,11 @@ function makeProdLogger() {
 // pre-Winston behavior (error -> stderr, info/warn -> stdout) exactly.
 function makeProdErrorLogger() {
   return winston.createLogger({
+    level: 'error',
+    defaultMeta: {
+      service: 'stellar_card-backend',
+      environment: process.env.NODE_ENV || 'development',
+    },
     format: structuralJsonFormat,
     transports: [
       new winston.transports.Stream({
@@ -153,8 +169,12 @@ const prodErrorLogger = IS_PROD ? makeProdErrorLogger() : null;
 function log(level, msg, fields = {}) {
   if (IS_TEST) return; // tests control their own output
 
-  // Send error logs to Sentry in production
-  if (IS_PROD && level === 'error') {
+  // Mirror error-level logs into Sentry. The gate is Sentry's own
+  // "was I initialised" flag rather than NODE_ENV: captureMessage is a
+  // no-op until initSentry() succeeds, so this costs one function call
+  // in dev and test, and a developer pointing SENTRY_DSN at a scratch
+  // project to reproduce an issue locally still gets events.
+  if (level === 'error') {
     try {
       const { captureMessage } = require('./sentry-config');
       captureMessage(msg, 'error', {

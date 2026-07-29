@@ -1,6 +1,6 @@
 # `payment-handler.js` — Flow Documentation
 
-> **File**: [payment-handler.js](file:///c:/Users/supre/Documents/Stellar_Card/stellar_card-backend/src/payment-handler.js)
+> **File**: [payment-handler.js](../src/payment-handler.js)
 > **Last reviewed**: 2026-07-28
 > **Audit baseline**: 2026-04-15 adversarial audit (findings F0–F3)
 
@@ -8,9 +8,9 @@
 
 ## Purpose
 
-[payment-handler.js](file:///c:/Users/supre/Documents/Stellar_Card/stellar_card-backend/src/payment-handler.js) is the core orchestration module that processes confirmed on-chain payments from agents. It was factored out of `index.js` specifically so that integration tests can exercise the full pipeline (`getInvoice → payCtxOrder → notifyPaid`) without needing to boot the Express server or the Stellar event watcher.
+[payment-handler.js](../src/payment-handler.js) is the core orchestration module that processes confirmed on-chain payments from agents. It was factored out of `index.js` specifically so that integration tests can exercise the full pipeline (`getInvoice → payCtxOrder → notifyPaid`) without needing to boot the Express server or the Stellar event watcher.
 
-The module is invoked by [stellar.js](file:///c:/Users/supre/Documents/Stellar_Card/stellar_card-backend/src/payments/stellar.js) every time a `pay_usdc` or `pay_xlm` event is seen on the receiver contract. Its job is to:
+The module is invoked by [stellar.js](../src/payments/stellar.js) every time a `pay_usdc` or `pay_xlm` event is seen on the receiver contract. Its job is to:
 
 1. **Validate** the incoming payment against the stored order.
 2. **Claim** the order atomically to guard against duplicate events.
@@ -406,6 +406,7 @@ If the process crashes between steps, `jobs.js` scans `status = 'ordering'` rows
 | Crash handler wedging order in `ordering` (F1) | `safeErrorMessage` never throws; outer `catch` always executes cleanup |
 | Internal vocabulary leakage to agents | `publicMessage()` from `lib/sanitize-error` maps raw errors to stable codes |
 | Uncloneable / circular field shapes in logger | `logger.event()` uses `safeStringify` + `structuredClone` with try/catch fallthrough |
+| Pre-claim validation for unknown / wrong-status / duplicate orders (F7) | `SELECT * FROM orders WHERE id = ?` + status gate + atomic `WHERE … AND status = 'pending_payment'` UPDATE; unmatched events routed to `unmatched_payments` |
 
 ---
 
@@ -435,6 +436,10 @@ If the process crashes between steps, `jobs.js` scans `status = 'ordering'` rows
 | `F2-payment-handler: parseStrictPositiveStroops` | Full acceptance/rejection matrix including the `'0'` treasury-drain case |
 | `F2-payment-handler: corrupt order.amount_usdc is fail-closed` | DB-backed end-to-end: corrupt rows leave order in `pending_payment`, appear in `unmatched_payments` with `reason = 'corrupt_order'`; valid rows do claim |
 | `F3-payment-handler: usdc_overpaid bizEvent` | Overpayment emits `payment.usdc_overpaid` with correct fields; exact match does not |
+| `stroopsToDecimal` | Inverse of `toStroops`: BigInt stroops → 7-decimal string; handles zero, negative, large values |
+| `handlePayment — pre-claim validation paths` | Unknown order, wrong status, unknown asset, XLM underpayment, XLM not quoted → correct `unmatched_payments` reason code |
+| `handlePayment — already-claimed order` | Event for an order already in `ordering` status → `reason='order_status_ordering'` |
+| `handlePayment — XLM overpayment bizEvent` | Overpaid XLM emits `payment.xlm_overpaid` with correct `excess_xlm` |
 
 ### Integration Tests (`test/integration/`)
 
@@ -506,10 +511,10 @@ The `jobs.js` reconciler handles these automatically on its next sweep. If the r
 
 - [Stellar Payment Events — Stellar Docs](https://developers.stellar.org/docs/learn/concepts/events)
 - [Soroban Contract Events — Stellar Docs](https://developers.stellar.org/docs/learn/soroban/rust-contract-fundamentals/events)
-- [`src/payments/stellar.js`](file:///c:/Users/supre/Documents/Stellar_Card/stellar_card-backend/src/payments/stellar.js) — Event watcher and cursor persistence
-- [`src/vcc-client.js`](file:///c:/Users/supre/Documents/Stellar_Card/stellar_card-backend/src/vcc-client.js) — VCC API client with circuit breaker
-- [`src/payments/xlm-sender.js`](file:///c:/Users/supre/Documents/Stellar_Card/stellar_card-backend/src/payments/xlm-sender.js) — On-chain payment submission
-- [`src/fulfillment.js`](file:///c:/Users/supre/Documents/Stellar_Card/stellar_card-backend/src/fulfillment.js) — Refund, quarantine, and webhook delivery
-- [`src/lib/sanitize-error.js`](file:///c:/Users/supre/Documents/Stellar_Card/stellar_card-backend/src/lib/sanitize-error.js) — Agent-safe error code mapping
-- [`docs/PAYMENT_FLOW.md`](file:///c:/Users/supre/Documents/Stellar_Card/stellar_card-backend/docs/PAYMENT_FLOW.md) — Higher-level architecture overview
-- [`test/unit/payment-handler.test.js`](file:///c:/Users/supre/Documents/Stellar_Card/stellar_card-backend/test/unit/payment-handler.test.js) — Unit test suite
+- [`src/payments/stellar.js`](../src/payments/stellar.js) — Event watcher and cursor persistence
+- [`src/vcc-client.js`](../src/vcc-client.js) — VCC API client with circuit breaker
+- [`src/payments/xlm-sender.js`](../src/payments/xlm-sender.js) — On-chain payment submission
+- [`src/fulfillment.js`](../src/fulfillment.js) — Refund, quarantine, and webhook delivery
+- [`src/lib/sanitize-error.js`](../src/lib/sanitize-error.js) — Agent-safe error code mapping
+- [`docs/PAYMENT_FLOW.md`](../docs/PAYMENT_FLOW.md) — Higher-level architecture overview
+- [`test/unit/payment-handler.test.js`](../test/unit/payment-handler.test.js) — Unit test suite

@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { execSync } from 'node:child_process';
 import { resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const rootDir = resolve(import.meta.dirname, '..');
 
@@ -43,19 +45,24 @@ describe('commitlint configuration', () => {
     // does, with NODE_PATH pointing at the sdk's node_modules so the
     // `.commitlintrc.json` extends lookup also resolves.
     const sdkDir = resolve(rootDir, 'stellar_card-sdk');
-    // commitlint prints nothing and exits 0 on a passing message — the
-    // absence of a thrown (non-zero exit) error IS the pass signal here,
-    // there's no stdout to assert on.
-    expect(() => {
-      execSync(
-        `echo "feat(sdk): add new feature" | node "${sdkDir}/node_modules/@commitlint/cli/lib/cli.js"`,
-        {
-          cwd: rootDir,
-          encoding: 'utf-8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-          env: { ...process.env, NODE_PATH: resolve(sdkDir, 'node_modules') },
-        },
-      );
-    }).not.toThrow();
+    const cli = resolve(sdkDir, 'node_modules/@commitlint/cli/lib/cli.js');
+    const msg = 'feat(sdk): add new feature\n';
+    // Write the commit message to a temp file and use --edit instead of
+    // piping, so the test works cross-platform (piping with echo behaves
+    // differently on Windows CMD vs POSIX shells).
+    const msgFile = join(tmpdir(), `COMMIT_EDITMSG_${Date.now()}`);
+    writeFileSync(msgFile, msg, 'utf-8');
+    try {
+      // Increase timeout since commitlint may take time to resolve config
+      execSync(`node ${JSON.stringify(cli)} --edit ${JSON.stringify(msgFile)}`, {
+        cwd: rootDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 30000,
+        env: { ...process.env, NODE_PATH: resolve(sdkDir, 'node_modules') },
+      });
+    } finally {
+      try { unlinkSync(msgFile); } catch { /* temp file cleanup */ }
+    }
   });
 });

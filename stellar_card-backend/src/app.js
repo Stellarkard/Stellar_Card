@@ -1,14 +1,25 @@
 // @ts-check
 // Express application — importable without starting the Stellar watcher or jobs.
 // index.js is the entry point that wires everything up for production.
+//
+// This file owns exactly three things, in this order:
+//
+//   1. The application-level middleware every request passes through:
+//      Sentry scope, request-id correlation, helmet, the HTTPS guard,
+//      CORS, and JSON body parsing.
+//   2. `registerRoutes(app)` — every mount lives in src/routes/index.js.
+//   3. The terminal chain: the 404 fallback and the error handlers.
+//
+// There are no route handlers here. "Which paths require an api key"
+// is answered in one place (src/routes/index.js) rather than being
+// spread across four screens of handler bodies — see docs/ROUTING.md.
 
 const crypto = require('crypto');
 const express = require('express');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const helmet = require('helmet');
 const cors = require('cors');
-const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const db = require('./db');
-const { log } = require('./lib/logger');
 const auth = require('./middleware/auth');
 const ordersRouter = require('./api/orders');
 const { buildBudget, policyCheck, orderPollLimiter, openSSEStreamCount } = require('./api/orders');
@@ -21,11 +32,35 @@ const internalRouter = require('./api/internal');
 const platformRouter = require('./api/platform');
 const vccCallbackRouter = require('./api/vcc-callback');
 const { MAX_WEBHOOK_ATTEMPTS: MAX_WEBHOOK_ATTEMPTS_FOR_STATUS } = require('./fulfillment');
+const { log } = require('./lib/logger');
+const {
+  sentryRequestHandler,
+  sentryErrorHandler,
+  setRequestId: setSentryRequestId,
+} = require('./lib/sentry-config');
+const { registerRoutes } = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
 const swaggerUi = require('swagger-ui-express');
 const { openapiSpec } = require('./docs/openapi');
 
 const app = express();
+
+// Sentry's request handler must be the very first middleware: it opens
+// the per-request scope that every later captureException() attaches
+// itself to, and anything mounted above it reports without request
+// context. It is a pass-through no-op when SENTRY_DSN is unset, which is
+// the case in development and across the whole test suite.
+// Issue #29: src/lib/sentry-config.js was fully built (init, request/error
+// handler middleware, capture helpers) but never actually wired into the
+// app — initSentry() had no caller anywhere in src/, so error tracking was
+// silently a no-op in every environment, production included. The request
+// handler must be the very first middleware (per Sentry's own docs) so it
+// can attach its transaction/scope before anything else runs; the error
+// handler must run before (not instead of) the app's own errorHandler so
+// Sentry sees every error the same way that handler does. Both are no-ops
+// outside production (see sentryRequestHandler/sentryErrorHandler in
+// sentry-config.js), so this has no effect on dev/test behavior.
+app.use(sentryRequestHandler());
 
 // B-13: Attach a unique request ID to every request for log correlation.
 //
@@ -95,6 +130,10 @@ app.use((req, res, next) => {
   }
   req.id = validated || crypto.randomUUID();
   res.setHeader('X-Request-ID', req.id);
+  // Tag the Sentry scope with the same correlation id the structured
+  // logs carry, so an event in Sentry can be joined back to the log
+  // lines for the request that produced it. No-op when Sentry is off.
+  setSentryRequestId(req.id);
   log('info', 'request', { req_id: req.id, method: req.method, path: req.path });
   next();
 });
@@ -222,14 +261,13 @@ app.use(
   }),
 );
 
-const adminLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 100,
-  keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
-});
+// ── Routes ────────────────────────────────────────────────────────────────────
+// Every route lives in its own module under api/, and routes/index.js owns
+// the mount table. Three of those mounts are order-sensitive (the
+// unauthenticated MPP and claim endpoints, and the pre-auth failure limiter)
+// and the reasoning is documented there rather than here, so the answer to
+// "which paths require an api key" lives in exactly one place.
+registerRoutes(app);
 
 // Note: /auth/login and /auth/verify carry their own per-path rate
 // limiters in api/auth.js. We used to mount a blanket `authLimiter`
@@ -241,6 +279,15 @@ const adminLimiter = rateLimit({
 // endpoints (minting codes, verifying codes) get throttled.
 
 // Audit C-9: API version endpoint for deploy-time compatibility checks.
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 100,
+  keyGenerator: (/** @type {any} */ req) => ipKeyGenerator(req),
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
+});
+
 const versionLimiter = rateLimit({
   windowMs: 60000,
   limit: 60,
@@ -1134,6 +1181,26 @@ const vccCallbackLimiter = rateLimit({
 app.use('/vcc-callback', vccCallbackLimiter, vccCallbackRouter);
 
 // Standardized global error handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'not_found',
+    message: 'The requested endpoint does not exist.',
+    req_id: req.id,
+  });
+});
+
+// ── Terminal error chain ──────────────────────────────────────────────────────
+// Issue #29: Sentry's error handler must be mounted after all routes but
+// before the app's own errorHandler, so it can capture the error and then
+// call next(err) to hand off to errorHandler for the actual response —
+// see the app.use(sentryRequestHandler()) comment above for why this was
+// previously dead code.
+app.use(sentryErrorHandler());
+
+// Standardized global error handler. Owns every error response shape,
+// including the structured 403 for a CORS-rejected origin — cors() throws
+// on a disallowed origin and errorHandler turns that into
+// `{ error: 'forbidden', message: 'Origin not allowed' }`.
 app.use(errorHandler);
 
 module.exports = app;
