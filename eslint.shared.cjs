@@ -12,4 +12,13 @@ const noUnusedVars = [
   { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' },
 ];
 
-module.exports = { noUnusedVars };
+const sharedPrettierRules = {
+  singleQuote: true,
+  trailingComma: 'all',
+  semi: true,
+  printWidth: 100,
+  tabWidth: 2,
+};
+
+module.exports = { noUnusedVars, sharedPrettierRules };
+
