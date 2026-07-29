@@ -24,9 +24,9 @@ export default function OrdersPage() {
   const [query, setQuery] = useState('');
   const [preset, setPreset] = useState<Preset>('all');
   const [selected, setSelected] = useState<Order | null>(null);
+  const [now] = useState(() => Date.now());
 
   const filtered = useMemo(() => {
-    const now = Date.now();
     const DAY = 86_400_000;
     let list = orders;
     switch (preset) {
@@ -58,10 +58,9 @@ export default function OrdersPage() {
       });
     }
     return list;
-  }, [orders, query, preset]);
+  }, [orders, query, preset, now]);
 
   const counts = useMemo(() => {
-    const now = Date.now();
     const DAY = 86_400_000;
     return {
       all: orders.length,
@@ -75,7 +74,7 @@ export default function OrdersPage() {
       refunded: orders.filter((o) => o.status === 'refunded' || o.status === 'refund_pending')
         .length,
     };
-  }, [orders]);
+  }, [orders, now]);
 
   return (
     <PageContainer>

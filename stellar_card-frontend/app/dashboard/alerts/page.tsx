@@ -94,7 +94,9 @@ export default function AlertsPage() {
   }, [toast]);
 
   useEffect(() => {
-    void reload();
+    /* eslint-disable react-hooks/set-state-in-effect -- initial data fetch */
+    reload();
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [reload]);
 
   const { systemRules, userRules } = useMemo(() => {
@@ -326,12 +328,15 @@ function RuleRow({
   onSavedNotify: () => Promise<void>;
 }) {
   const toast = useToast();
+  const [now] = useState(() => Date.now());
   const [emailDraft, setEmailDraft] = useState(rule.notify_email ?? '');
   const [webhookDraft, setWebhookDraft] = useState(rule.notify_webhook_url ?? '');
 
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- sync drafts from rule props */
     setEmailDraft(rule.notify_email ?? '');
     setWebhookDraft(rule.notify_webhook_url ?? '');
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [rule.notify_email, rule.notify_webhook_url]);
 
   async function saveNotify(field: 'email' | 'webhook') {
@@ -379,7 +384,7 @@ function RuleRow({
             ) : (
               <Pill tone="neutral">Disabled</Pill>
             )}
-            {rule.snoozed_until && parseTimestamp(rule.snoozed_until) > Date.now() && (
+            {rule.snoozed_until && parseTimestamp(rule.snoozed_until) > now && (
               <Pill tone="blue">Snoozed</Pill>
             )}
           </div>

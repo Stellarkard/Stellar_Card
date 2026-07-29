@@ -1,5 +1,6 @@
 // Unit tests for dashboard shared UI components — prop validation via
 // renderToStaticMarkup (SSR string output) and JSX prop assertions.
+/* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { describe, it, expect } from 'vitest';
 import { createElement } from 'react';
@@ -13,67 +14,67 @@ import { Card } from './Card';
 
 describe('Pill', () => {
   it('renders with default neutral tone', () => {
-    const el = createElement(Pill, { children: 'Active' });
+    const el = createElement(Pill, null, 'Active');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('role="status"');
     expect(markup).toContain('Active');
   });
 
   it('renders with green tone', () => {
-    const el = createElement(Pill, { tone: 'green', children: 'Connected' });
+    const el = createElement(Pill, { tone: 'green' } as any, 'Connected');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('var(--green)');
     expect(markup).toContain('Connected');
   });
 
   it('renders with red tone', () => {
-    const el = createElement(Pill, { tone: 'red', children: 'Failed' });
+    const el = createElement(Pill, { tone: 'red' } as any, 'Failed');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('var(--red)');
     expect(markup).toContain('Failed');
   });
 
   it('renders with yellow tone', () => {
-    const el = createElement(Pill, { tone: 'yellow', children: 'Pending' });
+    const el = createElement(Pill, { tone: 'yellow' } as any, 'Pending');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('var(--yellow)');
     expect(markup).toContain('Pending');
   });
 
   it('renders with blue tone', () => {
-    const el = createElement(Pill, { tone: 'blue', children: 'Processing' });
+    const el = createElement(Pill, { tone: 'blue' } as any, 'Processing');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('var(--blue)');
     expect(markup).toContain('Processing');
   });
 
   it('renders with purple tone', () => {
-    const el = createElement(Pill, { tone: 'purple', children: 'Ordering' });
+    const el = createElement(Pill, { tone: 'purple' } as any, 'Ordering');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('var(--purple)');
     expect(markup).toContain('Ordering');
   });
 
   it('includes pulse animation when pulse is true', () => {
-    const el = createElement(Pill, { tone: 'green', pulse: true, children: 'Live' });
+    const el = createElement(Pill, { tone: 'green', pulse: true } as any, 'Live');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('pulse');
   });
 
   it('sets aria-label from children when title is not provided', () => {
-    const el = createElement(Pill, { children: 'Delivered' });
+    const el = createElement(Pill, null, 'Delivered');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('aria-label="Delivered"');
   });
 
   it('sets aria-label from title when title is provided', () => {
-    const el = createElement(Pill, { title: 'Order Status', children: 'Delivered' });
+    const el = createElement(Pill, { title: 'Order Status' } as any, 'Delivered');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('aria-label="Order Status"');
   });
 
   it('renders mono font family', () => {
-    const el = createElement(Pill, { children: 'Test' });
+    const el = createElement(Pill, null, 'Test');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('var(--font-mono)');
   });
@@ -84,8 +85,7 @@ describe('FilterChip', () => {
     const el = createElement(FilterChip, {
       active: true,
       onClick: () => {},
-      children: 'All',
-    });
+    } as any, 'All');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('<button');
     expect(markup).toContain('All');
@@ -95,8 +95,7 @@ describe('FilterChip', () => {
     const el = createElement(FilterChip, {
       active: true,
       onClick: () => {},
-      children: 'Active',
-    });
+    } as any, 'Active');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('var(--surface)');
     expect(markup).toContain('var(--border-strong)');
@@ -106,8 +105,7 @@ describe('FilterChip', () => {
     const el = createElement(FilterChip, {
       active: false,
       onClick: () => {},
-      children: 'Inactive',
-    });
+    } as any, 'Inactive');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('transparent');
   });
@@ -117,8 +115,7 @@ describe('FilterChip', () => {
       active: true,
       onClick: () => {},
       count: 5,
-      children: 'Orders',
-    });
+    } as any, 'Orders');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('5');
   });
@@ -127,8 +124,7 @@ describe('FilterChip', () => {
     const el = createElement(FilterChip, {
       active: true,
       onClick: () => {},
-      children: 'Orders',
-    });
+    } as any, 'Orders');
     const markup = renderToStaticMarkup(el);
     expect(markup).not.toContain('var(--font-mono)');
   });
@@ -138,8 +134,7 @@ describe('FilterChip', () => {
       active: true,
       onClick: () => {},
       tone: 'green',
-      children: 'Success',
-    });
+    } as any, 'Success');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('var(--green)');
   });
@@ -148,8 +143,7 @@ describe('FilterChip', () => {
     const el = createElement(FilterChip, {
       active: true,
       onClick: () => {},
-      children: 'All',
-    });
+    } as any, 'All');
     const markup = renderToStaticMarkup(el);
     expect(markup).not.toContain('border-radius: 50%');
   });
@@ -158,8 +152,7 @@ describe('FilterChip', () => {
     const el = createElement(FilterChip, {
       active: true,
       onClick: () => {},
-      children: 'Test',
-    });
+    } as any, 'Test');
     const markup = renderToStaticMarkup(el);
     expect(markup).toMatch(/border-radius:\s*999/);
   });
@@ -285,13 +278,13 @@ describe('PageHeader', () => {
 
 describe('Card', () => {
   it('renders children', () => {
-    const el = createElement(Card, { children: createElement('p', null, 'Content') });
+    const el = createElement(Card, null, createElement('p', null, 'Content'));
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('Content');
   });
 
   it('renders with title', () => {
-    const el = createElement(Card, { title: 'Recent Activity', children: 'Content' });
+    const el = createElement(Card, { title: 'Recent Activity' } as any, 'Content');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('Recent Activity');
   });
@@ -300,40 +293,40 @@ describe('Card', () => {
     const el = createElement(Card, {
       title: 'Orders',
       actions: createElement('button', null, 'View All'),
-      children: 'Content',
-    });
+    } as any,
+    'Content');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('View All');
   });
 
   it('applies dashboard-card class', () => {
-    const el = createElement(Card, { children: 'Content' });
+    const el = createElement(Card, null, 'Content');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('class="dashboard-card"');
   });
 
   it('applies dashboard-card-scroll class when padding is 0', () => {
-    const el = createElement(Card, { padding: 0, children: 'Content' });
+    const el = createElement(Card, { padding: 0 } as any, 'Content');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('dashboard-card-scroll');
   });
 
   it('applies custom padding', () => {
-    const el = createElement(Card, { padding: '2rem', children: 'Content' });
+    const el = createElement(Card, { padding: '2rem' } as any, 'Content');
     const markup = renderToStaticMarkup(el);
     // React serializes inline styles without spaces after colons
     expect(markup).toMatch(/padding:\s*2rem/);
   });
 
   it('applies custom style', () => {
-    const el = createElement(Card, { style: { marginTop: '1rem' }, children: 'Content' });
+    const el = createElement(Card, { style: { marginTop: '1rem' } } as any, 'Content');
     const markup = renderToStaticMarkup(el);
     // React serializes inline styles without spaces after colons
     expect(markup).toMatch(/margin-top:\s*1rem/);
   });
 
   it('renders surface background and border', () => {
-    const el = createElement(Card, { children: 'Content' });
+    const el = createElement(Card, null, 'Content');
     const markup = renderToStaticMarkup(el);
     expect(markup).toContain('var(--surface)');
     expect(markup).toContain('var(--border)');

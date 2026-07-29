@@ -55,9 +55,12 @@ export function NavLinks() {
 
   // Route change closes everything.
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- intentional route change reset */
     setMoreOpen(false);
     setMenuOpen(false);
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [pathname]);
+
 
   // Lock page scroll while the mobile menu is open. Both html and body
   // need overflow:hidden — iOS Safari ignores it on body alone.
