@@ -125,6 +125,18 @@ docker compose --profile tools run --rm sdk        # install + test the SDK
 docker compose --profile tools run --rm contract   # build the contract wasm
 ```
 
+Optional database services (PostgreSQL, Redis) are also available:
+
+```bash
+# Start with PostgreSQL and Redis
+docker compose --profile db up
+
+# Development with databases
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile db up
+```
+
+For comprehensive Docker Compose documentation, see [DOCKER_GUIDE.md](DOCKER_GUIDE.md).
+
 ## Testing & Quality Assurance
 
 - **Unit & SDK Tests**: `npm test` inside `stellar_card-sdk/`

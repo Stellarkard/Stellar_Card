@@ -88,6 +88,54 @@ services:
     networks:
       - stellar_card-net
 
+  # ── Optional Database Services (profile-gated) ───────────────────────────
+  #
+  # PostgreSQL and Redis are optional - the backend defaults to SQLite for
+  # development. Enable these services with:
+  #
+  #   docker compose --profile db up
+  #
+  # This allows testing with production-like databases without requiring
+  # local installation.
+
+  postgres:
+    profiles: ["db"]
+    image: postgres:16-alpine
+    container_name: stellar_card-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stellar_card
+      POSTGRES_PASSWORD: stellar_card_dev
+      POSTGRES_DB: stellar_card
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stellar_card"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stellar_card-net
+
+  redis:
+    profiles: ["db"]
+    image: redis:7-alpine
+    container_name: stellar_card-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stellar_card-net
+
   # ── Tooling (profile-gated, run-to-completion) ────────────────────────────
   #
   # Not long-running services: these exist so a contributor can build and test
@@ -136,6 +184,11 @@ volumes:
   cargo-registry:
     driver: local
   contract-target:
+    driver: local
+  # Optional database volumes
+  postgres-data:
+    driver: local
+  redis-data:
     driver: local
 
 networks:
