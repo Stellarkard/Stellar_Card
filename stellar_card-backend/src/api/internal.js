@@ -19,6 +19,7 @@ const requireCardReveal = require('../middleware/requireCardReveal');
 const { recordAudit } = require('../lib/audit');
 // scheduleRefund import removed along with the manual refund endpoint — see below
 const { getOrderStats } = require('../lib/stats');
+const { AppError } = require('../lib/app-error');
 
 const router = Router();
 
@@ -114,7 +115,7 @@ router.get('/orders', (req, res) => {
 //   2. Write the audit row synchronously. On ANY failure, return 503
 //      immediately and do NOT ship the card.
 //   3. Only after the audit is durable, return the card JSON.
-router.get('/orders/:id/card', requireCardReveal, (req, res) => {
+router.get('/orders/:id/card', requireCardReveal, (req, res, next) => {
   const order = db
     .prepare(
       `SELECT id, card_number, card_cvv, card_expiry, card_brand, api_key_id
@@ -136,10 +137,7 @@ router.get('/orders/:id/card', requireCardReveal, (req, res) => {
     card = openCard(order);
   } catch (err) {
     console.error(`[internal] card-vault open failed for ${order.id}: ${err.message}`);
-    return res.status(500).json({
-      error: 'card_vault_unavailable',
-      message: 'Card data could not be decrypted. Check the vault key and vault integrity.',
-    });
+    return next(new AppError(500, 'card_vault_unavailable', 'Card data could not be decrypted. Check the vault key and vault integrity.'));
   }
 
   // Audit FIRST, ship SECOND. If the audit write can't be persisted,
@@ -205,11 +203,7 @@ router.get('/orders/:id/card', requireCardReveal, (req, res) => {
     }
   } catch (err) {
     console.error(`[internal] audit log write failed for card reveal: ${err.message}`);
-    return res.status(503).json({
-      error: 'audit_unavailable',
-      message:
-        'Card reveal blocked: audit log write could not be persisted. An un-audited reveal is not permitted. Try again shortly, and alert ops if this persists.',
-    });
+    return next(new AppError(503, 'audit_unavailable', 'Card reveal blocked: audit log write could not be persisted. An un-audited reveal is not permitted. Try again shortly, and alert ops if this persists.'));
   }
 
   res.json({
@@ -238,15 +232,15 @@ router.get('/unmatched', (req, res) => {
 
 // GET /internal/platform-wallet — platform Stellar wallet public key + Horizon balance
 // Derives public key from STELLAR_XLM_SECRET; balance is fetched by the frontend from Horizon.
-router.get('/platform-wallet', (req, res) => {
+router.get('/platform-wallet', (req, res, next) => {
   try {
     const { Keypair } = require('@stellar/stellar-sdk');
     const secret = process.env.STELLAR_XLM_SECRET;
-    if (!secret) return res.status(503).json({ error: 'STELLAR_XLM_SECRET not configured' });
+    if (!secret) return next(new AppError(503, 'STELLAR_XLM_SECRET not configured'));
     const keypair = Keypair.fromSecret(secret);
     res.json({ public_key: keypair.publicKey() });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to derive platform wallet key', message: err.message });
+    next(new AppError(500, 'failed_to_derive_platform_wallet', err.message));
   }
 });
 

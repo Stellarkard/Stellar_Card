@@ -40,6 +40,7 @@ module.exports = function requireDashboard(req, res, next) {
     return res.status(401).json({
       error: 'unauthenticated',
       message: 'This endpoint requires an authenticated user session.',
+      req_id: req.id || null,
     });
   }
 
@@ -62,7 +63,7 @@ module.exports = function requireDashboard(req, res, next) {
   if (rows.length === 0) {
     return res
       .status(404)
-      .json({ error: 'no_dashboard', message: 'No dashboard found. Please contact support.' });
+      .json({ error: 'no_dashboard', message: 'No dashboard found. Please contact support.', req_id: req.id || null });
   }
 
   if (rows.length > 1) {

@@ -94,7 +94,7 @@ module.exports = function requireCardReveal(req, res, next) {
       ip: clientIpOf(req),
       user_agent: userAgentOf(req),
     });
-    return res.status(401).json({ error: 'unauthenticated' });
+    return res.status(401).json({ error: 'unauthenticated', req_id: req.id || null });
   }
 
   // F2-card-reveal: defensive type check. requireAuth always populates
@@ -110,7 +110,7 @@ module.exports = function requireCardReveal(req, res, next) {
       ip: clientIpOf(req),
       user_agent: userAgentOf(req),
     });
-    return res.status(401).json({ error: 'unauthenticated', message: 'Missing email in session' });
+    return res.status(401).json({ error: 'unauthenticated', message: 'Missing email in session', req_id: req.id || null });
   }
 
   const email = req.user.email.toLowerCase();
@@ -129,6 +129,7 @@ module.exports = function requireCardReveal(req, res, next) {
       message:
         'Raw card reveal is disabled in this deployment. Set CARDS402_CARD_REVEAL_EMAILS to ' +
         'an explicit list of authorised operators to enable.',
+      req_id: req.id || null,
     });
   }
 
@@ -143,6 +144,7 @@ module.exports = function requireCardReveal(req, res, next) {
     return res.status(403).json({
       error: 'forbidden',
       message: 'Not authorised to reveal raw card data',
+      req_id: req.id || null,
     });
   }
 

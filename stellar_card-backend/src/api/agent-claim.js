@@ -9,6 +9,7 @@
 const { Router } = require('express');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const db = require('../db');
+const { AppError } = require('../lib/app-error');
 const rateLimitHandler = require('../middleware/rateLimitHandler');
 
 const router = Router();
@@ -25,7 +26,7 @@ const claimLimiter = rateLimit({
   legacyHeaders: false,
   handler: rateLimitHandler('Too many claim attempts. Wait a minute and try again.'),
 });
-router.post('/agent/claim', claimLimiter, (req, res) => {
+router.post('/agent/claim', claimLimiter, (req, res, next) => {
   const { event: bizEvent } = require('../lib/logger');
   const secretBox = require('../lib/secret-box');
   const { hashClaimCode } = require('../lib/claim-hash');
@@ -120,10 +121,7 @@ router.post('/agent/claim', claimLimiter, (req, res) => {
         code_hash_prefix: codeHash.slice(0, 12),
         error: err instanceof Error ? err.message : String(err),
       });
-      return res.status(500).json({
-        error: 'claim_decrypt_failed',
-        message: 'Failed to decrypt claim payload. Contact support if this persists.',
-      });
+      return next(new AppError(500, 'claim_decrypt_failed', 'Failed to decrypt claim payload. Contact support if this persists.'));
     }
     // Any other unexpected throw inside the txn — rethrow so Express
     // emits a 500 via its default error handler. Shouldn't happen in

@@ -47,12 +47,12 @@ function requireAuth(req, res, next) {
   // F1-requireAuth: coerce array-valued header to a single string before
   // touching any string methods. Fail closed to 401 on anything else.
   const rawAuth = coerceAuthHeader(req.headers?.authorization);
-  if (!rawAuth) return res.status(401).json({ error: 'unauthorized' });
+  if (!rawAuth) return res.status(401).json({ error: 'unauthorized', req_id: req.id || null });
 
   // F2-requireAuth: strip "Bearer " then trim so trailing whitespace
   // / CR / LF from a sloppy client doesn't desync the token hash.
   const token = rawAuth.replace(/^Bearer\s+/i, '').trim();
-  if (!token) return res.status(401).json({ error: 'unauthorized' });
+  if (!token) return res.status(401).json({ error: 'unauthorized', req_id: req.id || null });
 
   const row = /** @type {any} */ (
     db
@@ -68,7 +68,7 @@ function requireAuth(req, res, next) {
       .get(hashToken(token))
   );
 
-  if (!row) return res.status(401).json({ error: 'unauthorized' });
+  if (!row) return res.status(401).json({ error: 'unauthorized', req_id: req.id || null });
 
   // Stamp the platform-owner flag on every authenticated request so
   // downstream handlers can gate on it without re-reading env or

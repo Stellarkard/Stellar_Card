@@ -20,6 +20,7 @@ const { Router } = require('express');
 const requireAuth = require('../middleware/requireAuth');
 const requirePlatformOwner = require('../middleware/requirePlatformOwner');
 const { normalizeCardBrand } = require('../lib/normalize-card');
+const { asyncHandler } = require('../middleware/async-handler');
 
 const router = Router();
 router.use(requireAuth);
@@ -100,7 +101,7 @@ async function fetchTreasuryBalance() {
 
 // ── GET /overview ─────────────────────────────────────────────────────────────
 // KPI cockpit. Everything you want on the first page you land on.
-router.get('/overview', async (req, res) => {
+router.get('/overview', asyncHandler(async (req, res, next) => {
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
   const counts = {
@@ -224,7 +225,7 @@ router.get('/overview', async (req, res) => {
     treasury,
     generated_at: new Date().toISOString(),
   });
-});
+}));
 
 // ── GET /orders ───────────────────────────────────────────────────────────────
 // Cross-tenant orders list. Joined with api_keys → dashboards → users so
@@ -767,7 +768,7 @@ router.post('/unfreeze', (req, res) => {
 //
 // Platform owner only — margin data is operator-sensitive.
 
-router.get('/margins', async (req, res) => {
+router.get('/margins', asyncHandler(async (req, res, next) => {
   const limitRaw = parseInt(/** @type {string} */ (req.query.limit) || '200', 10);
   const limit = Math.min(Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 200), 1000);
 
@@ -864,6 +865,6 @@ router.get('/margins', async (req, res) => {
     },
     orders: enriched,
   });
-});
+}));
 
 module.exports = router;

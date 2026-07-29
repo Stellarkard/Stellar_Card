@@ -20,6 +20,8 @@ const { sendLoginCode } = require('../lib/email');
 const { isPlatformOwner } = require('../lib/platform');
 const { recordAudit } = require('../lib/audit');
 const { validateBody } = require('../middleware/validate');
+const { asyncHandler } = require('../middleware/async-handler');
+const { AppError } = require('../lib/app-error');
 
 const router = Router();
 
@@ -166,6 +168,18 @@ router.post(
   // earlier cycle, now expressed as a reusable Zod schema (see
   // src/middleware/validate.js).
   validateBody(loginBodySchema, { fieldErrorCode: 'invalid_email' }),
+  asyncHandler(async (req, res, next) => {
+  const { email } = req.body;
+  const addr = normalizeEmail(email);
+
+  // Bootstrap guard: if OWNER_EMAIL is set and no users exist yet, reject non-matching emails.
+  // Prevents a race where a stranger claims owner on a fresh instance before the real owner.
+  const ownerEmail = process.env.OWNER_EMAIL?.trim().toLowerCase();
+  if (ownerEmail) {
+    const userCount = /** @type {any} */ (db.prepare(`SELECT COUNT(*) AS n FROM users`).get()).n;
+    if (userCount === 0 && addr !== ownerEmail) {
+      // Return generic success to avoid disclosing that the instance is unconfigured
+      return res.json({ ok: true });
   async (req, res) => {
     const { email } = req.body;
     const addr = normalizeEmail(email);

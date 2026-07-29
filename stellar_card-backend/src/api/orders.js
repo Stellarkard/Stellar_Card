@@ -24,6 +24,8 @@ const { usdToXlm } = require('../payments/xlm-price');
 const { sendApprovalEmail, sendSpendAlertEmail } = require('../lib/email');
 const { event: bizEvent } = require('../lib/logger');
 const { insertPendingPaymentOrder } = require('../orders/core');
+const { asyncHandler } = require('../middleware/async-handler');
+const { AppError } = require('../lib/app-error');
 
 const router = Router();
 
@@ -402,7 +404,7 @@ function buildBudget(apiKey) {
 // literal `undefined` (not a string), and made
 // `crypto.createHash('sha256').update(undefined)` throw an opaque
 // TypeError — an Express 500 for what is plainly a bad request.
-router.post('/', orderCreateLimiter, validateCreateOrder, async (req, res) => {
+router.post('/', orderCreateLimiter, validateCreateOrder, asyncHandler(async (req, res, next) => {
   // Idempotency-Key handling — hardening from the adversarial audit:
   //
   // F2: express parses repeated headers into an array. The previous
@@ -440,10 +442,7 @@ router.post('/', orderCreateLimiter, validateCreateOrder, async (req, res) => {
     : null;
 
   if (isFrozen()) {
-    return res.status(503).json({
-      error: 'service_temporarily_unavailable',
-      message: 'Card fulfillment is temporarily suspended. Please try again later.',
-    });
+    throw new AppError(503, 'service_temporarily_unavailable', 'Card fulfillment is temporarily suspended. Please try again later.');
   }
 
   // Shape, range, and size are already guaranteed by validateCreateOrder.
@@ -768,9 +767,9 @@ router.post('/', orderCreateLimiter, validateCreateOrder, async (req, res) => {
       return res.status(txnResult.status).json(txnResult.body);
     default:
       // Exhaustiveness check — should never hit.
-      return res.status(500).json({ error: 'internal_error' });
+      throw new AppError(500, 'internal_error');
   }
-});
+}));
 
 // GET /orders — list agent's own orders.
 // Audit A-19: supports `since_created_at` / `since_updated_at` ISO-8601
