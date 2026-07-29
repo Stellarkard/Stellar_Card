@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Stellar_Card contract deployment helper — Node.js port of deploy_testnet.sh.
+ * Stellar_Card contract deployment helper.
  *
  * This file is deliberately thin: it reads argv, prints, and spawns. Every
  * decision it makes lives in `lib/deploy.mjs` as a pure function, so the logic

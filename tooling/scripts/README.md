@@ -30,6 +30,7 @@ Before running the deployment scripts, ensure you have the following installed:
 - [Node.js](https://nodejs.org/) 18 or newer (for `deploy_testnet.mjs`)
 - [Rust toolchain](https://rustup.rs/) (including the `wasm32-unknown-unknown` target)
 - [Soroban CLI](https://soroban.stellar.org/docs/getting-started/setup)
+- Node.js 18+ (the script uses `node:util.parseArgs` and other modern built-ins)
 
 ## Environment Setup
 
@@ -87,7 +88,14 @@ banner so it does not end up in a terminal scrollback or a CI log.
 ### Shell entry point
 
 ```bash
-./deploy_testnet.sh
+node deploy_testnet.mjs --source alice
+```
+
+Flags mirror the environment variables above (`--source`, `--network`), plus
+a `--dry-run` flag that builds without deploying:
+
+```bash
+node deploy_testnet.mjs --source alice --network testnet --dry-run
 ```
 
 ## Expected Outputs
