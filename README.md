@@ -3,7 +3,7 @@
 Full spend management and virtual Visa cards for AI agents.
 Pay XLM or USDC on Stellar, get a real Visa card number in about 60 seconds.
 
-Stellar_Card gives agents their own funding rails without giving them your personal card details.
+Stellar Card gives agents their own funding rails without giving them your personal card details.
 With one line of code, an agent can deploy an Open Wallet Standard (OWS) wallet with Stellar and Soroban support, then use that wallet to buy anywhere x402 is supported and anywhere Visa is accepted.
 
 [![Tests](https://github.com/devpeter999/Stellar_Card/workflows/Test%20%26%20Lint/badge.svg)](https://github.com/devpeter999/Stellar_Card/actions/workflows/test.yml)
