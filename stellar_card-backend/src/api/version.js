@@ -21,13 +21,25 @@ const versionLimiter = rateLimit({
   handler: rateLimitHandler('Version endpoint rate limit exceeded. Retry in a minute.'),
 });
 
+// The single source of truth for "what does this deploy speak". Exported
+// so api/openapi.js can stamp the same version into the published spec —
+// a spec whose info.version disagrees with GET /api/version is worse than
+// an undated one, because tooling trusts it to pick a client.
+const VERSION_PAYLOAD = Object.freeze({
+  service: 'stellar_card',
+  version: '0.1.0',
+  hmac_protocol: 'v3',
+  features: Object.freeze([
+    'idempotency_key',
+    'soroban_contract',
+    'webhook_circuit_breaker',
+    'callback_nonce',
+  ]),
+});
+
 router.get('/api/version', versionLimiter, (_req, res) => {
-  res.json({
-    service: 'stellar_card',
-    version: '0.1.0',
-    hmac_protocol: 'v3',
-    features: ['idempotency_key', 'soroban_contract', 'webhook_circuit_breaker', 'callback_nonce'],
-  });
+  res.json(VERSION_PAYLOAD);
 });
 
 module.exports = router;
+module.exports.VERSION_PAYLOAD = VERSION_PAYLOAD;

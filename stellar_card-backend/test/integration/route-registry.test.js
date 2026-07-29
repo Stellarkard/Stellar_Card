@@ -145,6 +145,56 @@ describe('route registry — authenticated agent surface', () => {
   });
 });
 
+describe('route registry — app.js owns no routes', () => {
+  // The extraction is only durable if app.js staying handler-free is
+  // checked rather than remembered. Both halves of this suite failed
+  // before the extraction was finished: app.js still carried a second
+  // copy of four handlers alongside the registerRoutes() call that had
+  // replaced them, so every one of those paths was mounted twice.
+
+  it('mounts each path exactly once', async () => {
+    // A double mount is invisible from the outside — the first handler
+    // answers and the second is dead weight — until the two drift and a
+    // fix lands in the copy that never runs.
+    const app = require('../../src/app');
+
+    /** @type {Map<string, number>} */
+    const mounts = new Map();
+    const walk = (stack, prefix) => {
+      for (const layer of stack) {
+        if (layer.route) {
+          for (const method of Object.keys(layer.route.methods)) {
+            const key = `${method.toUpperCase()} ${`${prefix}/${layer.route.path}`.replace(/\/+/g, '/')}`;
+            mounts.set(key, (mounts.get(key) || 0) + 1);
+          }
+        } else if (layer.name === 'router' && layer.handle?.stack) {
+          const source = layer.regexp?.source || '';
+          const match = source.match(/^\^\\\/((?:[\w\-.]|\\\/)*)/);
+          walk(layer.handle.stack, prefix + (match ? `/${match[1].replace(/\\\//g, '/')}` : ''));
+        }
+      }
+    };
+    walk(app._router ? app._router.stack : app.router.stack, '');
+
+    const duplicated = [...mounts.entries()].filter(([, count]) => count > 1).map(([key]) => key);
+    assert.deepEqual(duplicated, [], `these paths are mounted more than once: ${duplicated}`);
+  });
+
+  it('declares no route handlers in app.js itself', () => {
+    // The source-level counterpart: app.js may install middleware with
+    // app.use(), but an app.get/post/patch/delete belongs in a module
+    // under api/ that routes/index.js mounts.
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const source = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'app.js'), 'utf8');
+
+    const handlers = [...source.matchAll(/^\s*app\.(get|post|put|patch|delete)\(/gm)].map((m) =>
+      m[0].trim(),
+    );
+    assert.deepEqual(handlers, [], `app.js declares route handlers: ${handlers.join(', ')}`);
+  });
+});
+
 describe('route registry — operator surface prefixes', () => {
   beforeEach(() => resetDb());
 
