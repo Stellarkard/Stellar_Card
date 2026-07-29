@@ -1,0 +1,9 @@
+node_modules
+.next
+out
+.env
+.env.local
+.storybook-static
+e2e
+playwright-report
+test-results
