@@ -12,6 +12,7 @@
 // Codes expire after 15 minutes. Sessions last 7 days.
 
 const { Router } = require('express');
+const { z } = require('zod');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
@@ -20,9 +21,8 @@ const db = require('../db');
 const { sendLoginCode } = require('../lib/email');
 const { isPlatformOwner } = require('../lib/platform');
 const { recordAudit } = require('../lib/audit');
-const { validateBody } = require('../middleware/validate');
+const { validate, patternString } = require('../lib/validate');
 const { asyncHandler } = require('../middleware/async-handler');
-const { AppError } = require('../lib/app-error');
 
 const router = Router();
 
@@ -89,15 +89,56 @@ function normalizeEmail(email) {
   return email.trim().toLowerCase();
 }
 
-// Issue #27: same shape/regex the manual check enforced (see the F1-auth
-// comment on the route below) — a string matching a plain
-// local-part@domain.tld pattern. Not RFC 5322 exhaustive by design; this is
-// a login-code destination, not a mailbox existence check.
-const loginBodySchema = z.object({
-  email: z
-    .string({ required_error: 'A valid email address is required.' })
-    .trim()
-    .regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'A valid email address is required.'),
+// ── Request schemas ────────────────────────────────────────────────────────
+//
+// Declared with the non-coercing primitives from lib/validate.js, for the
+// same reason the order schemas are: `validate()` writes the parsed value
+// back onto `req.body`, and a coercing schema would hand the handler a
+// value that is no longer the one the client sent. `normalizeEmail()` owns
+// the trim + lowercase, so the schema tests the trimmed form without
+// rewriting it.
+
+// A plain local-part@domain.tld shape. Deliberately not RFC 5322
+// exhaustive: this is a login-code destination, not a mailbox existence
+// check, and the code that gets mailed is the real proof of ownership.
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Adversarial audit F1-auth (2026-04-15): a body with no Content-Type, an
+// array body, or a null body used to crash `const { email } = req.body`
+// with "Cannot destructure property 'email' of 'undefined'" and return a
+// 500 instead of a clear 400. `validate({ body })` performs that guard
+// before the schema runs, so it now applies to both routes uniformly.
+const LoginBody = z
+  .object({
+    email: patternString(EMAIL_SHAPE, 'A valid email address is required.', { trim: true }),
+  })
+  .passthrough();
+
+const validateLogin = validate({
+  body: LoginBody,
+  errorCodes: { email: 'invalid_email' },
+});
+
+// /auth/verify is an authentication boundary, so both fields share one
+// error code AND one message: telling a caller which half was wrong
+// tells them which half was right. The pre-schema guard checked
+// truthiness before type, so an array email reached
+// `normalizeEmail(email).trim()` — a method arrays do not have — and
+// returned 500. `patternString` rejects a non-string with the field's own
+// message rather than Zod's "Expected string", which is what keeps the
+// two responses byte-identical.
+const VERIFY_FIELDS_MESSAGE = 'email and code are required strings.';
+
+const VerifyBody = z
+  .object({
+    email: patternString(/\S/, VERIFY_FIELDS_MESSAGE),
+    code: patternString(/\S/, VERIFY_FIELDS_MESSAGE),
+  })
+  .passthrough();
+
+const validateVerify = validate({
+  body: VerifyBody,
+  errorCodes: { email: 'missing_fields', code: 'missing_fields' },
 });
 
 // Adversarial audit F2-auth (2026-04-15): coerce client IP to a
@@ -152,10 +193,44 @@ function extractBearerToken(req) {
 
 // ── POST /auth/login ─────────────────────────────────────────────────────────
 
-// validateLogin covers adversarial audit F1-auth (a body with no
-// Content-Type, an array body, or a null body used to crash the
-// destructure with "Cannot destructure property 'email' of 'undefined'"
-// and return 500 instead of a clear 400) as well as the address shape.
+/**
+ * @openapi
+ * /auth/login:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Request a 6-digit login code by email
+ *     description: >
+ *       Always returns 200 with {ok: true} regardless of whether the email is
+ *       recognised, to avoid disclosing account existence. Codes expire after
+ *       15 minutes.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email: { type: string, format: email }
+ *     responses:
+ *       200:
+ *         description: Code sent (or silently accepted).
+ *         content:
+ *           application/json:
+ *             schema: { type: object, properties: { ok: { type: boolean } } }
+ *       400:
+ *         description: Missing or invalid email.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many active codes requested for this email.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       500:
+ *         description: Email delivery failed (production only).
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.post(
   '/login',
   loginLimiter,
@@ -170,6 +245,8 @@ router.post(
   // src/middleware/validate.js).
   validateBody(loginBodySchema, { fieldErrorCode: 'invalid_email' }),
   asyncHandler(async (req, res, next) => {
+  validateLogin,
+  asyncHandler(async (req, res) => {
     const { email } = req.body;
     const addr = normalizeEmail(email);
 
@@ -241,25 +318,62 @@ router.post(
 
 // ── POST /auth/verify ────────────────────────────────────────────────────────
 
-router.post('/verify', verifyLimiter, (req, res) => {
-  // F1-auth: same shape guard as /auth/login. Additionally check
-  // that email and code are strings — the previous code only checked
-  // truthiness, so an array email like `["a@b.com"]` would reach
-  // `normalizeEmail(email).trim()`, which doesn't exist on arrays
-  // and crashes with 500.
-  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'Request body must be a JSON object (set Content-Type: application/json).',
-    });
-  }
+/**
+ * @openapi
+ * /auth/verify:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Verify a login code and create a dashboard session
+ *     description: >
+ *       The first user ever verified on an instance becomes role=owner; every
+ *       subsequent user is role=user. Creates a users/dashboards row on first
+ *       login for that email.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, code]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               code: { type: string, description: '6-digit login code.' }
+ *     responses:
+ *       200:
+ *         description: Session created.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 token: { type: string, description: 'Bearer session token, valid 7 days.' }
+ *                 user:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string, format: uuid }
+ *                     email: { type: string, format: email }
+ *                     role: { type: string, enum: [owner, user] }
+ *                     is_platform_owner: { type: boolean }
+ *                 dashboard:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string, format: uuid }
+ *                     name: { type: string }
+ *       400:
+ *         description: Missing email or code.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Invalid or expired code.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many incorrect codes — request a new one.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
+router.post('/verify', verifyLimiter, validateVerify, (req, res) => {
   const { email, code } = req.body;
-  if (!email || !code || typeof email !== 'string' || typeof code !== 'string') {
-    return res
-      .status(400)
-      .json({ error: 'missing_fields', message: 'email and code are required strings.' });
-  }
-
   const addr = normalizeEmail(email);
   const codeHash = hashToken(code.trim());
 
@@ -419,6 +533,20 @@ router.post('/verify', verifyLimiter, (req, res) => {
 
 // ── POST /auth/logout ────────────────────────────────────────────────────────
 
+/**
+ * @openapi
+ * /auth/logout:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Invalidate the current dashboard session
+ *     security: [{ DashboardSession: [] }]
+ *     responses:
+ *       200:
+ *         description: Always returns ok, even if the token was already invalid.
+ *         content:
+ *           application/json:
+ *             schema: { type: object, properties: { ok: { type: boolean } } }
+ */
 router.post('/logout', (req, res) => {
   const token = extractBearerToken(req);
   if (token) {
@@ -455,6 +583,29 @@ router.post('/logout', (req, res) => {
 
 // ── GET /auth/me ─────────────────────────────────────────────────────────────
 
+/**
+ * @openapi
+ * /auth/me:
+ *   get:
+ *     tags: [Auth]
+ *     summary: Current user from the session token
+ *     security: [{ DashboardSession: [] }]
+ *     responses:
+ *       200:
+ *         description: Current user.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string, format: uuid }
+ *                 email: { type: string, format: email }
+ *                 role: { type: string, enum: [owner, user] }
+ *       401:
+ *         description: Missing, invalid, or expired session token.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.get('/me', (req, res) => {
   const token = extractBearerToken(req);
   if (!token) return res.status(401).json({ error: 'unauthorized' });

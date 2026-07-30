@@ -396,6 +396,54 @@ function buildBudget(apiKey) {
 // txn is pure DB reads + writes so it can stay synchronous. Side-effect
 // notifications (approval email / Discord ping / spend-alert email)
 // fire AFTER commit out-of-band.
+/**
+ * @openapi
+ * /v1/orders:
+ *   post:
+ *     tags: [Agent API]
+ *     summary: Create a virtual card order
+ *     description: >
+ *       Returns on-chain payment instructions (USDC or XLM on Stellar). Supports
+ *       an `Idempotency-Key` header — retrying with the same key and an identical
+ *       body returns the original response instead of creating a duplicate order.
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: Idempotency-Key
+ *         in: header
+ *         required: false
+ *         schema: { type: string, maxLength: 255 }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { $ref: '#/components/schemas/OrderCreateRequest' }
+ *     responses:
+ *       201:
+ *         description: Order created.
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/Order' }
+ *       400:
+ *         description: Invalid amount, webhook_url, metadata, or idempotency key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       409:
+ *         description: Idempotency-Key reused with a different request body.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Rate limit exceeded for this API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       503:
+ *         description: Card fulfillment temporarily suspended.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 // The body schema (CreateOrderBody, above) covers the non-object-body
 // guard from adversarial audit F3-orders as well as every field-level
 // check. The non-object case matters beyond tidiness: a request with no
@@ -777,6 +825,50 @@ router.post('/', orderCreateLimiter, validateCreateOrder, asyncHandler(async (re
 // whole history, plus `offset` for simple pagination and a tighter hard
 // cap on `limit` (200 from the previous 100 to support larger polling
 // windows without exceeding DB response size).
+/**
+ * @openapi
+ * /v1/orders:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: List orders for the authenticated API key
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: status
+ *         in: query
+ *         schema: { type: string }
+ *       - name: limit
+ *         in: query
+ *         schema: { type: integer, default: 20, maximum: 200 }
+ *       - name: offset
+ *         in: query
+ *         schema: { type: integer, default: 0 }
+ *       - name: since_created_at
+ *         in: query
+ *         schema: { type: string, format: date-time }
+ *       - name: since_updated_at
+ *         in: query
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Matching orders, newest first.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   id: { type: string, format: uuid }
+ *                   status: { type: string }
+ *                   amount_usdc: { type: string }
+ *                   payment_asset: { type: string }
+ *                   created_at: { type: string, format: date-time }
+ *                   updated_at: { type: string, format: date-time }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 // validateListOrders whitelists `status`, rejects malformed ISO
 // timestamps, and clamps `limit` / `offset` into range, so everything
 // below is already a trusted value of the right type. Before it, an
@@ -939,6 +1031,41 @@ const TERMINAL_STATUSES = new Set([
 // immediately. A tight loop could hit 1000+ opens/sec, hammering
 // SQLite and socket setup without breaching any counter. Using the
 // existing 600/min poll limiter caps that axis correctly.
+/**
+ * @openapi
+ * /v1/orders/{id}/stream:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: Server-Sent Events stream of order status updates
+ *     description: >
+ *       `Content-Type: text/event-stream`. Emits the same payload shape as
+ *       `GET /v1/orders/{id}` on each status change, then closes the stream
+ *       once the order reaches a terminal status. Capped per API key and
+ *       globally to bound concurrent open connections.
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: SSE stream opened.
+ *         content:
+ *           text/event-stream: {}
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       404:
+ *         description: Order not found for this API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many concurrent streams for this key or globally.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.get('/:id/stream', orderPollLimiter, (req, res) => {
   const orderId = req.params.id;
   const keyId = req.apiKey.id;
@@ -1129,6 +1256,33 @@ router.get('/:id/stream', orderPollLimiter, (req, res) => {
 });
 
 // GET /orders/:id — poll status, returns card details when delivered
+/**
+ * @openapi
+ * /v1/orders/{id}:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: Get order status and (once delivered) card details
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: Order detail.
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/Order' }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       404:
+ *         description: Order not found for this API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.get('/:id', orderPollLimiter, (req, res) => {
   const order = /** @type {any} */ (
     db
@@ -1281,8 +1435,19 @@ module.exports.policyCheck = policyCheck;
 module.exports.openSSEStreamCount = openSSEStreamCount;
 module.exports.tryAcquireStreamSlot = tryAcquireStreamSlot;
 module.exports.releaseStreamSlot = releaseStreamSlot;
-// Exported so app.js can reuse the same per-key bucket on the small
-// read endpoints it still owns (/v1/policy/check, /v1/usage). Keeping
-// a single limiter for "agent reads" means one noisy key can't steal
-// its own poll budget by spamming preview endpoints.
+// Exported so api/usage.js can reuse the same per-key bucket on the small
+// read endpoints (/v1/policy/check, /v1/usage). Keeping a single limiter
+// for "agent reads" means one noisy key can't steal its own poll budget
+// by spamming preview endpoints.
 module.exports.orderPollLimiter = orderPollLimiter;
+
+// Exported for api/openapi.js so the published schema is derived from the
+// same constants the validation enforces. A documented bound that the
+// server does not apply — or applies differently — is worse than no
+// documentation at all, because a client trusts it.
+module.exports.ORDER_STATUSES = ORDER_STATUSES;
+module.exports.AMOUNT_USDC_SHAPE = AMOUNT_USDC_SHAPE;
+module.exports.MIN_ORDER_USDC = MIN_ORDER_USDC;
+module.exports.MAX_ORDER_USDC = MAX_ORDER_USDC;
+module.exports.MAX_METADATA_JSON_BYTES = MAX_METADATA_JSON_BYTES;
+module.exports.MAX_WEBHOOK_URL_CHARS = MAX_WEBHOOK_URL_CHARS;

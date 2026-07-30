@@ -3,9 +3,8 @@
 `src/db.js` is not a repository layer — it exports a raw `better-sqlite3`
 handle after running the schema DDL, the migration chain, and a set of
 connection pragmas at require time. Everything else in the backend
-(`api/orders.js`, `api/dashboard.js`, `policy.js`, `jobs.js`, the agent
-claim redemption in `app.js`) prepares statements directly against that
-handle.
+(`api/orders.js`, `api/dashboard.js`, `api/agent-claim.js`, `policy.js`,
+`jobs.js`) prepares statements directly against that handle.
 
 That shape means the interesting failure modes are not "does this
 function return the right value" but:
@@ -23,20 +22,66 @@ catching exactly those.
 
 ## Suites
 
-| Suite                            | What it pins                                                                |
-| -------------------------------- | --------------------------------------------------------------------------- |
-| `schema initialization`          | Every table and every `ALTER TABLE` column the migration chain declares     |
-| `schema_migrations bookkeeping`  | Versions 1..N recorded exactly once, no gaps, `applied_at` stamped          |
-| `system_state seed rows`         | `frozen` and `consecutive_failures` seeded to `'0'`                         |
-| `orders table queries`           | CRUD round-trips, column defaults, `NOT NULL` and `PRIMARY KEY` enforcement |
-| `orders aggregate queries`       | The exact `SUM(CASE WHEN ...)` shapes `/status` and `/v1/usage` depend on   |
-| `api_keys table queries`         | `UNIQUE(key_hash)`, defaults for `mode` / `suspended` / `enabled`           |
-| `idempotency_keys table queries` | Composite primary key `(key, api_key_id)`                                   |
-| `foreign key enforcement`        | `ON DELETE CASCADE` for sessions and dashboards, dangling-reference rejects |
-| `unique and partial indexes`     | MPP challenge/receipt uniqueness, NULL-tolerant partial indexes, plan check |
-| `transaction semantics`          | Rollback on throw, rollback on constraint violation, commit on return       |
-| `pragma settings`                | `foreign_keys`, `busy_timeout` on the shared handle                         |
-| `fresh on-disk instance`         | WAL mode, migration idempotency, seed rows, the schema-drift kill switch    |
+| Suite                               | What it pins                                                                 |
+| ----------------------------------- | ---------------------------------------------------------------------------- |
+| `schema initialization`             | Every table and every `ALTER TABLE` column the migration chain declares      |
+| `schema_migrations bookkeeping`     | Versions 1..N recorded exactly once, no gaps, `applied_at` stamped           |
+| `system_state seed rows`            | `frozen` and `consecutive_failures` seeded to `'0'`                          |
+| `orders table queries`              | CRUD round-trips, column defaults, `NOT NULL` and `PRIMARY KEY` enforcement  |
+| `orders aggregate queries`          | The exact `SUM(CASE WHEN ...)` shapes `/status` and `/v1/usage` depend on    |
+| `api_keys table queries`            | `UNIQUE(key_hash)`, defaults for `mode` / `suspended` / `enabled`            |
+| `idempotency_keys table queries`    | Composite primary key `(key, api_key_id)`                                    |
+| `foreign key enforcement`           | `ON DELETE CASCADE` for sessions and dashboards, dangling-reference rejects  |
+| `unique and partial indexes`        | MPP challenge/receipt uniqueness, NULL-tolerant partial indexes, plan check  |
+| `transaction semantics`             | Rollback on throw, rollback on constraint violation, commit on return        |
+| `pragma settings`                   | `foreign_keys`, `busy_timeout` on the shared handle                          |
+| `fresh on-disk instance`            | WAL mode, migration idempotency, seed rows, the schema-drift kill switch     |
+| `users` / `auth_codes` / `sessions` | Uniqueness, role defaults, cascade on user deletion                          |
+| `audit_log` / `webhook_deliveries`  | Append-only ordering and the dashboard feed query                            |
+| `webhook_queue table queries`       | The retry scan predicate, the abandoned-delivery counter, the index plan     |
+| `credential expiry semantics`       | The shared `used_at IS NULL AND datetime(expires_at) > datetime('now')` gate |
+| `system_state upsert semantics`     | Cursor advance-in-place, TEXT coercion, the missing-key case                 |
+| `stellar_dead_letter table queries` | Replay-safe `tx_hash` primary key, the 24h `/status` window                  |
+| `unmatched_payments table queries`  | The un-refunded backlog query and its partial index                          |
+| `policy_decisions table queries`    | Per-key history scoping, the composite index plan, nullable `order_id`       |
+
+## Three SQLite behaviours worth knowing before adding a test
+
+These are the ones that have actually bitten this schema. Each has a
+dedicated test, and each fails silently rather than raising.
+
+### `datetime()` returns NULL, and NULL comparisons are NULL
+
+Every single-use credential — login codes, agent claim codes, MPP
+challenges — is gated on:
+
+```sql
+WHERE used_at IS NULL AND datetime(expires_at) > datetime('now')
+```
+
+`datetime()` yields `NULL` for anything it cannot parse, and `NULL > x` is
+`NULL`, not false. So a malformed `expires_at` makes the credential
+permanently **unredeemable** — the safe direction, but not an obvious one.
+Rewriting the predicate as `expires_at > datetime('now')` looks equivalent
+and is not: that is a lexical string comparison, and `'next tuesday'` sorts
+above every ISO-8601 timestamp, so the credential would become permanently
+**valid** instead. The `credential expiry semantics` suite pins both halves.
+
+### TEXT columns compare lexically
+
+`next_attempt`, `created_at`, `updated_at` and `expires_at` are all TEXT.
+Range queries against them only sort chronologically for well-formed
+ISO-8601. A row written with `'Jan 1 2026 11:00'` is either permanently due
+or permanently invisible depending on which side of the comparison it lands
+on. This is why every writer goes through `toISOString()`.
+
+### TEXT affinity stringifies whatever you bind
+
+better-sqlite3 binds a JS number as REAL, so
+`INSERT INTO system_state (key, value) VALUES ('x', 42)` stores `'42.0'`,
+not `'42'`. `sysStateInt` survives that through `parseInt`, but a reader
+comparing `=== '42'` would not — which is why the writers bind
+`String(value)`.
 
 ## Why some tests spawn a child process
 

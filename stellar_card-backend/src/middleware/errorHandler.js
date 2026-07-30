@@ -30,9 +30,9 @@ const { AppError } = require('../lib/app-error');
  * @param {import('express').NextFunction} _next
  */
 function errorHandler(err, req, res, _next) {
+  // formatRejection handles exotic thrown values (strings, null, objects
+  // without a stack) safely, so every branch below can read .name/.message.
   const payload = formatRejection(err);
-  const logMessage = `[app] unhandled error on ${req.method} ${req.originalUrl || req.path}: ${payload.name}: ${payload.message}${payload.stack ? `\n${payload.stack}` : ''}`;
-  console.error(logMessage);
   const requestId = req.id || res.getHeader('X-Request-ID');
 
   if (err && err.message && err.message.startsWith('CORS:')) {

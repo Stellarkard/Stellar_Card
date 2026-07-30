@@ -69,4 +69,24 @@ describe('standard error handler', () => {
       req_id: 'req-cors',
     });
   });
+
+  it('does not bypass the shared logger with a raw console error', () => {
+    const res = responseDouble();
+    const origConsoleError = console.error;
+    const calls = [];
+    console.error = (...args) => calls.push(args);
+
+    try {
+      errorHandler(
+        new Error('database password appeared here'),
+        { id: 'req-logger', method: 'GET', path: '/boom' },
+        res,
+        () => {},
+      );
+    } finally {
+      console.error = origConsoleError;
+    }
+
+    assert.deepEqual(calls, []);
+  });
 });

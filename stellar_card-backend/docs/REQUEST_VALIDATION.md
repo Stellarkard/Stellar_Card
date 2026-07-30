@@ -8,6 +8,12 @@ Zod was chosen over Joi because it is already a dependency — `src/env.js` uses
 to validate the environment at boot — so this adds a pattern rather than a
 package.
 
+> `src/lib/validate.js` is the only validation module. A second, narrower
+> `validateBody` helper briefly lived at `src/middleware/validate.js` and was
+> removed once `/auth/login` moved onto `validate()`: two helpers that both
+> answered "is this body the right shape" is the exact duplication this layer
+> exists to remove, and the two disagreed on whether the 400 carried a `req_id`.
+
 ## Why
 
 Every mutating endpoint had grown its own validation preamble; POST `/v1/orders`
@@ -123,17 +129,25 @@ so an oversized URL is rejected before it can cost a resolution.
 
 ## Currently validated
 
-| Route               | Body                                     | Query                                                               |
-| ------------------- | ---------------------------------------- | ------------------------------------------------------------------- |
-| `POST /v1/orders`   | `amount_usdc`, `webhook_url`, `metadata` | —                                                                   |
-| `GET /v1/orders`    | —                                        | `status`, `since_created_at`, `since_updated_at`, `limit`, `offset` |
-| `POST /auth/login`  | `email`                                  | —                                                                   |
-| `POST /auth/verify` | `email`, `code`                          | —                                                                   |
+Every route that accepts caller-supplied input outside the operator surface now
+declares a schema. What remains hand-written is listed under
+[What is not schema-validated](#what-is-not-schema-validated).
+
+| Route                   | Body                                     | Query                                                               |
+| ----------------------- | ---------------------------------------- | ------------------------------------------------------------------- |
+| `POST /v1/orders`       | `amount_usdc`, `webhook_url`, `metadata` | —                                                                   |
+| `GET /v1/orders`        | —                                        | `status`, `since_created_at`, `since_updated_at`, `limit`, `offset` |
+| `POST /v1/agent/claim`  | `code`                                   | —                                                                   |
+| `POST /v1/agent/status` | `state`, `wallet_public_key`, `detail`   | —                                                                   |
+| `GET /v1/policy/check`  | —                                        | `amount`                                                            |
+| `POST /auth/login`      | `email`                                  | —                                                                   |
+| `POST /auth/verify`     | `email`, `code`                          | —                                                                   |
 
 ### Behaviour this added
 
-Beyond consolidating the existing checks, two gaps on `GET /v1/orders` are now
-closed:
+Beyond consolidating the existing checks, five gaps are now closed.
+
+`GET /v1/orders`:
 
 - **`status` is whitelisted.** An unknown status used to return `200 []`, which
   reads to the caller as "my orders disappeared" rather than "you typo'd the
@@ -143,9 +157,51 @@ closed:
   well-formed input. A malformed bound silently matched everything or nothing —
   indistinguishable from data loss. They now return `400`.
 
+`GET /v1/policy/check`:
+
+- **`amount` uses the same decimal shape as `POST /v1/orders`.** The old guard
+  was `isNaN(parseFloat(amount))`, which reads `"10abc"` as `10` and accepts
+  `"10.12345"` — sub-cent precision the issuer cannot represent. The preview
+  answered a question the endpoint it previews would have rejected. Both now
+  agree on what a valid amount is.
+
+`POST /v1/agent/claim` and `POST /auth/verify`:
+
+- **A whitespace-only value is rejected.** Both handlers `.trim()` before use,
+  so `"   "` passed the truthiness guard and then hashed as the empty string —
+  one shared hash for every such request.
+
 `limit` and `offset` keep their existing lenient behaviour: an unparseable value
 falls back to the default rather than erroring, because clients already depend on
 that. The clamp is what protects the database.
+
+### The two shapes a schema has to preserve
+
+`POST /v1/agent/status` shows both, and is worth reading before writing a new
+schema:
+
+1. **Absent is not null.** The handler builds a partial `UPDATE`: an absent key
+   means "leave this column alone", an explicit `null` means "clear it". A
+   `z.string().nullish()` would collapse the two. Each field is therefore
+   `z.unknown()` plus a refinement that returns early on `undefined`.
+2. **Cross-field rules report at the object level.** "Provide at least one of
+   state, wallet_public_key, detail" is not about any single field, so it is a
+   `.superRefine()` on the object and its issue has an empty path — which is
+   exactly what `defaultErrorCode` is for (`nothing_to_update` here). Zod runs
+   object-level refinements only after every field parses, so a request with one
+   invalid field still gets that field's error rather than the cross-field one.
+
+### What is not schema-validated
+
+- **The operator surface** (`/dashboard`, `/internal`, `/dashboard/platform`).
+  These sit behind session auth and a shared rate limiter, and their handlers
+  carry hardening from earlier audit passes whose properties are not always
+  obvious from a schema alone. Migrating them is follow-up work that deserves
+  its own review rather than a blanket pass.
+- **`POST /vcc-callback`.** It is HMAC-authenticated over the raw request body.
+  Validation runs after `express.json()` but the signature is computed over
+  `req.rawBody`, so shape-checking the parsed body adds nothing the signature
+  check does not already guarantee about provenance.
 
 ## Adding validation to a route
 
@@ -162,10 +218,10 @@ that. The clamp is what protects the database.
 ## Tests
 
 - `test/unit/validate.test.js` — the middleware contract and each primitive,
-  driven against fake `req`/`res` objects. Covers the error-code mapping, the
-  non-transformation guarantee, query coercion and clamping, repeated query keys,
-  and the hostile-payload paths (circular, throwing `toJSON`, BigInt, multi-byte
-  overflow).
-- `test/integration/request-validation.test.js` — the same routes over real HTTP,
-  asserting every `error` code the API promises still comes back unchanged, plus
-  the new query-validation behaviour.
+  driven against fake `req`/`res` objects. Covers the error-code mapping and its
+  fallback, first-issue-wins ordering, the non-transformation guarantee, query
+  coercion and clamping, repeated query keys, and the hostile-payload paths
+  (circular, throwing `toJSON`, BigInt, multi-byte overflow).
+- `test/integration/request-validation.test.js` — every validated route over real
+  HTTP, asserting each `error` code the API promises still comes back unchanged,
+  plus the behaviour the schemas added.

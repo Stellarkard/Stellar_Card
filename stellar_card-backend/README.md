@@ -19,6 +19,7 @@ stellar_card-backend/
 │   ├── app.js            # Express app: application-level middleware only
 │   ├── routes/index.js   # The mount table — see docs/ROUTING.md
 │   ├── api/              # One router per surface (orders, auth, dashboard, status, …)
+│   │   └── openapi.js    # The published contract — see docs/API_DOCUMENTATION.md
 │   ├── middleware/       # Auth verification, role guards
 │   ├── payments/         # Soroban watcher, XLM pricing and sending
 │   ├── mpp/              # Machine Payments Protocol (feature-flagged)
@@ -87,11 +88,41 @@ docker compose up backend
 
 ## API Endpoints
 
-- `GET /health` — Health check endpoint.
-- `POST /api/v1/orders` — Create a new virtual card order.
-- `GET /api/v1/orders/:id` — Query order status and card details.
-- `POST /api/v1/auth/otp` — Request OTP login code.
-- `POST /api/v1/webhooks/vcc` — Webhook receiver for VCC fulfillment callbacks.
+The server publishes its own contract, so this list cannot go stale:
+
+- **`GET /api/openapi.json`** — the OpenAPI 3.0.3 document.
+- **`GET /api/docs`** — Swagger UI over it.
+
+Both are unauthenticated. Run the server and open
+<http://localhost:4000/api/docs>.
+
+The document is built from the constants the validation layer enforces —
+the order-status enum, the amount pattern, the metadata byte budget — so a
+bound cannot change without the published schema changing with it. A test
+walks the real Express route table and fails on any public route that is
+neither documented nor explicitly excluded. See
+[docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md).
+
+The surface at a glance:
+
+| Endpoint                             | Auth        | Purpose                              |
+| ------------------------------------ | ----------- | ------------------------------------ |
+| `GET /api/version`                   | none        | Protocol and feature compatibility   |
+| `GET /status`                        | none        | Public health and throughput summary |
+| `POST /v1/agent/claim`               | none        | Redeem a claim code for an API key   |
+| `POST /v1/orders`                    | `X-Api-Key` | Create a card order                  |
+| `GET /v1/orders`                     | `X-Api-Key` | List the calling key's orders        |
+| `GET /v1/orders/:id`                 | `X-Api-Key` | Poll one order                       |
+| `GET /v1/orders/:id/stream`          | `X-Api-Key` | Server-sent status transitions       |
+| `GET /v1/usage`                      | `X-Api-Key` | Spend and order summary              |
+| `GET /v1/policy/check`               | `X-Api-Key` | Dry-run a spend-policy decision      |
+| `POST /v1/agent/status`              | `X-Api-Key` | Report a lifecycle transition        |
+| `POST /auth/login` · `/auth/verify`  | none        | Email login code → session token     |
+| `GET /auth/me` · `POST /auth/logout` | Bearer      | Resolve or end a session             |
+
+The operator surface (`/dashboard`, `/internal`), the HMAC `/vcc-callback`,
+and the feature-flagged MPP routes are deliberately not published — see the
+scope table in [docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md).
 
 ## Testing
 

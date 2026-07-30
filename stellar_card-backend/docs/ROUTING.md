@@ -11,6 +11,8 @@ src/
     ├── version.js      # GET  /api/version
     ├── status.js       # GET  /status
     ├── docs.js         # GET  /docs, /openapi.json (Swagger UI)
+    ├── docs.js         # GET  /api/openapi.json, /api/docs
+    ├── openapi.js      # the OpenAPI document docs.js serves
     ├── agent-claim.js  # POST /v1/agent/claim        (pre-auth)
     ├── agent.js        # POST /v1/agent/status       (post-auth)
     ├── usage.js        # GET  /v1/usage, /v1/policy/check
@@ -23,10 +25,21 @@ src/
 ```
 
 `app.js` builds the Express app, installs the middleware every request
-passes through — request-id correlation, helmet, the HTTPS redirect,
-CORS, JSON body parsing — then calls `registerRoutes(app)` and installs
-the terminal error handler. It is ~230 lines and contains no route
-handlers.
+passes through — Sentry scope, request-id correlation, helmet, the HTTPS
+guard, CORS, JSON body parsing — then calls `registerRoutes(app)` and
+installs the 404 fallback and the terminal error handlers. It is ~250
+lines and contains no route handlers.
+
+That last sentence is enforced, not aspirational.
+`test/integration/route-registry.test.js` asserts it two ways: no
+`app.get`/`app.post`/… declaration survives in `src/app.js`, and no path
+is mounted more than once. Both checks failed before this extraction was
+finished — app.js still carried a second copy of the `/status`,
+`/v1/usage`, `/v1/policy/check` and `/v1/agent/status` handlers alongside
+the `registerRoutes()` call that had replaced them, so each of those paths
+was mounted twice. A double mount is invisible from outside (the first
+handler answers, the second is dead weight) right up until the two drift
+and a fix lands in the copy that never runs.
 
 `routes/index.js` is the mount table: what is mounted where, in what
 order, and why. It also owns the three route-level rate limiters that are
@@ -115,14 +128,24 @@ request.
    in the mount comment, and give it its own rate limiter.
 5. Add it to `test/integration/route-registry.test.js` — the
    unauthenticated list or the auth-boundary list, whichever applies.
+6. Publish it in `src/api/openapi.js`, or add its prefix to
+   `UNDOCUMENTED_PREFIXES` with a reason. `test/integration/openapi.test.js`
+   fails on a route in neither list — see [API_DOCUMENTATION.md](API_DOCUMENTATION.md).
 
 Handlers use paths relative to their mount point: `agent.js` declares
 `router.post('/agent/status', ...)` and is mounted at `/v1`.
 
 ## What did not change
 
-The refactor is behaviour-preserving. Every path, status code, response
-body, rate limit and mount order is identical; the full test suite passes
-unchanged. `app.js` still exports the Express app as its default export,
-along with the `_validateRequestId` / `_resetReqIdWarnState` /
-`_REQ_ID_SHAPE` test-only exports the request-id unit tests depend on.
+Every path, status code, response body, rate limit and mount order is
+preserved, and the full test suite passes. `app.js` still exports the
+Express app as its default export, along with the `_validateRequestId` /
+`_resetReqIdWarnState` / `_REQ_ID_SHAPE` test-only exports the request-id
+unit tests depend on.
+
+One response gained a field. The CORS-denial 403 was formatted in two
+places — an inline error middleware in `app.js` and the branch in
+`middleware/errorHandler.js` — which disagreed on whether the body carried
+`req_id`. The inline copy is gone and `errorHandler` is the only formatter,
+so a rejected origin now gets the same `{ error, message, req_id }` shape
+every other error response has.

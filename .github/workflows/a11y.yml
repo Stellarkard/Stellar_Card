@@ -6,6 +6,7 @@ on:
       - main
       - develop
       - 'feature/**'
+      - 'fix/**'
     paths:
       - 'stellar_card-frontend/**'
       - '.github/workflows/a11y.yml'
@@ -19,6 +20,9 @@ on:
   schedule:
     - cron: '0 4 * * 1'
   workflow_dispatch:
+
+env:
+  A11Y_AUDIT_STRICT: 'true'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
