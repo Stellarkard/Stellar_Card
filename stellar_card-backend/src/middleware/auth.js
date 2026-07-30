@@ -5,6 +5,7 @@
 
 const bcrypt = require('bcryptjs');
 const db = require('../db');
+const { setUserContext } = require('../lib/sentry-config');
 
 // stellar_card_<48 hex> → 9 + 48 = 57 chars exactly. We allow the header
 // to be slightly shorter (down to 21 chars = prefix region) so
@@ -52,7 +53,8 @@ module.exports = async function auth(req, res, next) {
   // as either a joined string or (for some header names) an array; reject
   // arrays outright rather than risk `.startsWith` throwing below.
   if (!rawKey) return res.status(401).json({ error: 'missing_api_key', req_id: req.id || null });
-  if (typeof rawKey !== 'string') return res.status(401).json({ error: 'invalid_api_key', req_id: req.id || null });
+  if (typeof rawKey !== 'string')
+    return res.status(401).json({ error: 'invalid_api_key', req_id: req.id || null });
   const key = rawKey;
 
   // Early rejections — no DB work, no bcrypt work. A malformed key used
@@ -124,12 +126,20 @@ module.exports = async function auth(req, res, next) {
         );
         return res
           .status(401)
-          .json({ error: 'api_key_expired', message: 'This API key has expired.', req_id: req.id || null });
+          .json({
+            error: 'api_key_expired',
+            message: 'This API key has expired.',
+            req_id: req.id || null,
+          });
       }
       if (expiresAtMs < Date.now()) {
         return res
           .status(401)
-          .json({ error: 'api_key_expired', message: 'This API key has expired.', req_id: req.id || null });
+          .json({
+            error: 'api_key_expired',
+            message: 'This API key has expired.',
+            req_id: req.id || null,
+          });
       }
     }
     if (candidate.suspended) {
@@ -146,6 +156,26 @@ module.exports = async function auth(req, res, next) {
     }
 
     req.apiKey = candidate;
+
+    // Issue #9: identify the acting agent on the Sentry scope.
+    // docs/SENTRY_SETUP.md documented setUserContext() as the way to do
+    // this, but nothing in src/ called it, so every 5xx from the agent
+    // API arrived anonymous — and the first question about one is always
+    // "is this one broken integration or everybody?", which the event
+    // could not answer.
+    //
+    // Only the opaque api key id and the tenant it belongs to. No label,
+    // no email: those are PII a stack trace has no use for, and
+    // sendDefaultPii is hard-set to false precisely so nothing leaks in
+    // by default.
+    //
+    // Request-scoped without a matching clear, because Sentry's
+    // requestHandler (mounted first in app.js) runs each request in its
+    // own hub — the same reason setRequestId works there. A no-op until
+    // initSentry() succeeds, so this costs one function call in dev and
+    // test.
+    setUserContext(candidate.id, { dashboard_id: candidate.dashboard_id ?? null });
+
     // F2-auth (2026-04-15): track last-seen for agent connection status,
     // but truly fire-and-forget. better-sqlite3 `.run()` throws on any
     // write failure (database locked, disk full, WAL checkpoint collision,

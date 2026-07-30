@@ -4,6 +4,7 @@
 
 const db = require('./db');
 const logger = require('./lib/logger');
+const { reportBackgroundFailure } = require('./lib/sentry-config');
 const {
   fireWebhook,
   WEBHOOK_RETRY_DELAYS_MS,
@@ -1177,6 +1178,14 @@ let jobsRunning = false;
 // every sub-job runs under its own guard and an emitted
 // `jobs.subjob_failed` bizEvent so ops alerting pipelines see the
 // pattern before it becomes a midnight outage.
+//
+// Issue #9: also report to Sentry. The isolating catch is what makes the
+// job loop survivable, and it is also what made these failures invisible
+// — a sub-job can throw on every tick for weeks and the only trace is a
+// stderr line and a bizEvent nobody has an alert on. Everything Sentry
+// was wired into previously reported from the request path, where there
+// is a client to notice; here there is nobody until an order quietly
+// fails to get fulfilled.
 async function _runSubJob(name, fn) {
   try {
     await fn();
@@ -1191,6 +1200,7 @@ async function _runSubJob(name, fn) {
     } catch {
       /* observability must never crash the job loop */
     }
+    reportBackgroundFailure('jobs', name, err);
   }
 }
 
@@ -1237,6 +1247,7 @@ async function checkAgentFundingStatusGuarded() {
     await checkAgentFundingStatus();
   } catch (err) {
     console.error(`[jobs] funding check error: ${err.message}`);
+    reportBackgroundFailure('jobs', 'checkAgentFundingStatus', err);
   } finally {
     fundingCheckRunning = false;
   }
@@ -1271,11 +1282,20 @@ function startJobs() {
   // Alert evaluator — walks every enabled rule once a minute, fires
   // Discord on new firings, persists history. Cheap + bounded, runs in
   // the same process as everything else.
+  //
+  // The alert evaluator is the one background job whose failure is
+  // self-concealing: it is the thing that would otherwise have told
+  // someone. A throw here means every configured alert rule silently
+  // stops evaluating, so it reports to Sentry as well as the log.
   const ALERT_INTERVAL_MS = parsePositiveMs('ALERT_INTERVAL_MS', 60_000);
-  evaluateAlertsForAllDashboards().catch((err) => log(`alerts startup error: ${err.message}`));
+  const onAlertError = (phase) => (err) => {
+    log(`alerts ${phase} error: ${err.message}`);
+    reportBackgroundFailure('jobs', 'evaluateAlertsForAllDashboards', err, { phase });
+  };
+  evaluateAlertsForAllDashboards().catch(onAlertError('startup'));
   _jobIntervals.push(
     setInterval(
-      () => evaluateAlertsForAllDashboards().catch((err) => log(`alerts error: ${err.message}`)),
+      () => evaluateAlertsForAllDashboards().catch(onAlertError('tick')),
       ALERT_INTERVAL_MS,
     ),
   );

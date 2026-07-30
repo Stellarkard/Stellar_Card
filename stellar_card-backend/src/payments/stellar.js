@@ -10,6 +10,7 @@
 
 const { rpc } = require('@stellar/stellar-sdk');
 const { event: bizEvent } = require('../lib/logger');
+const { reportBackgroundFailure } = require('../lib/sentry-config');
 const db = require('../db');
 const { parsePaymentEvent } = require('./parse-payment-event');
 
@@ -25,6 +26,13 @@ const rpcServer = new rpc.Server(SOROBAN_RPC_URL);
 
 // (topic filter removed — mainnet Soroban RPC does not match topic XDR correctly;
 //  events are filtered by symbol in handlePaymentEvent instead)
+
+// Consecutive failed polls before the watcher reports to Sentry, and
+// again on every multiple of it afterwards. See the rationale at the
+// call site in poll()'s catch block: a single poll error is RPC weather,
+// a sustained run of them means on-chain payments are being missed.
+const CONSECUTIVE_POLL_ERRORS_BEFORE_REPORT = 10;
+let consecutivePollErrors = 0;
 
 // ── Cursor persistence ────────────────────────────────────────────────────────
 //
@@ -165,6 +173,13 @@ async function poll(onPayment, log) {
     }
 
     const result = await rpcServer.getEvents(request);
+    // The RPC answered. Whatever run of failures preceded this was
+    // weather, not a defect — reset the counter that gates the Sentry
+    // report in the catch below. Placed here rather than at the end of
+    // the try so a throw from handlePaymentEvent (a dispatch failure,
+    // which is our bug and not the RPC's) does not get credited as a
+    // recovery.
+    consecutivePollErrors = 0;
     const events = result.events ?? [];
 
     for (const event of events) {
@@ -273,6 +288,32 @@ async function poll(onPayment, log) {
     // visible in the metrics pipeline, not just stderr. Cheap because poll
     // errors are rare — the hot path is success, which doesn't emit this.
     bizEvent('stellar.poll_error', { error: err.message });
+
+    // Issue #9: report to Sentry, but only once the failures stop looking
+    // like weather.
+    //
+    // A single poll error is not a defect. The public mainnet Soroban RPC
+    // times out, rate-limits, and 502s on its own schedule, and this
+    // handler exists to back off and retry. Reporting each one would
+    // send a stream of events at up to one per 6s (POLL_MS × 4) from a
+    // healthy deployment, and the actual signal — the watcher has stopped
+    // advancing and on-chain payments are being missed — would be buried
+    // inside it.
+    //
+    // So the threshold is consecutive failures, reset by any successful
+    // poll. CONSECUTIVE_POLL_ERRORS_BEFORE_REPORT × the 4× backoff is
+    // about a minute of a completely unreachable RPC before the first
+    // event, which /status already treats as the boundary between "slow"
+    // and "stalled" (its watcher staleness threshold is 120s). Reporting
+    // again every Nth failure after that keeps a persistent outage
+    // visible in Sentry without one event per retry.
+    consecutivePollErrors += 1;
+    if (consecutivePollErrors % CONSECUTIVE_POLL_ERRORS_BEFORE_REPORT === 0) {
+      reportBackgroundFailure('stellar-watcher', 'poll', err, {
+        consecutive_errors: consecutivePollErrors,
+        poll_interval_ms: POLL_MS,
+      });
+    }
     if (shutdownRequested) return;
     setTimeout(() => poll(onPayment, log), POLL_MS * 4);
   }
@@ -448,6 +489,17 @@ async function handlePaymentEvent(event, onPayment, log) {
       tx_hash: event.txHash,
       error: result.error,
     });
+    // Reported unconditionally, unlike a poll error: this is an on-chain
+    // payment event from our own contract that we could not read. Someone
+    // has money in the receiver and no card, and only a person can
+    // reconcile it. /status surfaces the dead-letter count, but that is a
+    // pull signal on a dashboard nobody watches at 3am.
+    reportBackgroundFailure(
+      'stellar-watcher',
+      'event_parse_error',
+      new Error(`unparseable payment event: ${result.error}`),
+      { ledger: event.ledger, tx_hash: event.txHash, parse_error: result.error },
+    );
     try {
       db.prepare(
         `INSERT OR IGNORE INTO stellar_dead_letter (tx_hash, ledger, raw_event, error)
@@ -545,6 +597,18 @@ async function handlePaymentEvent(event, onPayment, log) {
       event_id: eventId,
       attempts,
       error: dispatchErr.message,
+      order_id: orderId,
+    });
+    // Also unconditional, and the highest-signal event in this file: the
+    // watcher gave up on a payment it had already read successfully, so
+    // the funds landed and the order will not progress. The retry budget
+    // is exhausted by the time we get here, which means this is our bug
+    // and not a transient — exactly what a stack trace is for.
+    reportBackgroundFailure('stellar-watcher', 'dispatch_poison', dispatchErr, {
+      ledger: event.ledger,
+      tx_hash: event.txHash,
+      event_id: eventId,
+      attempts,
       order_id: orderId,
     });
     try {

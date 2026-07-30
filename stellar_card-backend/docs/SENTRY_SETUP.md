@@ -9,6 +9,8 @@ Sentry is **optional**. With no `SENTRY_DSN` set, every Sentry call site in the 
 ## Features
 
 - **Real-time error tracking**: Uncaught exceptions, unhandled rejections, and Express 5xx faults
+- **Background coverage**: Job-loop, alert-evaluator and Soroban-watcher failures, tagged by subsystem and operation
+- **Actor attribution**: Every authenticated `/v1` event carries the acting api key id and its tenant
 - **Performance monitoring**: Sampled transaction traces
 - **Profiling**: Opt-in CPU profiling via an optional native addon
 - **Request correlation**: Every event is tagged with the same `request_id` the structured logs carry
@@ -93,12 +95,18 @@ You should see a `[sentry] error tracking active (project=..., env=...)` line, t
 
 ### Automatic
 
-| Source                       | Where it is wired                                                 |
-| ---------------------------- | ----------------------------------------------------------------- |
-| Uncaught exceptions          | `src/index.js` process handler, reported at `fatal`               |
-| Unhandled promise rejections | `src/index.js` process handler, reported at `error`               |
-| Express 5xx faults           | `sentryErrorHandler()` in `src/app.js`                            |
-| `log('error', ...)` calls    | `src/lib/logger.js` mirrors error-level logs via `captureMessage` |
+| Source                       | Where it is wired                                                                  |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| Uncaught exceptions          | `src/index.js` process handler, reported at `fatal`                                |
+| Unhandled promise rejections | `src/index.js` process handler, reported at `error`                                |
+| Express 5xx faults           | `sentryErrorHandler()` in `src/app.js`                                             |
+| `log('error', ...)` calls    | `src/lib/logger.js` mirrors error-level logs via `captureMessage`                  |
+| Background job failures      | `_runSubJob` in `src/jobs.js`, tagged `subsystem:jobs` + `operation:<job>`         |
+| Agent funding-check failures | `checkAgentFundingStatusGuarded` in `src/jobs.js`                                  |
+| Alert-evaluator failures     | `startJobs` in `src/jobs.js`, tagged with the `startup` / `tick` phase             |
+| Unparseable on-chain events  | `handlePaymentEvent` in `src/payments/stellar.js`                                  |
+| Dead-lettered payment events | `handlePaymentEvent` in `src/payments/stellar.js`, after the retry budget is spent |
+| A sustained watcher outage   | `poll` in `src/payments/stellar.js`, gated on consecutive failures (see below)     |
 
 Sentry's own `OnUncaughtException` / `OnUnhandledRejection` integrations are **removed** in `buildSentryOptions`. `src/index.js` already owns both signals: it logs a structured `bizEvent` and runs the graceful-shutdown path (drain the Soroban watcher, cancel background jobs, close the HTTP server). Sentry's uncaught-exception integration calls `process.exit()` on a fatal error by default, which would kill in-flight orders before that drain completes. Reporting explicitly from the existing handlers gets the event _and_ the clean shutdown.
 
@@ -113,6 +121,66 @@ Buffered events are flushed (2 s budget) inside the shutdown path, so a crash re
 - Errors with **no** status _are_ reported — an unexpected throw out of a route handler is exactly what this integration exists for.
 
 `ignoreErrors` additionally drops client-side noise forwarded through the SDK: `NetworkError: Failed to fetch`, `NotSupportedError`, `AbortError`.
+
+## Background work
+
+Everything in the first four rows of the table above reports from the request
+path. That is the half of the system where a failure already has someone
+watching it — a 500 has a client who retries, complains, or opens a ticket.
+
+The background half has nobody. A sub-job can throw on every tick for weeks
+and leave nothing but a stderr line and a `bizEvent` that no alert rule reads;
+the Soroban watcher can die and the only symptom is that on-chain payments
+stop turning into cards. `reportBackgroundFailure` exists for those:
+
+```javascript
+const { reportBackgroundFailure } = require('./lib/sentry-config');
+
+reportBackgroundFailure('jobs', 'retryWebhooks', err, { queue_depth: 41 });
+```
+
+It does two things a bare `captureException` would not:
+
+- **Runs inside `withScope` and clears the user.** `sentryRequestHandler()`
+  gives each HTTP request its own hub, but background work runs on the root
+  one. An event tagged with an unrelated `request_id` or agent id is worse
+  than an untagged event, because it sends whoever is triaging to the wrong
+  tenant.
+- **Tags `subsystem` and `operation`.** Background failures carry no
+  transaction name, so without them every job failure collapses into one
+  Sentry issue and "the webhook retry loop is broken" cannot be told apart
+  from "the pruner is broken".
+
+Like the other helpers it never throws, returns `undefined` while disabled,
+and needs no `isEnabled()` guard at the call site — the call sites are catch
+blocks that have already decided the failure was survivable, so observability
+must not be what takes the loop down.
+
+### Why the watcher's poll errors are throttled and its dead letters are not
+
+The watcher's failure modes are not equally interesting.
+
+A **poll error** is usually the public mainnet Soroban RPC being itself: it
+times out, rate-limits, and 502s on its own schedule, and the handler exists
+to back off 4× and retry. Reporting each one would emit up to one event every
+6 s from a healthy deployment and bury the real signal inside it. So the
+report is gated on `CONSECUTIVE_POLL_ERRORS_BEFORE_REPORT` (10) consecutive
+failures, reset by any successful `getEvents` call, and repeated on each
+further multiple so a sustained outage stays visible without one event per
+retry. Ten failures at the 4× backoff is roughly a minute of an unreachable
+RPC — the same order as the 120 s staleness threshold `/status` uses to call
+the watcher stalled.
+
+The counter resets where the RPC answers, not at the end of the successful
+path, so a throw out of `handlePaymentEvent` — our bug, not the RPC's — is not
+credited as a recovery.
+
+An **unparseable event** or a **dead-lettered dispatch** is never weather.
+Both mean a payment landed in the receiver contract and no card came out, and
+in the dead-letter case the retry budget is already spent by the time the
+report fires. Those go to Sentry unconditionally. `/status` does expose the
+dead-letter count, but that is a pull signal on a dashboard nobody is reading
+at 3am.
 
 ## Manual reporting
 
@@ -145,6 +213,19 @@ clearUserContext();
 ```
 
 Send opaque identifiers. Emails are PII that a stack trace has no need for, and `sendDefaultPii` is hard-set to `false` so the SDK never attaches IPs, cookies, or bodies on its own initiative.
+
+`src/middleware/auth.js` calls `setUserContext(apiKey.id, { dashboard_id })` on
+every successful `/v1` authentication, so a 5xx from the agent API answers the
+first question anyone asks about one: is this a single broken integration or is
+it everybody? It passes the api key id and the tenant it belongs to, and
+nothing else — not the label, not the operator's email.
+
+There is no matching `clearUserContext()` on the request path, and there must
+not be: `sentryRequestHandler()` is mounted first in `src/app.js` and runs each
+request in its own hub, so the identity is already request-scoped. This is the
+same reason `setRequestId` works from that middleware. `clearUserContext()` is
+for the background path, where `reportBackgroundFailure` calls
+`scope.setUser(null)` for you.
 
 ## Sensitive data filtering
 
@@ -189,6 +270,20 @@ This is deliberate. Gating on `NODE_ENV === 'production'` made `captureException
 - The scrubbing rules and the option builder are pure functions exported under `_`-prefixed names and asserted directly.
 - The public API is a hard no-op until `initSentry()` succeeds, so the disabled-path tests prove the no-op contract rather than queueing real events.
 - Only the paths that leave Sentry **disabled** (no DSN, malformed DSN) exercise `initSentry`. Successfully initialising the SDK is a process-global, one-way side effect — the module caches `initialized` and Sentry installs a global hub and patches `http`/`express` — so doing it inside a shared test runner would leak into every subsequent test.
+
+`test/unit/sentry-background.test.js` covers the **enabled** path, which is why
+it is a separate file: `node:test` runs one process per file, so it gets its own
+module registry and can initialise for real against a syntactically valid DSN
+that points nowhere. It replaces `Sentry.captureException` and `Sentry.withScope`
+with recorders and asserts on what the SDK was asked to send — the tags, the
+cleared user, the extras, that a non-Error throw is passed through unconverted,
+and that a throw from inside the SDK is swallowed. It also drives `_runSubJob`
+from `src/jobs.js` end to end, so removing the report from the job loop fails
+the suite.
+
+Its first test asserts `initSentry()` returned `true`. That is not ceremony:
+every helper is a documented no-op while disabled, so without it the whole file
+would pass just as happily against functions that do nothing.
 
 ## Monitoring and Alerts
 

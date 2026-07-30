@@ -365,6 +365,58 @@ function captureMessage(message, level = 'info', context = {}) {
 }
 
 /**
+ * Report a failure from work that has no request behind it.
+ *
+ * Everything wired before this reported from the request path: the
+ * Express error handler, the process-level handlers, and the
+ * error-level log mirror. Background work reported to stderr and a
+ * bizEvent only — which inverts the priority. A failed request has a
+ * client who notices; a wedged sub-job, a dead Soroban watcher, or an
+ * alert evaluator that stopped evaluating is silent until an order
+ * quietly does not get fulfilled.
+ *
+ * Two things this does that a bare captureException() would not:
+ *
+ *   1. It runs inside `withScope`, so the event cannot inherit whatever
+ *      the last HTTP request left on the hub. Sentry's requestHandler
+ *      gives each request its own hub, but background work runs on the
+ *      root one — an event tagged with an unrelated request_id or user
+ *      is worse than an untagged one, because it sends whoever is
+ *      triaging to the wrong place.
+ *   2. It tags `subsystem` and `operation`. Background failures have no
+ *      transaction name to group by, so without them every job failure
+ *      lands in one undifferentiated bucket and Sentry's "issues" view
+ *      cannot tell "the webhook retry loop is broken" from "the pruner
+ *      is broken".
+ *
+ * Never throws and needs no `isEnabled()` guard at the call site, in
+ * keeping with captureException/captureMessage.
+ *
+ * @param {string} subsystem coarse owner, e.g. 'jobs' or 'stellar-watcher'
+ * @param {string} operation the specific unit of work that failed
+ * @param {unknown} error
+ * @param {Record<string, unknown>} [extra]
+ * @returns {string|undefined} the Sentry event id, if one was created
+ */
+function reportBackgroundFailure(subsystem, operation, error, extra = {}) {
+  if (!initialized) return undefined;
+  try {
+    return Sentry.withScope((scope) => {
+      scope.setUser(null);
+      scope.setTag('subsystem', subsystem);
+      scope.setTag('operation', operation);
+      scope.setContext('background_work', { subsystem, operation, ...extra });
+      return Sentry.captureException(error, { extra, level: 'error' });
+    });
+  } catch {
+    // Observability must never take down the loop it is observing —
+    // the whole point of this call site is that the caller already
+    // decided the failure was survivable.
+    return undefined;
+  }
+}
+
+/**
  * Attach the request correlation id to the active scope so a Sentry
  * event can be joined against the structured logs for the same request.
  *
@@ -463,6 +515,7 @@ module.exports = {
   isEnabled,
   captureException,
   captureMessage,
+  reportBackgroundFailure,
   setRequestId,
   setUserContext,
   clearUserContext,
