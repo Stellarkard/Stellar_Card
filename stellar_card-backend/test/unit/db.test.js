@@ -1746,3 +1746,913 @@ describe('db.js — policy_decisions table queries', () => {
     }
   });
 });
+
+// ── agent_claims ──────────────────────────────────────────────────────────
+//
+// The one-shot claim redemption is the most security-sensitive statement
+// pair in the codebase: it is how a dashboard-minted code becomes a live
+// api key, it is reachable without any credential, and it has to be
+// exactly-once under concurrency. api/agent-claim.js relies on three
+// distinct database-level properties to get that, and none of them was
+// covered here:
+//
+//   1. The lookup filters on `used_at IS NULL` AND an unexpired
+//      `expires_at`, compared through datetime() rather than lexically.
+//   2. The mark-used UPDATE is a compare-and-swap — it re-states
+//      `used_at IS NULL` in its WHERE clause, so the loser of a race sees
+//      changes === 0 rather than redeeming the same code twice.
+//   3. The decrypt happens INSIDE the transaction, so a throw rolls the
+//      mark-used back and the claim stays redeemable. Without that, a
+//      transient server misconfiguration permanently burns a claim.
+//
+// Each test below is one of those, phrased as the SQL the route runs.
+
+describe('db.js — agent_claims table queries', () => {
+  beforeEach(() => resetDb());
+
+  const FUTURE = "datetime('now', '+10 minutes')";
+  const PAST = "datetime('now', '-10 minutes')";
+
+  /** Insert a claim row, defaulting to unused and unexpired. */
+  function insertClaim({
+    id = uuidv4(),
+    code = `hash-${uuidv4()}`,
+    apiKeyId = uuidv4(),
+    payload = 'sealed-blob',
+    expiresAt = FUTURE,
+    usedAt = null,
+  } = {}) {
+    db.prepare(
+      `INSERT INTO agent_claims (id, code, api_key_id, sealed_payload, expires_at, used_at)
+       VALUES (?, ?, ?, ?, ${expiresAt}, ?)`,
+    ).run(id, code, apiKeyId, payload, usedAt);
+    return { id, code, apiKeyId };
+  }
+
+  /** The exact lookup api/agent-claim.js runs, by code hash. */
+  function lookup(code) {
+    return db
+      .prepare(
+        `SELECT api_key_id, sealed_payload FROM agent_claims
+         WHERE code = ? AND used_at IS NULL AND datetime(expires_at) > datetime('now')`,
+      )
+      .get(code);
+  }
+
+  /** The exact mark-used compare-and-swap the route runs. */
+  function markUsed(code, { ip = '203.0.113.7' } = {}) {
+    return db
+      .prepare(
+        `UPDATE agent_claims
+         SET used_at = @now, claimed_ip = @ip, sealed_payload = ''
+         WHERE code = @code AND used_at IS NULL`,
+      )
+      .run({ code, now: new Date().toISOString(), ip });
+  }
+
+  it('inserts and retrieves a claim by code', () => {
+    const { code, apiKeyId } = insertClaim();
+    const row = /** @type {any} */ (lookup(code));
+    assert.equal(row.api_key_id, apiKeyId);
+    assert.equal(row.sealed_payload, 'sealed-blob');
+  });
+
+  it('defaults created_at and leaves used_at and claimed_ip null', () => {
+    const { code } = insertClaim();
+    const row = /** @type {any} */ (
+      db
+        .prepare(`SELECT created_at, used_at, claimed_ip FROM agent_claims WHERE code = ?`)
+        .get(code)
+    );
+    assert.ok(row.created_at, 'created_at should default');
+    assert.equal(row.used_at, null);
+    assert.equal(row.claimed_ip, null);
+  });
+
+  it('the lookup misses a claim that has already been used', () => {
+    const { code } = insertClaim({ usedAt: new Date().toISOString() });
+    assert.equal(lookup(code), undefined);
+  });
+
+  it('the lookup misses an expired claim', () => {
+    const { code } = insertClaim({ expiresAt: PAST });
+    assert.equal(lookup(code), undefined);
+  });
+
+  it('compares expiry through datetime(), not lexically', () => {
+    // The column holds whatever the mint path wrote. dashboard.js writes
+    // an ISO-8601 string with a T separator and a Z suffix, while the
+    // SQL default elsewhere in this schema is datetime('now') — space
+    // separator, no zone. A lexical `expires_at > 'now'` comparison
+    // gets those two forms wrong in opposite directions; datetime()
+    // normalises both. A live claim in ISO form must be found.
+    const code = `hash-${uuidv4()}`;
+    db.prepare(
+      `INSERT INTO agent_claims (id, code, api_key_id, sealed_payload, expires_at)
+       VALUES (?, ?, ?, 'blob', ?)`,
+    ).run(uuidv4(), code, uuidv4(), new Date(Date.now() + 600_000).toISOString());
+    assert.ok(lookup(code), 'an ISO-8601 expires_at in the future must match');
+  });
+
+  it('marks a claim used exactly once — the second attempt changes nothing', () => {
+    // The compare-and-swap that makes redemption exactly-once. Two
+    // concurrent callers both pass the lookup; better-sqlite3 serialises
+    // the writes, and the loser has to see changes === 0.
+    const { code } = insertClaim();
+    assert.equal(markUsed(code).changes, 1, 'the first redemption wins');
+    assert.equal(markUsed(code).changes, 0, 'the second must be a no-op');
+  });
+
+  it('wipes sealed_payload and records the claiming IP in the same statement', () => {
+    // The wipe and the mark-used are one UPDATE on purpose: a crash
+    // between two separate statements would leave a redeemed claim whose
+    // sealed_payload is still extractable from a DB dump.
+    const { code } = insertClaim();
+    markUsed(code, { ip: '198.51.100.4' });
+    const row = /** @type {any} */ (
+      db
+        .prepare(`SELECT used_at, claimed_ip, sealed_payload FROM agent_claims WHERE code = ?`)
+        .get(code)
+    );
+    assert.ok(row.used_at, 'used_at should be stamped');
+    assert.equal(row.claimed_ip, '198.51.100.4');
+    assert.equal(row.sealed_payload, '', 'the sealed payload must be wiped');
+  });
+
+  it('leaves the claim redeemable when the enclosing transaction throws', () => {
+    // api/agent-claim.js decrypts INSIDE the transaction specifically so
+    // a decrypt failure — a missing key, a corrupt blob, a rotated key —
+    // rolls the mark-used back instead of burning the claim. If the
+    // rollback did not cover the UPDATE, a transient misconfiguration
+    // would permanently destroy a customer's onboarding code.
+    const { code } = insertClaim();
+    const redeem = db.transaction((c) => {
+      markUsed(c);
+      throw new Error('decrypt failed');
+    });
+    assert.throws(() => redeem(code), /decrypt failed/);
+
+    const row = /** @type {any} */ (lookup(code));
+    assert.ok(row, 'the claim must still be redeemable after a rollback');
+    assert.equal(row.sealed_payload, 'sealed-blob', 'the payload wipe must roll back too');
+  });
+
+  it('prunes used and long-expired claims, keeping fresh ones', () => {
+    // Drives the real pruneExpiredAgentClaims from jobs.js rather than a
+    // copy of its DELETE, so a dropped predicate in the shipped statement
+    // fails here. Four rows, one per branch of its WHERE clause.
+    const { pruneExpiredAgentClaims } = require('../../src/jobs');
+
+    const staleUsed = insertClaim({
+      usedAt: new Date(Date.now() - 48 * 3600_000).toISOString(),
+    });
+    const staleExpired = insertClaim({ expiresAt: "datetime('now', '-48 hours')" });
+    const recentlyUsed = insertClaim({ usedAt: new Date().toISOString() });
+    const live = insertClaim();
+
+    pruneExpiredAgentClaims();
+
+    const remaining = new Set(
+      /** @type {any[]} */ (db.prepare(`SELECT id FROM agent_claims`).all()).map((r) => r.id),
+    );
+    assert.equal(remaining.size, 2);
+    assert.ok(!remaining.has(staleUsed.id), 'a claim used 48h ago should be pruned');
+    assert.ok(!remaining.has(staleExpired.id), 'a claim expired 48h ago should be pruned');
+    assert.ok(remaining.has(recentlyUsed.id), 'a just-redeemed claim is still audit-relevant');
+    assert.ok(remaining.has(live.id), 'a live unused claim must survive');
+  });
+
+  it('plans the code lookup through an index, not a table scan', () => {
+    // The claim endpoint is unauthenticated and rate-limited per IP. A
+    // table scan here is a scan an anonymous caller controls the rate of.
+    //
+    // Deliberately not asserting on idx_agent_claims_code by name:
+    // `code TEXT NOT NULL UNIQUE` gives SQLite an implicit index for this
+    // lookup anyway, so naming the explicit one would assert something
+    // the query does not actually depend on. What must hold is that no
+    // plan for this statement is a scan.
+    const plan = /** @type {any[]} */ (
+      db
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT api_key_id, sealed_payload FROM agent_claims
+           WHERE code = ? AND used_at IS NULL`,
+        )
+        .all('some-hash')
+    );
+    const detail = plan.map((r) => r.detail).join(' | ');
+    assert.match(detail, /USING (COVERING )?INDEX/, detail);
+  });
+});
+
+// ── approval_requests ─────────────────────────────────────────────────────
+
+describe('db.js — approval_requests table queries', () => {
+  beforeEach(() => resetDb());
+
+  function insertApproval({
+    id = uuidv4(),
+    apiKeyId = uuidv4(),
+    orderId = uuidv4(),
+    amount = '250.00',
+    status = null,
+    expiresAt = "datetime('now', '+2 hours')",
+  } = {}) {
+    db.prepare(
+      `INSERT INTO approval_requests (id, api_key_id, order_id, amount_usdc, status, expires_at)
+       VALUES (?, ?, ?, ?, COALESCE(?, 'pending'), ${expiresAt})`,
+    ).run(id, apiKeyId, orderId, amount, status);
+    return id;
+  }
+
+  it('defaults status to pending and stamps requested_at', () => {
+    const id = uuidv4();
+    db.prepare(
+      `INSERT INTO approval_requests (id, api_key_id, order_id, amount_usdc, expires_at)
+       VALUES (?, ?, ?, '10.00', datetime('now', '+2 hours'))`,
+    ).run(id, uuidv4(), uuidv4());
+    const row = /** @type {any} */ (
+      db
+        .prepare(`SELECT status, requested_at, decided_at FROM approval_requests WHERE id = ?`)
+        .get(id)
+    );
+    assert.equal(row.status, 'pending');
+    assert.ok(row.requested_at, 'requested_at should default');
+    assert.equal(row.decided_at, null);
+  });
+
+  it('stores amount_usdc as TEXT without numeric coercion', () => {
+    // Same reasoning as the orders column: a REAL round-trip loses cents.
+    const id = insertApproval({ amount: '1234.50' });
+    const row = /** @type {any} */ (
+      db.prepare(`SELECT amount_usdc FROM approval_requests WHERE id = ?`).get(id)
+    );
+    assert.equal(typeof row.amount_usdc, 'string');
+    assert.equal(row.amount_usdc, '1234.50');
+  });
+
+  it('the expiry sweep selects only pending requests past their window', () => {
+    // The SELECT from expireApprovalRequests. One row per branch it has
+    // to exclude, so a dropped predicate shows up as a wrong count.
+    const overdue = insertApproval({ expiresAt: "datetime('now', '-1 minute')" });
+    insertApproval({ expiresAt: "datetime('now', '+2 hours')" });
+    insertApproval({ status: 'approved', expiresAt: "datetime('now', '-1 minute')" });
+    insertApproval({ status: 'rejected', expiresAt: "datetime('now', '-1 minute')" });
+
+    const rows = /** @type {any[]} */ (
+      db
+        .prepare(
+          `SELECT * FROM approval_requests
+           WHERE status = 'pending' AND datetime(expires_at) < datetime('now')`,
+        )
+        .all()
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, overdue);
+  });
+
+  it('expires a pending request exactly once via compare-and-swap', () => {
+    const id = insertApproval({ expiresAt: "datetime('now', '-1 minute')" });
+    const expire = () =>
+      db
+        .prepare(
+          `UPDATE approval_requests SET status = 'expired', decided_at = ?
+           WHERE id = ? AND status = 'pending'`,
+        )
+        .run(new Date().toISOString(), id);
+    assert.equal(expire().changes, 1);
+    assert.equal(expire().changes, 0, 'a second sweep must not re-decide it');
+  });
+
+  it('the sweep expires the stale request and leaves a decided one alone', () => {
+    // Driven through the real expireApprovalRequests so a dropped
+    // predicate in the shipped SELECT fails here.
+    //
+    // Note what this does and does not cover. It pins the sweep's own
+    // filter — an approved request is never picked up, even once it is
+    // past its window. It does NOT cover the compare-and-swap in the
+    // UPDATE, because that only fires when an operator decides in the
+    // gap between the SELECT and the UPDATE, and a test cannot open that
+    // gap from outside the function. The statement's exactly-once
+    // semantics are pinned directly by the test above instead; removing
+    // `AND status = 'pending'` from the job leaves this test green.
+    const { expireApprovalRequests } = require('../../src/jobs');
+
+    const overdue = insertApproval({ expiresAt: "datetime('now', '-1 minute')" });
+    const decided = insertApproval({ expiresAt: "datetime('now', '-1 minute')" });
+    db.prepare(`UPDATE approval_requests SET status = 'approved' WHERE id = ?`).run(decided);
+
+    expireApprovalRequests();
+
+    const statuses = Object.fromEntries(
+      /** @type {any[]} */ (db.prepare(`SELECT id, status FROM approval_requests`).all()).map(
+        (r) => [r.id, r.status],
+      ),
+    );
+    assert.equal(statuses[overdue], 'expired', 'a genuinely stale request is expired');
+    assert.equal(statuses[decided], 'approved', "the operator's decision must survive");
+  });
+
+  it('finds the pending approvals for a suspended agent', () => {
+    // The cascade POST /dashboard/api-keys/:id/suspend runs: every
+    // pending approval for that key gets rejected along with its order.
+    const apiKeyId = uuidv4();
+    insertApproval({ apiKeyId });
+    insertApproval({ apiKeyId });
+    insertApproval({ apiKeyId, status: 'approved' });
+    insertApproval({ apiKeyId: uuidv4() });
+
+    const rows = /** @type {any[]} */ (
+      db
+        .prepare(`SELECT * FROM approval_requests WHERE api_key_id = ? AND status = 'pending'`)
+        .all(apiKeyId)
+    );
+    assert.equal(rows.length, 2);
+  });
+
+  it('looks an approval up by the order it gates', () => {
+    const orderId = uuidv4();
+    const id = insertApproval({ orderId });
+    const row = /** @type {any} */ (
+      db
+        .prepare(`SELECT id, expires_at, status FROM approval_requests WHERE order_id = ?`)
+        .get(orderId)
+    );
+    assert.equal(row.id, id);
+    assert.equal(row.status, 'pending');
+  });
+
+  it('plans the pending sweep through the status index', () => {
+    const plan = /** @type {any[]} */ (
+      db
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT * FROM approval_requests WHERE status = 'pending'`,
+        )
+        .all()
+    );
+    const detail = plan.map((r) => r.detail).join(' | ');
+    assert.match(detail, /USING (COVERING )?INDEX idx_approval_requests_status/, detail);
+  });
+});
+
+// ── alert_rules and alert_firings ─────────────────────────────────────────
+
+describe('db.js — alert_rules table queries', () => {
+  beforeEach(() => resetDb());
+
+  function insertRule({
+    id = uuidv4(),
+    dashboardId = uuidv4(),
+    name = 'failures high',
+    kind = 'failure_rate_high',
+  } = {}) {
+    db.prepare(`INSERT INTO alert_rules (id, dashboard_id, name, kind) VALUES (?, ?, ?, ?)`).run(
+      id,
+      dashboardId,
+      name,
+      kind,
+    );
+    return id;
+  }
+
+  it('defaults config to an empty JSON object, enabled to 1, snooze to null', () => {
+    // lib/alerts.js JSON.parses `config` on every read. A NULL default
+    // would make every listRules call fall into its safeParse fallback,
+    // which is indistinguishable from a rule whose config was cleared.
+    const id = insertRule();
+    const row = /** @type {any} */ (
+      db
+        .prepare(
+          `SELECT config, enabled, snoozed_until, created_at, updated_at
+                  FROM alert_rules WHERE id = ?`,
+        )
+        .get(id)
+    );
+    assert.equal(row.config, '{}');
+    assert.deepEqual(JSON.parse(row.config), {});
+    assert.equal(row.enabled, 1);
+    assert.equal(row.snoozed_until, null);
+    assert.ok(row.created_at);
+    assert.ok(row.updated_at);
+  });
+
+  it('rejects a rule with no name or no kind', () => {
+    for (const [name, kind] of [
+      [null, 'failure_rate_high'],
+      ['unnamed', null],
+    ]) {
+      assert.throws(
+        () =>
+          db
+            .prepare(`INSERT INTO alert_rules (id, dashboard_id, name, kind) VALUES (?, ?, ?, ?)`)
+            .run(uuidv4(), uuidv4(), name, kind),
+        /NOT NULL/,
+      );
+    }
+  });
+
+  it('lists only the enabled rules for one dashboard', () => {
+    const dashboardId = uuidv4();
+    const enabled = insertRule({ dashboardId });
+    const disabled = insertRule({ dashboardId });
+    db.prepare(`UPDATE alert_rules SET enabled = 0 WHERE id = ?`).run(disabled);
+    insertRule({ dashboardId: uuidv4() });
+
+    const rows = /** @type {any[]} */ (
+      db
+        .prepare(`SELECT id FROM alert_rules WHERE dashboard_id = ? AND enabled = 1`)
+        .all(dashboardId)
+    );
+    assert.deepEqual(
+      rows.map((r) => r.id),
+      [enabled],
+    );
+  });
+
+  it('plans the per-dashboard rule lookup through an index', () => {
+    const plan = /** @type {any[]} */ (
+      db
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT id FROM alert_rules WHERE dashboard_id = ? AND enabled = 1`,
+        )
+        .all('some-dashboard')
+    );
+    const detail = plan.map((r) => r.detail).join(' | ');
+    assert.match(detail, /USING (COVERING )?INDEX idx_alert_rules_dashboard/, detail);
+  });
+});
+
+describe('db.js — alert_firings table queries', () => {
+  beforeEach(() => resetDb());
+
+  /**
+   * `firedAt` is a SQL expression, not a bound value — it has to be
+   * interpolated so `datetime('now', '-30 minutes')` is evaluated by
+   * SQLite rather than stored as that literal text. Binding it instead
+   * stores the string, `datetime()` of which is NULL, and every window
+   * comparison then quietly returns false — which reads as "the cooldown
+   * works" no matter what the query does. Tests only; nothing here is
+   * caller-supplied.
+   */
+  function insertFiring({
+    ruleId = uuidv4(),
+    dashboardId = uuidv4(),
+    firedAt = "datetime('now')",
+    context = null,
+  } = {}) {
+    const info = db
+      .prepare(
+        `INSERT INTO alert_firings (rule_id, dashboard_id, fired_at, context)
+         VALUES (?, ?, ${firedAt}, ?)`,
+      )
+      .run(ruleId, dashboardId, context);
+    return Number(info.lastInsertRowid);
+  }
+
+  it('assigns an autoincrementing id and defaults notified to 0', () => {
+    const first = insertFiring();
+    const second = insertFiring();
+    assert.ok(second > first, 'ids must increase');
+    const row = /** @type {any} */ (
+      db.prepare(`SELECT notified, fired_at FROM alert_firings WHERE id = ?`).get(first)
+    );
+    assert.equal(row.notified, 0);
+    assert.ok(row.fired_at);
+  });
+
+  it('the cooldown probe sees a firing inside the window and not one outside it', () => {
+    // The statement that stops a persistent failure mode from spamming
+    // Discord every tick. Default cooldown is 15 minutes.
+    const ruleId = uuidv4();
+    const probe = () =>
+      db
+        .prepare(
+          `SELECT 1 AS ok FROM alert_firings
+           WHERE rule_id = ? AND datetime(fired_at) > datetime('now', ?)
+           LIMIT 1`,
+        )
+        .get(ruleId, '-15 minutes');
+
+    assert.equal(probe(), undefined, 'a rule that never fired has no cooldown');
+
+    insertFiring({ ruleId, firedAt: "datetime('now', '-30 minutes')" });
+    assert.equal(probe(), undefined, 'a firing older than the window must not suppress');
+
+    insertFiring({ ruleId, firedAt: "datetime('now', '-1 minute')" });
+    assert.ok(probe(), 'a firing inside the window must suppress');
+  });
+
+  it('scopes the cooldown probe to one rule', () => {
+    // Keyed on rule_id, not dashboard_id: one noisy rule must not
+    // silence every other alert the dashboard has configured.
+    const quiet = uuidv4();
+    insertFiring({ ruleId: uuidv4(), firedAt: "datetime('now', '-1 minute')" });
+    const row = db
+      .prepare(
+        `SELECT 1 AS ok FROM alert_firings
+         WHERE rule_id = ? AND datetime(fired_at) > datetime('now', ?) LIMIT 1`,
+      )
+      .get(quiet, '-15 minutes');
+    assert.equal(row, undefined);
+  });
+
+  it('orders history by id, which survives a same-second fired_at tie', () => {
+    // datetime('now') has one-second resolution, so several firings in
+    // one tick share a fired_at. listFirings orders by f.id DESC rather
+    // than f.fired_at for exactly that reason — ordering by the timestamp
+    // would return them in an arbitrary order and the operator would see
+    // history shuffle between page loads.
+    const dashboardId = uuidv4();
+    const at = '2026-07-30 12:00:00';
+    const ids = [
+      insertFiring({ dashboardId, firedAt: `'${at}'` }),
+      insertFiring({ dashboardId, firedAt: `'${at}'` }),
+      insertFiring({ dashboardId, firedAt: `'${at}'` }),
+    ];
+    const rows = /** @type {any[]} */ (
+      db
+        .prepare(`SELECT id, fired_at FROM alert_firings WHERE dashboard_id = ? ORDER BY id DESC`)
+        .all(dashboardId)
+    );
+    assert.deepEqual(
+      rows.map((r) => r.id),
+      [...ids].reverse(),
+    );
+    assert.equal(new Set(rows.map((r) => r.fired_at)).size, 1, 'all three share one timestamp');
+  });
+
+  it('keeps a firing whose rule has been deleted, with a null rule name', () => {
+    // rule_id carries no FOREIGN KEY, so history outlives the rule that
+    // produced it — which is the point: deleting a rule must not erase
+    // the record of what it fired on. listFirings LEFT JOINs for the
+    // name, so the row survives with rule_name null. An INNER JOIN would
+    // silently drop it and the operator's history would develop holes.
+    const dashboardId = uuidv4();
+    const ruleId = uuidv4();
+    db.prepare(`INSERT INTO alert_rules (id, dashboard_id, name, kind) VALUES (?, ?, ?, ?)`).run(
+      ruleId,
+      dashboardId,
+      'doomed rule',
+      'failure_rate_high',
+    );
+    insertFiring({ ruleId, dashboardId });
+    db.prepare(`DELETE FROM alert_rules WHERE id = ?`).run(ruleId);
+
+    const rows = /** @type {any[]} */ (
+      db
+        .prepare(
+          `SELECT f.id, r.name AS rule_name
+           FROM alert_firings f LEFT JOIN alert_rules r ON r.id = f.rule_id
+           WHERE f.dashboard_id = ? ORDER BY f.id DESC`,
+        )
+        .all(dashboardId)
+    );
+    assert.equal(rows.length, 1, 'the firing must survive its rule');
+    assert.equal(rows[0].rule_name, null);
+  });
+
+  it('plans the cooldown probe through the rule index', () => {
+    const plan = /** @type {any[]} */ (
+      db
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT 1 FROM alert_firings WHERE rule_id = ? AND fired_at > ? LIMIT 1`,
+        )
+        .all('some-rule', 'some-time')
+    );
+    const detail = plan.map((r) => r.detail).join(' | ');
+    assert.match(detail, /USING (COVERING )?INDEX idx_alert_firings_rule/, detail);
+  });
+});
+
+// ── dashboards ────────────────────────────────────────────────────────────
+
+describe('db.js — dashboards table queries', () => {
+  beforeEach(() => resetDb());
+
+  function insertUser({ id = uuidv4(), email = `owner-${uuidv4()}@stellar_card.test` } = {}) {
+    db.prepare(`INSERT INTO users (id, email) VALUES (?, ?)`).run(id, email);
+    return id;
+  }
+
+  it('defaults name, frozen and created_at', () => {
+    const userId = insertUser();
+    const id = uuidv4();
+    db.prepare(`INSERT INTO dashboards (id, user_id) VALUES (?, ?)`).run(id, userId);
+    const row = /** @type {any} */ (
+      db
+        .prepare(`SELECT name, frozen, spend_limit_usdc, created_at FROM dashboards WHERE id = ?`)
+        .get(id)
+    );
+    assert.equal(row.name, 'My Dashboard');
+    assert.equal(row.frozen, 0);
+    assert.equal(row.spend_limit_usdc, null);
+    assert.ok(row.created_at);
+  });
+
+  it('rejects a dashboard with no owning user', () => {
+    assert.throws(
+      () => db.prepare(`INSERT INTO dashboards (id, user_id) VALUES (?, NULL)`).run(uuidv4()),
+      /NOT NULL/,
+    );
+  });
+
+  it('lets one user own several dashboards', () => {
+    const userId = insertUser();
+    db.prepare(`INSERT INTO dashboards (id, user_id, name) VALUES (?, ?, ?)`).run(
+      uuidv4(),
+      userId,
+      'Primary',
+    );
+    db.prepare(`INSERT INTO dashboards (id, user_id, name) VALUES (?, ?, ?)`).run(
+      uuidv4(),
+      userId,
+      'Secondary',
+    );
+    const rows = /** @type {any[]} */ (
+      db.prepare(`SELECT name FROM dashboards WHERE user_id = ? ORDER BY name`).all(userId)
+    );
+    assert.deepEqual(
+      rows.map((r) => r.name),
+      ['Primary', 'Secondary'],
+    );
+  });
+
+  it('refuses to delete a dashboard that still owns api keys', () => {
+    // `api_keys.dashboard_id TEXT REFERENCES dashboards(id)` — declared
+    // in migration 8 with NO cascade, so the constraint restricts rather
+    // than deletes. That is the right way round: a cascade would silently
+    // destroy live agent credentials, while the restriction forces the
+    // caller to decide what happens to the keys. It only holds because
+    // `foreign_keys = ON` is set at boot; without that pragma SQLite
+    // ignores the reference entirely and the delete would orphan every
+    // key into a tenant that no longer exists.
+    const userId = insertUser();
+    const dashboardId = uuidv4();
+    db.prepare(`INSERT INTO dashboards (id, user_id) VALUES (?, ?)`).run(dashboardId, userId);
+    db.prepare(`INSERT INTO api_keys (id, key_hash, dashboard_id) VALUES (?, ?, ?)`).run(
+      uuidv4(),
+      `hash-${uuidv4()}`,
+      dashboardId,
+    );
+    assert.throws(
+      () => db.prepare(`DELETE FROM dashboards WHERE id = ?`).run(dashboardId),
+      /FOREIGN KEY/,
+    );
+    const still = /** @type {any} */ (
+      db.prepare(`SELECT COUNT(*) AS n FROM dashboards WHERE id = ?`).get(dashboardId)
+    );
+    assert.equal(still.n, 1, 'the dashboard and its keys are both intact');
+  });
+
+  it('cascades the dashboard away when the owning user is deleted', () => {
+    // The user cascade DOES fire — dashboards.user_id declares
+    // ON DELETE CASCADE — and it reaches api_keys through the same
+    // restriction as above only because api_keys is emptied first by the
+    // key cascade. Pinned because the two directions behave differently
+    // and reading the schema alone does not make that obvious.
+    const userId = insertUser();
+    const dashboardId = uuidv4();
+    db.prepare(`INSERT INTO dashboards (id, user_id) VALUES (?, ?)`).run(dashboardId, userId);
+    db.prepare(`DELETE FROM users WHERE id = ?`).run(userId);
+    const row = /** @type {any} */ (
+      db.prepare(`SELECT COUNT(*) AS n FROM dashboards WHERE id = ?`).get(dashboardId)
+    );
+    assert.equal(row.n, 0);
+  });
+
+  it('plans the per-user dashboard lookup through an index', () => {
+    const plan = /** @type {any[]} */ (
+      db.prepare(`EXPLAIN QUERY PLAN SELECT id FROM dashboards WHERE user_id = ?`).all('some-user')
+    );
+    const detail = plan.map((r) => r.detail).join(' | ');
+    assert.match(detail, /USING (COVERING )?INDEX idx_dashboards_user_id/, detail);
+  });
+});
+
+// ── admin_actions ─────────────────────────────────────────────────────────
+
+describe('db.js — admin_actions table queries', () => {
+  beforeEach(() => resetDb());
+
+  function insertAction({
+    id = uuidv4(),
+    actor = 'ops@stellar_card.test',
+    action = 'refund_order',
+    targetType = 'order',
+    targetId = uuidv4(),
+    metadata = null,
+    createdAt = null,
+  } = {}) {
+    db.prepare(
+      `INSERT INTO admin_actions
+         (id, actor_email, action, target_type, target_id, metadata, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
+    ).run(id, actor, action, targetType, targetId, metadata, createdAt);
+    return id;
+  }
+
+  it('inserts and retrieves an action', () => {
+    const id = insertAction();
+    const row = /** @type {any} */ (db.prepare(`SELECT * FROM admin_actions WHERE id = ?`).get(id));
+    assert.equal(row.actor_email, 'ops@stellar_card.test');
+    assert.equal(row.action, 'refund_order');
+    assert.equal(row.target_type, 'order');
+    assert.ok(row.created_at);
+  });
+
+  it('allows a null target_id for system-wide actions', () => {
+    // target_type 'system' has nothing to point at — an unfreeze is not
+    // scoped to one order or one key.
+    const id = insertAction({ action: 'unfreeze', targetType: 'system', targetId: null });
+    const row = /** @type {any} */ (
+      db.prepare(`SELECT target_id FROM admin_actions WHERE id = ?`).get(id)
+    );
+    assert.equal(row.target_id, null);
+  });
+
+  it('round-trips the JSON metadata blob without alteration', () => {
+    const metadata = JSON.stringify({ reason: 'duplicate charge', amount_usdc: '10.00' });
+    const id = insertAction({ metadata });
+    const row = /** @type {any} */ (
+      db.prepare(`SELECT metadata FROM admin_actions WHERE id = ?`).get(id)
+    );
+    assert.equal(row.metadata, metadata);
+    assert.deepEqual(JSON.parse(row.metadata), {
+      reason: 'duplicate charge',
+      amount_usdc: '10.00',
+    });
+  });
+
+  it('rejects an action with no actor', () => {
+    // The whole value of this table is answering "who did this". A row
+    // with a null actor_email is worse than no row: it looks like an
+    // audit trail and is not one.
+    assert.throws(
+      () =>
+        db
+          .prepare(
+            `INSERT INTO admin_actions (id, actor_email, action, target_type)
+             VALUES (?, NULL, 'refund_order', 'order')`,
+          )
+          .run(uuidv4()),
+      /NOT NULL/,
+    );
+  });
+
+  it('reads one actor history in reverse chronological order', () => {
+    const actor = 'auditor@stellar_card.test';
+    insertAction({ actor, action: 'first', createdAt: '2026-07-01 10:00:00' });
+    insertAction({ actor, action: 'second', createdAt: '2026-07-02 10:00:00' });
+    insertAction({ actor: 'someone-else@stellar_card.test', action: 'third' });
+
+    const rows = /** @type {any[]} */ (
+      db
+        .prepare(`SELECT action FROM admin_actions WHERE actor_email = ? ORDER BY created_at DESC`)
+        .all(actor)
+    );
+    assert.deepEqual(
+      rows.map((r) => r.action),
+      ['second', 'first'],
+    );
+  });
+
+  it('plans the actor history through an index', () => {
+    const plan = /** @type {any[]} */ (
+      db
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT action FROM admin_actions WHERE actor_email = ? ORDER BY created_at DESC`,
+        )
+        .all('someone@example.com')
+    );
+    const detail = plan.map((r) => r.detail).join(' | ');
+    assert.match(detail, /USING (COVERING )?INDEX idx_admin_actions_actor/, detail);
+  });
+});
+
+// ── mpp_challenges ────────────────────────────────────────────────────────
+
+describe('db.js — mpp_challenges table queries', () => {
+  beforeEach(() => resetDb());
+
+  function insertChallenge({
+    id = uuidv4(),
+    resourcePath = '/v1/cards/visa/10.00',
+    amount = '10.00',
+    expiresAt = new Date(Date.now() + 600_000).toISOString(),
+  } = {}) {
+    db.prepare(
+      `INSERT INTO mpp_challenges (id, resource_path, amount_usdc, expires_at)
+       VALUES (?, ?, ?, ?)`,
+    ).run(id, resourcePath, amount, expiresAt);
+    return id;
+  }
+
+  it('inserts with created_at defaulted and redemption columns null', () => {
+    const id = insertChallenge();
+    const row = /** @type {any} */ (
+      db
+        .prepare(
+          `SELECT created_at, redeemed_at, redeemed_tx_hash, order_id, client_ip
+           FROM mpp_challenges WHERE id = ?`,
+        )
+        .get(id)
+    );
+    assert.ok(row.created_at);
+    assert.equal(row.redeemed_at, null);
+    assert.equal(row.redeemed_tx_hash, null);
+    assert.equal(row.order_id, null);
+    assert.equal(row.client_ip, null);
+  });
+
+  it('redeems a challenge exactly once via compare-and-swap', () => {
+    const id = insertChallenge();
+    const redeem = (txHash) =>
+      db
+        .prepare(
+          `UPDATE mpp_challenges
+             SET redeemed_at = @now, redeemed_tx_hash = @tx_hash, order_id = @order_id
+           WHERE id = @id AND redeemed_at IS NULL`,
+        )
+        .run({ id, now: new Date().toISOString(), tx_hash: txHash, order_id: null });
+
+    assert.equal(redeem('tx-aaa').changes, 1);
+    assert.equal(redeem('tx-bbb').changes, 0, 'a redeemed challenge must not be re-bound');
+
+    const row = /** @type {any} */ (
+      db.prepare(`SELECT redeemed_tx_hash FROM mpp_challenges WHERE id = ?`).get(id)
+    );
+    assert.equal(row.redeemed_tx_hash, 'tx-aaa', 'the first tx keeps the challenge');
+  });
+
+  it('rejects a challenge bound to an order that does not exist', () => {
+    // order_id carries a real FOREIGN KEY. A challenge pointing at a
+    // missing order would make the receipt endpoint 404 on a payment
+    // that actually settled.
+    const id = insertChallenge();
+    assert.throws(
+      () => db.prepare(`UPDATE mpp_challenges SET order_id = ? WHERE id = ?`).run(uuidv4(), id),
+      /FOREIGN KEY/,
+    );
+  });
+
+  it('binds a challenge to a real order', () => {
+    const orderId = insertOrder();
+    const id = insertChallenge();
+    db.prepare(`UPDATE mpp_challenges SET order_id = ? WHERE id = ?`).run(orderId, id);
+    const row = /** @type {any} */ (
+      db.prepare(`SELECT order_id FROM mpp_challenges WHERE id = ?`).get(id)
+    );
+    assert.equal(row.order_id, orderId);
+  });
+
+  it('prunes unredeemed expired challenges and keeps redeemed ones', () => {
+    // The DELETE from mpp/challenge.js. `redeemed_at IS NULL` is
+    // load-bearing: a redeemed challenge is the receipt for a settled
+    // payment and has to survive its own expiry.
+    const now = new Date().toISOString();
+    const staleUnredeemed = insertChallenge({
+      expiresAt: new Date(Date.now() - 600_000).toISOString(),
+    });
+    const live = insertChallenge();
+    const staleRedeemed = insertChallenge({
+      expiresAt: new Date(Date.now() - 600_000).toISOString(),
+    });
+    db.prepare(`UPDATE mpp_challenges SET redeemed_at = ?, redeemed_tx_hash = ? WHERE id = ?`).run(
+      now,
+      'tx-settled',
+      staleRedeemed,
+    );
+
+    const result = db
+      .prepare(`DELETE FROM mpp_challenges WHERE redeemed_at IS NULL AND expires_at < ?`)
+      .run(now);
+    assert.equal(result.changes, 1);
+
+    const remaining = new Set(
+      /** @type {any[]} */ (db.prepare(`SELECT id FROM mpp_challenges`).all()).map((r) => r.id),
+    );
+    assert.ok(!remaining.has(staleUnredeemed));
+    assert.ok(remaining.has(live), 'an unexpired challenge must survive');
+    assert.ok(remaining.has(staleRedeemed), 'a settled payment receipt must survive its expiry');
+  });
+
+  it('plans the expiry sweep through the partial index', () => {
+    // The index is partial (WHERE redeemed_at IS NULL) so it stays small
+    // as redeemed history accumulates. That only pays off if the sweep's
+    // own predicate lets SQLite use it.
+    const plan = /** @type {any[]} */ (
+      db
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT id FROM mpp_challenges WHERE redeemed_at IS NULL AND expires_at < ?`,
+        )
+        .all('2026-01-01T00:00:00.000Z')
+    );
+    const detail = plan.map((r) => r.detail).join(' | ');
+    assert.match(detail, /USING (COVERING )?INDEX idx_mpp_challenges_expires/, detail);
+  });
+});

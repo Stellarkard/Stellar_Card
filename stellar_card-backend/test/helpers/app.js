@@ -104,6 +104,16 @@ function createTestSession({ email = 'test@stellar_card.com', role = 'owner' } =
  * Reset all tables between tests.
  */
 function resetDb() {
+  // Before orders, not with the tolerant loop below: mpp_challenges has a
+  // real FOREIGN KEY to orders(id) and `foreign_keys = ON`, so a challenge
+  // row bound to an order makes `DELETE FROM orders` fail outright. Any
+  // test that redeems a challenge would leave the whole suite unable to
+  // reset. Wrapped because the table arrived in a later migration.
+  try {
+    db.prepare(`DELETE FROM mpp_challenges`).run();
+  } catch {
+    /* table may not exist in all test configurations */
+  }
   db.prepare(`DELETE FROM orders`).run();
   db.prepare(`DELETE FROM api_keys`).run();
   db.prepare(`DELETE FROM idempotency_keys`).run();
@@ -125,6 +135,13 @@ function resetDb() {
     'agent_claims',
     'stellar_dead_letter',
     'unmatched_payments',
+    // admin_actions and dashboards have no FK that the deletes above
+    // cascade through in every direction, so they were leaking rows
+    // between cases. dashboards does cascade from users, but only when a
+    // test created the owning user — a directly-inserted dashboard row
+    // survived.
+    'admin_actions',
+    'dashboards',
   ]) {
     try {
       db.prepare(`DELETE FROM ${tbl}`).run();

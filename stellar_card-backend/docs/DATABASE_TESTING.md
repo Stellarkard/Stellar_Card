@@ -22,28 +22,35 @@ catching exactly those.
 
 ## Suites
 
-| Suite                               | What it pins                                                                 |
-| ----------------------------------- | ---------------------------------------------------------------------------- |
-| `schema initialization`             | Every table and every `ALTER TABLE` column the migration chain declares      |
-| `schema_migrations bookkeeping`     | Versions 1..N recorded exactly once, no gaps, `applied_at` stamped           |
-| `system_state seed rows`            | `frozen` and `consecutive_failures` seeded to `'0'`                          |
-| `orders table queries`              | CRUD round-trips, column defaults, `NOT NULL` and `PRIMARY KEY` enforcement  |
-| `orders aggregate queries`          | The exact `SUM(CASE WHEN ...)` shapes `/status` and `/v1/usage` depend on    |
-| `api_keys table queries`            | `UNIQUE(key_hash)`, defaults for `mode` / `suspended` / `enabled`            |
-| `idempotency_keys table queries`    | Composite primary key `(key, api_key_id)`                                    |
-| `foreign key enforcement`           | `ON DELETE CASCADE` for sessions and dashboards, dangling-reference rejects  |
-| `unique and partial indexes`        | MPP challenge/receipt uniqueness, NULL-tolerant partial indexes, plan check  |
-| `transaction semantics`             | Rollback on throw, rollback on constraint violation, commit on return        |
-| `pragma settings`                   | `foreign_keys`, `busy_timeout` on the shared handle                          |
-| `fresh on-disk instance`            | WAL mode, migration idempotency, seed rows, the schema-drift kill switch     |
-| `users` / `auth_codes` / `sessions` | Uniqueness, role defaults, cascade on user deletion                          |
-| `audit_log` / `webhook_deliveries`  | Append-only ordering and the dashboard feed query                            |
-| `webhook_queue table queries`       | The retry scan predicate, the abandoned-delivery counter, the index plan     |
-| `credential expiry semantics`       | The shared `used_at IS NULL AND datetime(expires_at) > datetime('now')` gate |
-| `system_state upsert semantics`     | Cursor advance-in-place, TEXT coercion, the missing-key case                 |
-| `stellar_dead_letter table queries` | Replay-safe `tx_hash` primary key, the 24h `/status` window                  |
-| `unmatched_payments table queries`  | The un-refunded backlog query and its partial index                          |
-| `policy_decisions table queries`    | Per-key history scoping, the composite index plan, nullable `order_id`       |
+| Suite                               | What it pins                                                                                                                            |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema initialization`             | Every table and every `ALTER TABLE` column the migration chain declares                                                                 |
+| `schema_migrations bookkeeping`     | Versions 1..N recorded exactly once, no gaps, `applied_at` stamped                                                                      |
+| `system_state seed rows`            | `frozen` and `consecutive_failures` seeded to `'0'`                                                                                     |
+| `orders table queries`              | CRUD round-trips, column defaults, `NOT NULL` and `PRIMARY KEY` enforcement                                                             |
+| `orders aggregate queries`          | The exact `SUM(CASE WHEN ...)` shapes `/status` and `/v1/usage` depend on                                                               |
+| `api_keys table queries`            | `UNIQUE(key_hash)`, defaults for `mode` / `suspended` / `enabled`                                                                       |
+| `idempotency_keys table queries`    | Composite primary key `(key, api_key_id)`                                                                                               |
+| `foreign key enforcement`           | `ON DELETE CASCADE` for sessions and dashboards, dangling-reference rejects                                                             |
+| `unique and partial indexes`        | MPP challenge/receipt uniqueness, NULL-tolerant partial indexes, plan check                                                             |
+| `transaction semantics`             | Rollback on throw, rollback on constraint violation, commit on return                                                                   |
+| `pragma settings`                   | `foreign_keys`, `busy_timeout` on the shared handle                                                                                     |
+| `fresh on-disk instance`            | WAL mode, migration idempotency, seed rows, the schema-drift kill switch                                                                |
+| `users` / `auth_codes` / `sessions` | Uniqueness, role defaults, cascade on user deletion                                                                                     |
+| `audit_log` / `webhook_deliveries`  | Append-only ordering and the dashboard feed query                                                                                       |
+| `webhook_queue table queries`       | The retry scan predicate, the abandoned-delivery counter, the index plan                                                                |
+| `credential expiry semantics`       | The shared `used_at IS NULL AND datetime(expires_at) > datetime('now')` gate                                                            |
+| `system_state upsert semantics`     | Cursor advance-in-place, TEXT coercion, the missing-key case                                                                            |
+| `stellar_dead_letter table queries` | Replay-safe `tx_hash` primary key, the 24h `/status` window                                                                             |
+| `unmatched_payments table queries`  | The un-refunded backlog query and its partial index                                                                                     |
+| `policy_decisions table queries`    | Per-key history scoping, the composite index plan, nullable `order_id`                                                                  |
+| `agent_claims table queries`        | One-shot redemption: the lookup gate, the mark-used compare-and-swap, the payload wipe, rollback-keeps-it-redeemable, the prune         |
+| `approval_requests table queries`   | `status` default, the expiry sweep predicate, exactly-once expiry, the suspend cascade lookup                                           |
+| `alert_rules table queries`         | `config` defaulting to `'{}'`, `NOT NULL` on name/kind, the per-dashboard enabled filter                                                |
+| `alert_firings table queries`       | AUTOINCREMENT ordering under a same-second `fired_at`, the cooldown probe window and its rule scoping, history outliving a deleted rule |
+| `dashboards table queries`          | Column defaults, the restrict-not-cascade on `api_keys`, the cascade from `users`                                                       |
+| `admin_actions table queries`       | `NOT NULL` on `actor_email`, nullable `target_id` for system actions, JSON metadata round-trip                                          |
+| `mpp_challenges table queries`      | Exactly-once redemption, the `order_id` foreign key, the prune that spares settled receipts                                             |
 
 ## Three SQLite behaviours worth knowing before adding a test
 
@@ -82,6 +89,40 @@ better-sqlite3 binds a JS number as REAL, so
 not `'42'`. `sysStateInt` survives that through `parseInt`, but a reader
 comparing `=== '42'` would not — which is why the writers bind
 `String(value)`.
+
+## Two things to check before calling a new test done
+
+### Does it fail if the thing it describes breaks?
+
+Most of these tests inline the SQL the application runs rather than calling
+into it, because the subject is the schema, not the caller. That is fine, but
+it means a test can be green for a reason that has nothing to do with its
+name. Two examples from this suite, both found by deliberately breaking the
+code and re-running:
+
+- A cooldown-window test bound `datetime('now', '-30 minutes')` as a
+  **parameter** instead of interpolating it, so SQLite stored the literal
+  text. `datetime()` of that is NULL, every window comparison was NULL, and
+  the test passed no matter what the query did — the exact failure the
+  [`datetime()` section](#datetime-returns-null-and-null-comparisons-are-null)
+  above describes, this time in the test rather than the schema.
+- An index-plan test asserted on `idx_agent_claims_code` by name, but
+  `code TEXT NOT NULL UNIQUE` gives SQLite an implicit index for the same
+  lookup, so dropping the named one changed nothing. The assertion is now
+  "not a scan", which is what the query actually depends on.
+
+Deleting the index, dropping the predicate, or removing the constraint and
+watching the test go red takes under a minute and is the only way to know.
+
+### Does the assertion match what the test can reach?
+
+Where a statement's behaviour only appears under a race the test cannot open
+— the compare-and-swap inside `expireApprovalRequests`, for instance, which
+only matters if an operator decides between its `SELECT` and its `UPDATE` —
+say so in the test. Pin the statement's semantics directly against the
+database and leave the job-driven test claiming only what it covers. A
+comment that overstates the guarantee is worse than no comment, because the
+next reader stops looking.
 
 ## Why some tests spawn a child process
 
