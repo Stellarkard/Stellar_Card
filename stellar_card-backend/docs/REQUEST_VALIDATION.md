@@ -129,19 +129,24 @@ so an oversized URL is rejected before it can cost a resolution.
 
 ## Currently validated
 
-Every route that accepts caller-supplied input outside the operator surface now
-declares a schema. What remains hand-written is listed under
-[What is not schema-validated](#what-is-not-schema-validated).
+Every route that accepts caller-supplied input, plus the mutating half of the
+operator surface. What remains hand-written is listed under
+[What is still not schema-validated](#what-is-still-not-schema-validated).
 
-| Route                   | Body                                     | Query                                                               |
-| ----------------------- | ---------------------------------------- | ------------------------------------------------------------------- |
-| `POST /v1/orders`       | `amount_usdc`, `webhook_url`, `metadata` | —                                                                   |
-| `GET /v1/orders`        | —                                        | `status`, `since_created_at`, `since_updated_at`, `limit`, `offset` |
-| `POST /v1/agent/claim`  | `code`                                   | —                                                                   |
-| `POST /v1/agent/status` | `state`, `wallet_public_key`, `detail`   | —                                                                   |
-| `GET /v1/policy/check`  | —                                        | `amount`                                                            |
-| `POST /auth/login`      | `email`                                  | —                                                                   |
-| `POST /auth/verify`     | `email`, `code`                          | —                                                                   |
+| Route                                     | Body                                                                                                                                                               | Query                                                               |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| `POST /v1/orders`                         | `amount_usdc`, `webhook_url`, `metadata`                                                                                                                           | —                                                                   |
+| `GET /v1/orders`                          | —                                                                                                                                                                  | `status`, `since_created_at`, `since_updated_at`, `limit`, `offset` |
+| `POST /v1/agent/claim`                    | `code`                                                                                                                                                             | —                                                                   |
+| `POST /v1/agent/status`                   | `state`, `wallet_public_key`, `detail`                                                                                                                             | —                                                                   |
+| `GET /v1/policy/check`                    | —                                                                                                                                                                  | `amount`                                                            |
+| `POST /auth/login`                        | `email`                                                                                                                                                            | —                                                                   |
+| `POST /auth/verify`                       | `email`, `code`                                                                                                                                                    | —                                                                   |
+| `POST /dashboard/api-keys`                | `spend_limit_usdc`, `default_webhook_url`, `wallet_public_key`                                                                                                     | —                                                                   |
+| `PATCH /dashboard/api-keys/:id`           | the three above plus `policy_daily_limit_usdc`, `policy_single_tx_limit_usdc`, `policy_require_approval_above_usdc`, `policy_allowed_hours`, `policy_allowed_days` | —                                                                   |
+| `POST /dashboard/alert-rules`             | `notify_email`, `notify_webhook_url`                                                                                                                               | —                                                                   |
+| `PATCH /dashboard/alert-rules/:id`        | the two above plus `snoozedUntil`                                                                                                                                  | —                                                                   |
+| `POST /dashboard/webhook-deliveries/test` | `url`, `webhook_secret`                                                                                                                                            | —                                                                   |
 
 ### Behaviour this added
 
@@ -191,17 +196,77 @@ schema:
    object-level refinements only after every field parses, so a request with one
    invalid field still gets that field's error rather than the cross-field one.
 
-### What is not schema-validated
+## The operator surface
 
-- **The operator surface** (`/dashboard`, `/internal`, `/dashboard/platform`).
-  These sit behind session auth and a shared rate limiter, and their handlers
-  carry hardening from earlier audit passes whose properties are not always
-  obvious from a schema alone. Migrating them is follow-up work that deserves
-  its own review rather than a blanket pass.
+`/dashboard`, `/internal` and `/dashboard/platform` sit behind session auth and a
+shared rate limiter, which is why they were the last surface still validating by
+hand. The reason they could not stay that way is `src/policy.js`.
+
+### Why the write boundary has to be at least as strict as `policy.js`
+
+`checkPolicy` fails **closed** on a stored policy value it cannot parse: a
+corrupt `policy_allowed_hours` or `policy_allowed_days` blocks every order the
+agent attempts, with `policy_corrupt_hours` / `policy_corrupt_days`. Its own
+comment says "policy is validated at storage time by dashboard.js so a malformed
+value in the DB is a bug" — and the guards on the write side were looser than
+that reader in three places, so the bug was reachable straight through the
+dashboard UI:
+
+| Value                             | Old write guard                                                                               | What `policy.js` does with it                            |
+| --------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `{"start":"99:99","end":"17:00"}` | `/^\d{2}:\d{2}$/` and nothing else — passes                                                   | Range-checks 0-23 / 0-59, throws                         |
+| `["x"]`, `[null]`, `[1.5]`        | `d.some(n => n < 0 \|\| n > 6)` — passes, because both comparisons are false for a non-number | Requires `Number.isInteger`, throws                      |
+| `"10abc"` for any policy amount   | `isNaN(parseFloat(val))` — reads it as 10                                                     | `parseFloat` gives 10; the raw string is what was stored |
+
+In each case the operator saved a policy the dashboard accepted and the agent
+silently stopped being able to order anything. Validating exactly what
+`policy.js` will later demand is the point of the migration.
+
+### What the operator schemas added beyond that
+
+- **`default_webhook_url` is length-capped** at `MAX_WEBHOOK_URL_CHARS`, the same
+  bound `/v1/orders` uses for `webhook_url`. The handler's `assertSafeUrl()`
+  resolves DNS, so an unbounded URL used to reach a resolution.
+- **`notify_email` and `notify_webhook_url` on alert rules are validated at all.**
+  `alerts.createRule` / `updateRule` bind them straight into the statement, so a
+  non-string arrived at better-sqlite3 as an unbindable value and came back as
+  the driver's own `TypeError` text wrapped in a 400.
+- **`snoozedUntil` must parse.** It stored fine before and the evaluator compares
+  the column against a timestamp, so an unparseable value left the rule either
+  permanently snoozed or never snoozed, with nothing to say which.
+- **`POST /dashboard/webhook-deliveries/test` answers 400, not 502.** `url` was
+  checked for truthiness only, so anything else went to `fireWebhook` →
+  `assertSafeUrl` and surfaced as `502 delivery_failed` — the status class for
+  "your endpoint is broken", not "your request is".
+
+`kind` and `config` on an alert rule stay in `lib/alerts.js`, which owns the
+per-kind config schema. That is domain validation, not shape validation, and it
+belongs with the module that knows the kinds.
+
+### What is still not schema-validated
+
+- **`enabled` on `PATCH /dashboard/api-keys/:id`.** The handler does
+  `enabled ? 1 : 0`, so `"false"` and `{}` both mean true. Tightening it to a
+  boolean is a wire change for any client currently sending `1`, and it is not
+  in the class of bug above — nothing downstream fails closed on it.
+- **The read endpoints on the operator surface.** Their `limit` / `offset` /
+  filter handling is lenient by design and clamped at the query, which is what
+  protects the database. Worth a pass, but a separate one.
+- **`/internal` and `/dashboard/platform`.** `POST /dashboard/platform/unfreeze`
+  is the only mutating route between them; the rest are reads.
 - **`POST /vcc-callback`.** It is HMAC-authenticated over the raw request body.
   Validation runs after `express.json()` but the signature is computed over
   `req.rawBody`, so shape-checking the parsed body adds nothing the signature
   check does not already guarantee about provenance.
+
+### One ordering change
+
+`PATCH /dashboard/api-keys/:id` checks the body shape before the ownership
+lookup, because `validate()` is middleware. A malformed PATCH against an id the
+dashboard does not own now answers 400 rather than 404. That matches every `/v1`
+route and leaks nothing: the 400 is derived entirely from the caller's own body.
+`nothing_to_update` stays in the handler, after the ownership check, so an empty
+body against an unknown id still gets its 404.
 
 ## Adding validation to a route
 
@@ -224,4 +289,7 @@ schema:
   (circular, throwing `toJSON`, BigInt, multi-byte overflow).
 - `test/integration/request-validation.test.js` — every validated route over real
   HTTP, asserting each `error` code the API promises still comes back unchanged,
-  plus the behaviour the schemas added.
+  plus the behaviour the schemas added. The operator-surface suites name each
+  test `keeps …` (a code clients depend on), `adds: …` (a gap the schema closes,
+  one per row of the table above), or `still …` (behaviour deliberately left
+  alone, pinned so it stays a decision rather than a surprise).

@@ -15,7 +15,15 @@ require('../helpers/env');
 
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
-const { request, createTestKey, seedOrder, resetDb } = require('../helpers/app');
+const { v4: uuidv4 } = require('uuid');
+const {
+  request,
+  db,
+  createTestKey,
+  createTestSession,
+  seedOrder,
+  resetDb,
+} = require('../helpers/app');
 
 // POST /v1/orders reaches an XLM price lookup only after validation
 // passes; every request in this file is expected to fail validation, so
@@ -515,5 +523,361 @@ describe('GET /v1/policy/check — query validation contract', () => {
     const res = await get('?amount=5&amount=abc');
     assert.equal(res.status, 400, 'a repeated key parses as an array, which is not a valid amount');
     assert.equal(res.body.error, 'invalid_amount');
+  });
+});
+
+// ── The operator surface ───────────────────────────────────────────────
+//
+// /dashboard sits behind session auth and a shared rate limiter, which is
+// why it was the last surface still validating by hand. The reason it
+// could not stay that way is src/policy.js: it fails CLOSED on a stored
+// policy value it cannot parse, blocking every order the agent attempts.
+// Its own comment says "policy is validated at storage time by
+// dashboard.js so a malformed value in the DB is a bug" — and the guards
+// these schemas replace were looser than that reader in three places, so
+// the bug was reachable straight through the dashboard UI.
+//
+// Each `adds:` test below is one of those. They assert the write boundary
+// now rejects exactly what the read boundary would later refuse to parse.
+
+describe('/dashboard/api-keys — body validation contract', () => {
+  /** @type {string} */ let auth;
+
+  beforeEach(() => {
+    resetDb();
+    const { token, userId } = createTestSession({
+      email: 'validation-owner@stellar_card.test',
+      role: 'owner',
+    });
+    db.prepare(`INSERT INTO dashboards (id, user_id, name) VALUES (?, ?, ?)`).run(
+      uuidv4(),
+      userId,
+      'Primary',
+    );
+    auth = `Bearer ${token}`;
+  });
+
+  /** Create a key and return its id, so PATCH has something to aim at. */
+  async function seedKey() {
+    const res = await request
+      .post('/dashboard/api-keys')
+      .set('Authorization', auth)
+      .send({ label: 'validation-target' });
+    assert.equal(res.status, 201, 'seeding a key should succeed');
+    return res.body.id;
+  }
+
+  function patch(id, body) {
+    return request.patch(`/dashboard/api-keys/${id}`).set('Authorization', auth).send(body);
+  }
+
+  // ── The codes clients depend on ──────────────────────────────────────
+
+  it('keeps invalid_spend_limit on create', async () => {
+    const res = await request
+      .post('/dashboard/api-keys')
+      .set('Authorization', auth)
+      .send({ spend_limit_usdc: 'not-a-number' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_spend_limit');
+  });
+
+  it('keeps invalid_webhook_url for a non-HTTPS default_webhook_url', async () => {
+    const res = await request
+      .post('/dashboard/api-keys')
+      .set('Authorization', auth)
+      .send({ default_webhook_url: 'http://insecure.example.com' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_webhook_url');
+  });
+
+  it('keeps invalid_wallet_public_key for a bad Stellar checksum', async () => {
+    // Correct length and charset, wrong checksum — a shape-only regex
+    // would have stored it.
+    const res = await request
+      .post('/dashboard/api-keys')
+      .set('Authorization', auth)
+      .send({ wallet_public_key: `G${'A'.repeat(55)}` });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_wallet_public_key');
+  });
+
+  it('keeps invalid_policy on PATCH for every policy field', async () => {
+    const id = await seedKey();
+    for (const field of [
+      'policy_daily_limit_usdc',
+      'policy_single_tx_limit_usdc',
+      'policy_require_approval_above_usdc',
+      'policy_allowed_hours',
+      'policy_allowed_days',
+    ]) {
+      const res = await patch(id, { [field]: 'definitely-not-valid' });
+      assert.equal(res.status, 400, field);
+      assert.equal(res.body.error, 'invalid_policy', field);
+    }
+  });
+
+  it('keeps nothing_to_update for a PATCH that names no known field', async () => {
+    const id = await seedKey();
+    const res = await patch(id, { unrecognised_field: 'x' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'nothing_to_update');
+  });
+
+  it('still 404s a PATCH against a key this dashboard does not own', async () => {
+    const res = await patch(uuidv4(), { label: 'nope' });
+    assert.equal(res.status, 404);
+  });
+
+  it('reports the first invalid field in declaration order', async () => {
+    // Zod reports object issues in schema order and validate() surfaces
+    // the first, which is what preserves the error a multiply-invalid
+    // body used to get from the sequential guards.
+    const id = await seedKey();
+    const res = await patch(id, {
+      spend_limit_usdc: 'bad',
+      default_webhook_url: 'http://nope.example.com',
+      policy_allowed_days: '[9]',
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_spend_limit');
+  });
+
+  // ── Behaviour the schemas add ────────────────────────────────────────
+
+  it('adds: rejects a policy amount parseFloat would silently truncate', async () => {
+    // The old check was `isNaN(parseFloat(val))`. parseFloat('10abc') is
+    // 10, so this passed and the raw string '10abc' was what got stored.
+    const id = await seedKey();
+    const res = await patch(id, { policy_daily_limit_usdc: '10abc' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_policy');
+  });
+
+  it('adds: rejects an out-of-range hour that policy.js would fail closed on', async () => {
+    // The old check was the shape regex and nothing more, so hour 99
+    // stored fine. policy.js range-checks 0-23 / 0-59 when it reads the
+    // column back and throws, blocking every order with
+    // policy_corrupt_hours.
+    const id = await seedKey();
+    for (const hours of [
+      '{"start":"99:99","end":"17:00"}',
+      '{"start":"09:00","end":"24:00"}',
+      '{"start":"09:00","end":"09:60"}',
+      '["09:00","17:00"]',
+    ]) {
+      const res = await patch(id, { policy_allowed_hours: hours });
+      assert.equal(res.status, 400, hours);
+      assert.equal(res.body.error, 'invalid_policy', hours);
+    }
+  });
+
+  it('adds: rejects a non-integer allowed day that policy.js would fail closed on', async () => {
+    // The old check was `d.some((n) => n < 0 || n > 6)`, and for a
+    // non-number both comparisons are false — so every value here passed
+    // the write boundary. policy.js requires Number.isInteger and throws,
+    // blocking every order with policy_corrupt_days.
+    const id = await seedKey();
+    for (const days of ['["x"]', '[null]', '[1.5]', '[{}]', '[0,1,"Friday"]']) {
+      const res = await patch(id, { policy_allowed_days: days });
+      assert.equal(res.status, 400, days);
+      assert.equal(res.body.error, 'invalid_policy', days);
+    }
+  });
+
+  it('adds: rejects an oversized webhook URL before it costs a DNS lookup', async () => {
+    // The handler's assertSafeUrl() resolves DNS. The cap runs in the
+    // schema, so an unbounded URL never reaches it. Same cap the /v1
+    // order surface applies to webhook_url.
+    const res = await request
+      .post('/dashboard/api-keys')
+      .set('Authorization', auth)
+      .send({ default_webhook_url: `https://example.com/${'a'.repeat(2100)}` });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_webhook_url');
+    assert.match(res.body.message, /at most 2048 characters/);
+  });
+
+  it('adds: rejects a non-object body instead of destructuring it', async () => {
+    const res = await request
+      .post('/dashboard/api-keys')
+      .set('Authorization', auth)
+      .set('Content-Type', 'application/json')
+      .send('[1,2,3]');
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_request');
+  });
+
+  // ── What is deliberately unchanged ───────────────────────────────────
+
+  it('still accepts a valid policy on PATCH', async () => {
+    const id = await seedKey();
+    const res = await patch(id, {
+      policy_daily_limit_usdc: '500.00',
+      policy_single_tx_limit_usdc: '100',
+      policy_allowed_hours: '{"start":"09:00","end":"17:00"}',
+      policy_allowed_days: '[1,2,3,4,5]',
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+  });
+
+  it('still treats an empty string as "clear this column", not as invalid', async () => {
+    const id = await seedKey();
+    const res = await patch(id, { policy_allowed_days: '', default_webhook_url: '' });
+    assert.equal(res.status, 200);
+  });
+
+  it('still drops the policy_* fields a create sends, rather than rejecting them', async () => {
+    // POST does not persist the policy columns and never validated them.
+    // Turning that into a 400 is a contract change and is not part of
+    // this one — pinned so it stays a decision rather than a surprise.
+    const res = await request
+      .post('/dashboard/api-keys')
+      .set('Authorization', auth)
+      .send({ label: 'create-with-policy', policy_allowed_days: 'garbage' });
+    assert.equal(res.status, 201);
+  });
+});
+
+describe('/dashboard/alert-rules — notification target validation', () => {
+  /** @type {string} */ let auth;
+
+  beforeEach(() => {
+    resetDb();
+    const { token, userId } = createTestSession({
+      email: 'alert-owner@stellar_card.test',
+      role: 'owner',
+    });
+    db.prepare(`INSERT INTO dashboards (id, user_id, name) VALUES (?, ?, ?)`).run(
+      uuidv4(),
+      userId,
+      'Primary',
+    );
+    auth = `Bearer ${token}`;
+  });
+
+  function create(body) {
+    return request.post('/dashboard/alert-rules').set('Authorization', auth).send(body);
+  }
+
+  // notify_email and notify_webhook_url had no validation anywhere:
+  // createRule/updateRule bind them straight into the statement, so a
+  // non-string reached better-sqlite3 as an unbindable value and came
+  // back as the driver's own TypeError text.
+  it('adds: rejects a non-string notify_email', async () => {
+    const res = await create({ name: 'r', kind: 'failure_rate_high', notify_email: {} });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_rule');
+  });
+
+  it('adds: rejects a notify_email that is not an address', async () => {
+    const res = await create({ name: 'r', kind: 'failure_rate_high', notify_email: 'nope' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_rule');
+  });
+
+  it('adds: rejects a non-HTTPS notify_webhook_url', async () => {
+    const res = await create({
+      name: 'r',
+      kind: 'failure_rate_high',
+      notify_webhook_url: 'http://insecure.example.com',
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_rule');
+  });
+
+  it('adds: rejects a snoozedUntil that is not a timestamp', async () => {
+    // Stored fine before, and the evaluator compares the column against
+    // a timestamp — so the rule ended up either permanently snoozed or
+    // never snoozed, with nothing to say which.
+    const created = await create({ name: 'snoozy', kind: 'failure_rate_high' });
+    assert.equal(created.status, 201);
+    const res = await request
+      .patch(`/dashboard/alert-rules/${created.body.rule.id}`)
+      .set('Authorization', auth)
+      .send({ snoozedUntil: 'tomorrow-ish' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'update_failed');
+  });
+
+  it('keeps missing_fields when name or kind is absent', async () => {
+    for (const body of [{ kind: 'failure_rate_high' }, { name: 'r' }]) {
+      const res = await create(body);
+      assert.equal(res.status, 400);
+      assert.equal(res.body.error, 'missing_fields');
+    }
+  });
+
+  it('still accepts a rule with valid notification targets', async () => {
+    const res = await create({
+      name: 'valid-rule',
+      kind: 'failure_rate_high',
+      notify_email: 'ops@example.com',
+      notify_webhook_url: 'https://hooks.example.com/alert',
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.rule.notify_email, 'ops@example.com');
+  });
+
+  it('still accepts absent and null notification targets', async () => {
+    const res = await create({
+      name: 'no-targets',
+      kind: 'failure_rate_high',
+      notify_email: null,
+    });
+    assert.equal(res.status, 201);
+  });
+});
+
+describe('POST /dashboard/webhook-deliveries/test — url validation', () => {
+  /** @type {string} */ let auth;
+
+  beforeEach(() => {
+    resetDb();
+    const { token, userId } = createTestSession({
+      email: 'webhook-owner@stellar_card.test',
+      role: 'owner',
+    });
+    db.prepare(`INSERT INTO dashboards (id, user_id, name) VALUES (?, ?, ?)`).run(
+      uuidv4(),
+      userId,
+      'Primary',
+    );
+    auth = `Bearer ${token}`;
+  });
+
+  function post(body) {
+    return request.post('/dashboard/webhook-deliveries/test').set('Authorization', auth).send(body);
+  }
+
+  it('keeps missing_url for an absent url', async () => {
+    const res = await post({});
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'missing_url');
+  });
+
+  it('adds: answers 400 rather than 502 for a malformed url', async () => {
+    // `url` was checked for truthiness only, so anything else went to
+    // fireWebhook → assertSafeUrl and surfaced as `502 delivery_failed`
+    // — the status class for "your endpoint is broken", not "your
+    // request is".
+    for (const url of ['not-a-url', 42, { href: 'https://example.com' }]) {
+      const res = await post({ url });
+      assert.equal(res.status, 400, String(url));
+      assert.equal(res.body.error, 'invalid_url', String(url));
+    }
+  });
+
+  it('adds: rejects an oversized url before it costs a DNS lookup', async () => {
+    const res = await post({ url: `https://example.com/${'a'.repeat(2100)}` });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_url');
+  });
+
+  it('adds: rejects a non-string webhook_secret', async () => {
+    const res = await post({ url: 'https://example.com/hook', webhook_secret: {} });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_webhook_secret');
   });
 });

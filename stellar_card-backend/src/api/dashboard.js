@@ -4,11 +4,15 @@
 // Any logged-in user can access these; data is filtered by their dashboard_id.
 
 const { Router } = require('express');
+const { z } = require('zod');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
+const { StrKey } = require('@stellar/stellar-sdk');
 /** @type {any} */ const db = require('../db');
 const { enqueueWebhook, fireWebhook: fireWebhookRaw } = require('../fulfillment');
+const { validate } = require('../lib/validate');
+const { MAX_WEBHOOK_URL_CHARS } = require('./orders');
 const { assertSafeUrl } = require('../lib/ssrf');
 const { recordDecision } = require('../policy');
 const { usdToXlm } = require('../payments/xlm-price');
@@ -313,89 +317,206 @@ router.get('/orders', (req, res) => {
 
 // ── API Keys ──────────────────────────────────────────────────────────────────
 
-function validateApiKeyFields({
-  spend_limit_usdc,
-  default_webhook_url,
-  wallet_public_key,
-  policy_daily_limit_usdc,
-  policy_single_tx_limit_usdc,
-  policy_require_approval_above_usdc,
-  policy_allowed_hours,
-  policy_allowed_days,
-}) {
-  if (spend_limit_usdc !== undefined && spend_limit_usdc !== null) {
-    if (!/^\d+(\.\d+)?$/.test(String(spend_limit_usdc)) || parseFloat(spend_limit_usdc) <= 0) {
-      return {
-        error: 'invalid_spend_limit',
-        message: 'spend_limit_usdc must be a positive decimal (e.g. "100.00")',
-      };
-    }
-  }
-  if (
-    default_webhook_url !== undefined &&
-    default_webhook_url !== null &&
-    default_webhook_url !== ''
-  ) {
-    try {
-      const u = new URL(default_webhook_url);
-      if (u.protocol !== 'https:')
-        return { error: 'invalid_webhook_url', message: 'default_webhook_url must use HTTPS' };
-    } catch {
-      return { error: 'invalid_webhook_url', message: 'default_webhook_url must be a valid URL' };
-    }
-  }
-  if (wallet_public_key !== undefined && wallet_public_key !== null && wallet_public_key !== '') {
-    const { StrKey } = require('@stellar/stellar-sdk');
-    if (!StrKey.isValidEd25519PublicKey(wallet_public_key)) {
-      return {
-        error: 'invalid_wallet_public_key',
-        message: 'wallet_public_key must be a valid Stellar G-address (56 chars, valid checksum)',
-      };
-    }
-  }
-  for (const [field, val] of [
-    ['policy_daily_limit_usdc', policy_daily_limit_usdc],
-    ['policy_single_tx_limit_usdc', policy_single_tx_limit_usdc],
-    ['policy_require_approval_above_usdc', policy_require_approval_above_usdc],
-  ]) {
-    if (val !== undefined && val !== null && val !== '') {
-      if (isNaN(parseFloat(val)) || parseFloat(val) < 0) {
-        return { error: 'invalid_policy', message: `${field} must be a non-negative number` };
-      }
-    }
-  }
-  if (
-    policy_allowed_hours !== undefined &&
-    policy_allowed_hours !== null &&
-    policy_allowed_hours !== ''
-  ) {
-    try {
-      const h = JSON.parse(policy_allowed_hours);
-      if (!/^\d{2}:\d{2}$/.test(h.start) || !/^\d{2}:\d{2}$/.test(h.end)) throw new Error();
-    } catch {
-      return {
-        error: 'invalid_policy',
-        message: 'policy_allowed_hours must be JSON like {"start":"09:00","end":"17:00"}',
-      };
-    }
-  }
-  if (
-    policy_allowed_days !== undefined &&
-    policy_allowed_days !== null &&
-    policy_allowed_days !== ''
-  ) {
-    try {
-      const d = JSON.parse(policy_allowed_days);
-      if (!Array.isArray(d) || d.some((n) => n < 0 || n > 6)) throw new Error();
-    } catch {
-      return {
-        error: 'invalid_policy',
-        message: 'policy_allowed_days must be JSON array of day numbers 0–6 (e.g. [1,2,3,4,5])',
-      };
-    }
-  }
-  return null;
+// ── Request schemas ────────────────────────────────────────────────────
+//
+// These replace a shared `validateApiKeyFields()` preamble that both
+// POST and PATCH called by hand. See docs/REQUEST_VALIDATION.md for the
+// conventions; the two that matter most here:
+//
+//   * Absent is not null, and on this surface neither is `''`. PATCH
+//     builds a partial UPDATE, so an absent key means "leave the column
+//     alone" while `null` or `''` means "clear it". A `z.string()
+//     .nullish()` would collapse the three, so every field is declared
+//     with `z.unknown()` plus a refinement that returns early on the
+//     unset forms — which is what `optionalText()` below encapsulates.
+//   * Declaration order is the wire contract. Zod reports object issues
+//     in schema order and validate() surfaces the first one, so these
+//     are declared in the order the sequential guards checked them:
+//     spend_limit → webhook_url → wallet → the three policy amounts →
+//     allowed_hours → allowed_days. A multiply-invalid body gets the
+//     same error it got before.
+//
+// ── Why the write boundary has to be at least as strict as policy.js ──
+//
+// src/policy.js fails CLOSED on a stored policy value it cannot parse:
+// a corrupt `policy_allowed_hours` or `policy_allowed_days` blocks every
+// order the agent attempts, with `policy_corrupt_hours` /
+// `policy_corrupt_days`. Its comment says "policy is validated at
+// storage time by dashboard.js so a malformed value in the DB is a bug"
+// — and the guards this replaces were looser than the reader in three
+// places, so the bug was reachable through the dashboard UI:
+//
+//   * `{"start":"99:99","end":"17:00"}` — the old check was the shape
+//     regex /^\d{2}:\d{2}$/ and nothing else, so hour 99 stored fine.
+//     policy.js range-checks hours 0-23 and minutes 0-59 and throws.
+//   * `["x"]`, `[null]`, `[1.5]` — the old check was
+//     `d.some(n => n < 0 || n > 6)`, and for a non-number both
+//     comparisons are false, so the entry passed. policy.js requires
+//     Number.isInteger and throws.
+//   * `"10abc"` for any policy amount — the old check was
+//     `isNaN(parseFloat(val))`, which reads that as 10 and accepts it.
+//     The raw string is what got stored.
+//
+// In each case the operator saved a policy the dashboard accepted and
+// the agent silently stopped being able to order anything. Validating
+// exactly what policy.js will later demand is the point.
+
+/**
+ * Wrap a field check in this surface's "unset" convention.
+ *
+ * Returns a Zod field that ignores `undefined` (absent), `null` and `''`
+ * (both meaning "clear the column") and otherwise runs `check`, which
+ * reports by returning a message string or `null` to accept.
+ *
+ * @param {(value: unknown) => string | null} check
+ */
+function optionalText(check) {
+  return z.unknown().superRefine((value, ctx) => {
+    if (value === undefined || value === null || value === '') return;
+    const message = check(value);
+    if (message) ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  });
 }
+
+// Non-negative decimal, as a string. Deliberately anchored and
+// deliberately not parseFloat: parseFloat('10abc') is 10, so the guard
+// this replaces accepted a value it then stored verbatim.
+const NON_NEGATIVE_DECIMAL = /^\d+(\.\d+)?$/;
+
+/** @param {string} field */
+function policyAmount(field) {
+  return optionalText((value) => {
+    if (typeof value !== 'string' && typeof value !== 'number') {
+      return `${field} must be a non-negative number`;
+    }
+    return NON_NEGATIVE_DECIMAL.test(String(value))
+      ? null
+      : `${field} must be a non-negative number`;
+  });
+}
+
+const ALLOWED_HOURS_MESSAGE =
+  'policy_allowed_hours must be JSON like {"start":"09:00","end":"17:00"}';
+const ALLOWED_DAYS_MESSAGE =
+  'policy_allowed_days must be JSON array of day numbers 0–6 (e.g. [1,2,3,4,5])';
+
+// The same HH:MM contract policy.js enforces when it reads the column
+// back: two digits, a colon, two digits, hour 0-23, minute 0-59.
+function isHHMM(value) {
+  if (typeof value !== 'string' || !/^\d{2}:\d{2}$/.test(value)) return false;
+  const [h, m] = value.split(':').map((s) => parseInt(s, 10));
+  return h >= 0 && h <= 23 && m >= 0 && m <= 59;
+}
+
+const ApiKeyPolicyFields = {
+  spend_limit_usdc: z.unknown().superRefine((value, ctx) => {
+    // Unlike the fields below, the guard this replaces treated `''` as a
+    // value to validate rather than as "unset", and `''` fails the
+    // pattern. Preserved: an empty spend_limit_usdc is a 400, not a clear.
+    if (value === undefined || value === null) return;
+    const ok =
+      (typeof value === 'string' || typeof value === 'number') &&
+      NON_NEGATIVE_DECIMAL.test(String(value)) &&
+      parseFloat(String(value)) > 0;
+    if (!ok) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'spend_limit_usdc must be a positive decimal (e.g. "100.00")',
+      });
+    }
+  }),
+
+  default_webhook_url: optionalText((value) => {
+    if (typeof value !== 'string') return 'default_webhook_url must be a valid URL';
+    // The length cap runs before the URL parse and, more to the point,
+    // before the handler's assertSafeUrl() — which resolves DNS. An
+    // unbounded URL used to reach that resolution. Same cap the /v1
+    // order surface applies to webhook_url.
+    if (value.length > MAX_WEBHOOK_URL_CHARS) {
+      return `default_webhook_url must be at most ${MAX_WEBHOOK_URL_CHARS} characters`;
+    }
+    let parsed;
+    try {
+      parsed = new URL(value);
+    } catch {
+      return 'default_webhook_url must be a valid URL';
+    }
+    return parsed.protocol === 'https:' ? null : 'default_webhook_url must use HTTPS';
+  }),
+
+  wallet_public_key: optionalText((value) =>
+    typeof value === 'string' && StrKey.isValidEd25519PublicKey(value)
+      ? null
+      : 'wallet_public_key must be a valid Stellar G-address (56 chars, valid checksum)',
+  ),
+
+  policy_daily_limit_usdc: policyAmount('policy_daily_limit_usdc'),
+  policy_single_tx_limit_usdc: policyAmount('policy_single_tx_limit_usdc'),
+  policy_require_approval_above_usdc: policyAmount('policy_require_approval_above_usdc'),
+
+  policy_allowed_hours: optionalText((value) => {
+    if (typeof value !== 'string') return ALLOWED_HOURS_MESSAGE;
+    let parsed;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return ALLOWED_HOURS_MESSAGE;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return ALLOWED_HOURS_MESSAGE;
+    }
+    return isHHMM(parsed.start) && isHHMM(parsed.end) ? null : ALLOWED_HOURS_MESSAGE;
+  }),
+
+  policy_allowed_days: optionalText((value) => {
+    if (typeof value !== 'string') return ALLOWED_DAYS_MESSAGE;
+    let parsed;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return ALLOWED_DAYS_MESSAGE;
+    }
+    if (!Array.isArray(parsed)) return ALLOWED_DAYS_MESSAGE;
+    const everyDayValid = parsed.every(
+      (entry) => Number.isInteger(entry) && entry >= 0 && entry <= 6,
+    );
+    return everyDayValid ? null : ALLOWED_DAYS_MESSAGE;
+  }),
+};
+
+// Every field maps to the `error` code the endpoint already returned, so
+// the wire contract is unchanged. `invalid_policy` covers all five policy
+// fields, which is what the loop it replaces did.
+const API_KEY_ERROR_CODES = {
+  spend_limit_usdc: 'invalid_spend_limit',
+  default_webhook_url: 'invalid_webhook_url',
+  wallet_public_key: 'invalid_wallet_public_key',
+  policy_daily_limit_usdc: 'invalid_policy',
+  policy_single_tx_limit_usdc: 'invalid_policy',
+  policy_require_approval_above_usdc: 'invalid_policy',
+  policy_allowed_hours: 'invalid_policy',
+  policy_allowed_days: 'invalid_policy',
+};
+
+// POST validates only the three fields it persists. The policy_* columns
+// are not part of the INSERT — a create that sends them has always had
+// them silently dropped, and turning that into a 400 (or into a
+// persisted policy) is a contract change that belongs in its own commit.
+const validateCreateApiKey = validate({
+  body: z
+    .object({
+      spend_limit_usdc: ApiKeyPolicyFields.spend_limit_usdc,
+      default_webhook_url: ApiKeyPolicyFields.default_webhook_url,
+      wallet_public_key: ApiKeyPolicyFields.wallet_public_key,
+    })
+    .passthrough(),
+  errorCodes: API_KEY_ERROR_CODES,
+});
+
+const validateUpdateApiKey = validate({
+  body: z.object(ApiKeyPolicyFields).passthrough(),
+  errorCodes: API_KEY_ERROR_CODES,
+});
 
 // GET /dashboard/api-keys
 router.get('/api-keys', requirePermission('agent:read'), (req, res) => {
@@ -428,32 +549,32 @@ router.get('/api-keys', requirePermission('agent:read'), (req, res) => {
 });
 
 // POST /dashboard/api-keys — create a new agent API key
-router.post('/api-keys', requirePermission('agent:create'), async (req, res) => {
-  const { spend_limit_usdc, default_webhook_url, wallet_public_key } = req.body;
-  // Labels are cosmetic — 100 chars is more than enough for any real
-  // agent name, and the cap stops a caller from stuffing the column
-  // with a multi-MB blob that then rides along in every dashboard read.
-  const label = shortString(req.body.label, 100);
-  const validationErr = validateApiKeyFields(
-    /** @type {any} */ ({ spend_limit_usdc, default_webhook_url, wallet_public_key }),
-  );
-  if (validationErr) return res.status(400).json(validationErr);
-  if (default_webhook_url) {
-    try {
-      await assertSafeUrl(default_webhook_url);
-    } catch (err) {
-      return res.status(400).json({ error: 'invalid_webhook_url', message: err.message });
+router.post(
+  '/api-keys',
+  requirePermission('agent:create'),
+  validateCreateApiKey,
+  async (req, res) => {
+    const { spend_limit_usdc, default_webhook_url, wallet_public_key } = req.body;
+    // Labels are cosmetic — 100 chars is more than enough for any real
+    // agent name, and the cap stops a caller from stuffing the column
+    // with a multi-MB blob that then rides along in every dashboard read.
+    const label = shortString(req.body.label, 100);
+    if (default_webhook_url) {
+      try {
+        await assertSafeUrl(default_webhook_url);
+      } catch (err) {
+        return res.status(400).json({ error: 'invalid_webhook_url', message: err.message });
+      }
     }
-  }
 
-  const id = uuidv4();
-  const rawKey = `stellar_card_${crypto.randomBytes(24).toString('hex')}`;
-  const keyPrefix = rawKey.slice(9, 21);
-  const keyHash = await bcrypt.hash(rawKey, 10);
-  const webhookSecret = `whsec_${crypto.randomBytes(32).toString('hex')}`;
+    const id = uuidv4();
+    const rawKey = `stellar_card_${crypto.randomBytes(24).toString('hex')}`;
+    const keyPrefix = rawKey.slice(9, 21);
+    const keyHash = await bcrypt.hash(rawKey, 10);
+    const webhookSecret = `whsec_${crypto.randomBytes(32).toString('hex')}`;
 
-  db.prepare(
-    `
+    db.prepare(
+      `
     INSERT INTO api_keys
       (id, key_hash, key_prefix, label, spend_limit_usdc, webhook_secret,
        default_webhook_url, wallet_public_key, dashboard_id)
@@ -461,198 +582,199 @@ router.post('/api-keys', requirePermission('agent:create'), async (req, res) => 
       (@id, @keyHash, @keyPrefix, @label, @spend_limit_usdc, @webhookSecret,
        @default_webhook_url, @wallet_public_key, @dashboard_id)
   `,
-  ).run({
-    id,
-    keyHash,
-    keyPrefix,
-    label: label || null,
-    spend_limit_usdc: spend_limit_usdc || null,
-    webhookSecret,
-    default_webhook_url: default_webhook_url || null,
-    wallet_public_key: wallet_public_key || null,
-    dashboard_id: req.dashboard.id,
-  });
+    ).run({
+      id,
+      keyHash,
+      keyPrefix,
+      label: label || null,
+      spend_limit_usdc: spend_limit_usdc || null,
+      webhookSecret,
+      default_webhook_url: default_webhook_url || null,
+      wallet_public_key: wallet_public_key || null,
+      dashboard_id: req.dashboard.id,
+    });
 
-  // Mint a one-time claim code for the agent-facing onboarding flow.
-  // The agent runs `npx stellar_card onboard --claim <code>` and the CLI
-  // trades the code for the real api_key via POST /v1/agent/claim —
-  // so the raw api_key never has to live in a pasted snippet (or the
-  // agent's conversation transcript).
-  //
-  // Adversarial audit F1-claim-code: store a SHA256 of the code rather
-  // than the raw value. The code column previously held plaintext, so
-  // a DB dump within the 10-min TTL window would expose every live
-  // claim verbatim. This now matches the pattern already used for
-  // auth_codes.code_hash and sessions.token_hash — the server stores
-  // only a hash, verification hashes on the way in, and the UNIQUE
-  // constraint still works because both sides hash identically.
-  const { hashClaimCode } = require('../lib/claim-hash');
-  const claimId = uuidv4();
-  const claimCode = `c402_${crypto.randomBytes(24).toString('hex')}`;
-  const claimTtlMs = 10 * 60 * 1000; // 10 min — long enough to paste + run, short enough to matter
-  const claimExpiresAt = new Date(Date.now() + claimTtlMs).toISOString();
-  const secretBox = require('../lib/secret-box');
-  const sealedPayload = secretBox.seal(
-    JSON.stringify({ api_key: rawKey, webhook_secret: webhookSecret }),
-  );
-  db.prepare(
-    `
+    // Mint a one-time claim code for the agent-facing onboarding flow.
+    // The agent runs `npx stellar_card onboard --claim <code>` and the CLI
+    // trades the code for the real api_key via POST /v1/agent/claim —
+    // so the raw api_key never has to live in a pasted snippet (or the
+    // agent's conversation transcript).
+    //
+    // Adversarial audit F1-claim-code: store a SHA256 of the code rather
+    // than the raw value. The code column previously held plaintext, so
+    // a DB dump within the 10-min TTL window would expose every live
+    // claim verbatim. This now matches the pattern already used for
+    // auth_codes.code_hash and sessions.token_hash — the server stores
+    // only a hash, verification hashes on the way in, and the UNIQUE
+    // constraint still works because both sides hash identically.
+    const { hashClaimCode } = require('../lib/claim-hash');
+    const claimId = uuidv4();
+    const claimCode = `c402_${crypto.randomBytes(24).toString('hex')}`;
+    const claimTtlMs = 10 * 60 * 1000; // 10 min — long enough to paste + run, short enough to matter
+    const claimExpiresAt = new Date(Date.now() + claimTtlMs).toISOString();
+    const secretBox = require('../lib/secret-box');
+    const sealedPayload = secretBox.seal(
+      JSON.stringify({ api_key: rawKey, webhook_secret: webhookSecret }),
+    );
+    db.prepare(
+      `
     INSERT INTO agent_claims (id, code, api_key_id, sealed_payload, expires_at)
     VALUES (@id, @code, @api_key_id, @sealed_payload, @expires_at)
   `,
-  ).run({
-    id: claimId,
-    code: hashClaimCode(claimCode),
-    api_key_id: id,
-    sealed_payload: sealedPayload,
-    expires_at: claimExpiresAt,
-  });
-
-  bizEvent('dashboard.key_created', {
-    dashboard_id: req.dashboard.id,
-    api_key_id: id,
-    actor: req.user.email,
-  });
-  recordAuditFromReq(req, 'agent.create', {
-    resourceType: 'agent',
-    resourceId: id,
-    details: { label: label || null },
-  });
-
-  // The raw key + webhook_secret are NOT returned to the browser.
-  // The claim-code flow means the agent redeems the code for the key
-  // over HTTPS; the dashboard operator never sees or handles the raw
-  // credentials. Returning them here would put them in devtools
-  // network logs, browser memory, and any response-logging proxy —
-  // defeating the whole point of the claim-code architecture.
-  res.status(201).json({
-    id,
-    label: label || null,
-    wallet_public_key: wallet_public_key || null,
-    claim: {
-      code: claimCode,
+    ).run({
+      id: claimId,
+      code: hashClaimCode(claimCode),
+      api_key_id: id,
+      sealed_payload: sealedPayload,
       expires_at: claimExpiresAt,
-      ttl_ms: claimTtlMs,
-    },
-  });
-});
+    });
+
+    bizEvent('dashboard.key_created', {
+      dashboard_id: req.dashboard.id,
+      api_key_id: id,
+      actor: req.user.email,
+    });
+    recordAuditFromReq(req, 'agent.create', {
+      resourceType: 'agent',
+      resourceId: id,
+      details: { label: label || null },
+    });
+
+    // The raw key + webhook_secret are NOT returned to the browser.
+    // The claim-code flow means the agent redeems the code for the key
+    // over HTTPS; the dashboard operator never sees or handles the raw
+    // credentials. Returning them here would put them in devtools
+    // network logs, browser memory, and any response-logging proxy —
+    // defeating the whole point of the claim-code architecture.
+    res.status(201).json({
+      id,
+      label: label || null,
+      wallet_public_key: wallet_public_key || null,
+      claim: {
+        code: claimCode,
+        expires_at: claimExpiresAt,
+        ttl_ms: claimTtlMs,
+      },
+    });
+  },
+);
 
 // PATCH /dashboard/api-keys/:id — update limits/policy
-router.patch('/api-keys/:id', requirePermission('agent:update'), async (req, res) => {
-  // Fetch the full prior row so the audit trail can capture before/
-  // after. Without the before-state, an operator changing
-  // spend_limit_usdc from $1000 to $10000 would leave an audit
-  // record that says `{ spend_limit_usdc: "10000" }` — ops can't
-  // tell whether that's a loosening, a tightening, or the same
-  // value being re-saved. Capturing the old row makes
-  // post-incident reconstruction unambiguous.
-  const owned = /** @type {any} */ (
-    db
-      .prepare(
-        `SELECT id, enabled, spend_limit_usdc, default_webhook_url, label,
+// The body shape is checked before the ownership lookup, so a malformed
+// PATCH against an id this dashboard does not own now answers 400 rather
+// than 404. That is the same order every /v1 route uses, and it does not
+// leak anything: the 400 is derived entirely from the caller's own body.
+router.patch(
+  '/api-keys/:id',
+  requirePermission('agent:update'),
+  validateUpdateApiKey,
+  async (req, res) => {
+    // Fetch the full prior row so the audit trail can capture before/
+    // after. Without the before-state, an operator changing
+    // spend_limit_usdc from $1000 to $10000 would leave an audit
+    // record that says `{ spend_limit_usdc: "10000" }` — ops can't
+    // tell whether that's a loosening, a tightening, or the same
+    // value being re-saved. Capturing the old row makes
+    // post-incident reconstruction unambiguous.
+    const owned = /** @type {any} */ (
+      db
+        .prepare(
+          `SELECT id, enabled, spend_limit_usdc, default_webhook_url, label,
                 wallet_public_key, policy_daily_limit_usdc,
                 policy_single_tx_limit_usdc, policy_require_approval_above_usdc,
                 policy_allowed_hours, policy_allowed_days
          FROM api_keys WHERE id = ? AND dashboard_id = ?`,
-      )
-      .get(req.params.id, req.dashboard.id)
-  );
-  if (!owned) return res.status(404).json({ error: 'not_found' });
+        )
+        .get(req.params.id, req.dashboard.id)
+    );
+    if (!owned) return res.status(404).json({ error: 'not_found' });
 
-  const {
-    enabled,
-    spend_limit_usdc,
-    default_webhook_url,
-    wallet_public_key,
-    policy_daily_limit_usdc,
-    policy_single_tx_limit_usdc,
-    policy_require_approval_above_usdc,
-    policy_allowed_hours,
-    policy_allowed_days,
-  } = req.body;
-  // Only sanitise label if the caller actually sent it — `undefined`
-  // means "don't touch this field" and must pass through unchanged so
-  // the later `if (label !== undefined)` guard still fires.
-  const label = req.body.label === undefined ? undefined : shortString(req.body.label, 100);
+    const {
+      enabled,
+      spend_limit_usdc,
+      default_webhook_url,
+      wallet_public_key,
+      policy_daily_limit_usdc,
+      policy_single_tx_limit_usdc,
+      policy_require_approval_above_usdc,
+      policy_allowed_hours,
+      policy_allowed_days,
+    } = req.body;
+    // Only sanitise label if the caller actually sent it — `undefined`
+    // means "don't touch this field" and must pass through unchanged so
+    // the later `if (label !== undefined)` guard still fires.
+    const label = req.body.label === undefined ? undefined : shortString(req.body.label, 100);
 
-  const validationErr = validateApiKeyFields({
-    spend_limit_usdc,
-    default_webhook_url,
-    wallet_public_key,
-    policy_daily_limit_usdc,
-    policy_single_tx_limit_usdc,
-    policy_require_approval_above_usdc,
-    policy_allowed_hours,
-    policy_allowed_days,
-  });
-  if (validationErr) return res.status(400).json(validationErr);
-  if (default_webhook_url) {
-    try {
-      await assertSafeUrl(default_webhook_url);
-    } catch (err) {
-      return res.status(400).json({ error: 'invalid_webhook_url', message: err.message });
+    if (default_webhook_url) {
+      try {
+        await assertSafeUrl(default_webhook_url);
+      } catch (err) {
+        return res.status(400).json({ error: 'invalid_webhook_url', message: err.message });
+      }
     }
-  }
 
-  /** @type {Record<string, any>} */
-  const fields = {};
-  if (enabled !== undefined) fields.enabled = enabled ? 1 : 0;
-  if (spend_limit_usdc !== undefined) fields.spend_limit_usdc = spend_limit_usdc || null;
-  if (default_webhook_url !== undefined) fields.default_webhook_url = default_webhook_url || null;
-  if (label !== undefined) fields.label = label || null;
-  if (wallet_public_key !== undefined) fields.wallet_public_key = wallet_public_key || null;
-  if (policy_daily_limit_usdc !== undefined)
-    fields.policy_daily_limit_usdc = policy_daily_limit_usdc || null;
-  if (policy_single_tx_limit_usdc !== undefined)
-    fields.policy_single_tx_limit_usdc = policy_single_tx_limit_usdc || null;
-  if (policy_require_approval_above_usdc !== undefined)
-    fields.policy_require_approval_above_usdc = policy_require_approval_above_usdc || null;
-  if (policy_allowed_hours !== undefined)
-    fields.policy_allowed_hours = policy_allowed_hours || null;
-  if (policy_allowed_days !== undefined) fields.policy_allowed_days = policy_allowed_days || null;
+    /** @type {Record<string, any>} */
+    const fields = {};
+    if (enabled !== undefined) fields.enabled = enabled ? 1 : 0;
+    if (spend_limit_usdc !== undefined) fields.spend_limit_usdc = spend_limit_usdc || null;
+    if (default_webhook_url !== undefined) fields.default_webhook_url = default_webhook_url || null;
+    if (label !== undefined) fields.label = label || null;
+    if (wallet_public_key !== undefined) fields.wallet_public_key = wallet_public_key || null;
+    if (policy_daily_limit_usdc !== undefined)
+      fields.policy_daily_limit_usdc = policy_daily_limit_usdc || null;
+    if (policy_single_tx_limit_usdc !== undefined)
+      fields.policy_single_tx_limit_usdc = policy_single_tx_limit_usdc || null;
+    if (policy_require_approval_above_usdc !== undefined)
+      fields.policy_require_approval_above_usdc = policy_require_approval_above_usdc || null;
+    if (policy_allowed_hours !== undefined)
+      fields.policy_allowed_hours = policy_allowed_hours || null;
+    if (policy_allowed_days !== undefined) fields.policy_allowed_days = policy_allowed_days || null;
 
-  if (Object.keys(fields).length === 0) return res.status(400).json({ error: 'nothing_to_update' });
+    if (Object.keys(fields).length === 0)
+      return res.status(400).json({ error: 'nothing_to_update' });
 
-  // Allowlist column names before interpolating into SQL to prevent injection
-  const ALLOWED_COLUMNS = new Set([
-    'enabled',
-    'spend_limit_usdc',
-    'default_webhook_url',
-    'label',
-    'wallet_public_key',
-    'policy_daily_limit_usdc',
-    'policy_single_tx_limit_usdc',
-    'policy_require_approval_above_usdc',
-    'policy_allowed_hours',
-    'policy_allowed_days',
-  ]);
-  for (const k of Object.keys(fields)) {
-    if (!ALLOWED_COLUMNS.has(k)) return res.status(400).json({ error: 'invalid_field', field: k });
-  }
+    // Allowlist column names before interpolating into SQL to prevent injection
+    const ALLOWED_COLUMNS = new Set([
+      'enabled',
+      'spend_limit_usdc',
+      'default_webhook_url',
+      'label',
+      'wallet_public_key',
+      'policy_daily_limit_usdc',
+      'policy_single_tx_limit_usdc',
+      'policy_require_approval_above_usdc',
+      'policy_allowed_hours',
+      'policy_allowed_days',
+    ]);
+    for (const k of Object.keys(fields)) {
+      if (!ALLOWED_COLUMNS.has(k))
+        return res.status(400).json({ error: 'invalid_field', field: k });
+    }
 
-  const sets = Object.keys(fields)
-    .map((k) => `${k} = @${k}`)
-    .join(', ');
-  db.prepare(`UPDATE api_keys SET ${sets} WHERE id = @id AND dashboard_id = @dashboard_id`).run({
-    id: req.params.id,
-    dashboard_id: req.dashboard.id,
-    ...fields,
-  });
+    const sets = Object.keys(fields)
+      .map((k) => `${k} = @${k}`)
+      .join(', ');
+    db.prepare(`UPDATE api_keys SET ${sets} WHERE id = @id AND dashboard_id = @dashboard_id`).run({
+      id: req.params.id,
+      dashboard_id: req.dashboard.id,
+      ...fields,
+    });
 
-  // Include the previous values for every field that's actually
-  // changing, so a post-incident forensics run can reconstruct the
-  // exact config transition (not just the new state).
-  const previous = {};
-  for (const k of Object.keys(fields)) {
-    previous[k] = owned[k] ?? null;
-  }
-  recordAuditFromReq(req, 'agent.update', {
-    resourceType: 'agent',
-    resourceId: req.params.id,
-    details: { changes: fields, previous },
-  });
-  res.json({ ok: true });
-});
+    // Include the previous values for every field that's actually
+    // changing, so a post-incident forensics run can reconstruct the
+    // exact config transition (not just the new state).
+    const previous = {};
+    for (const k of Object.keys(fields)) {
+      previous[k] = owned[k] ?? null;
+    }
+    recordAuditFromReq(req, 'agent.update', {
+      resourceType: 'agent',
+      resourceId: String(req.params.id),
+      details: { changes: fields, previous },
+    });
+    res.json({ ok: true });
+  },
+);
 
 // DELETE /dashboard/api-keys/:id
 router.delete('/api-keys/:id', requirePermission('agent:delete'), (req, res) => {
@@ -1032,91 +1154,172 @@ router.get('/alert-rules', requirePermission('alert:read'), (req, res) => {
   });
 });
 
-// POST /dashboard/alert-rules
-router.post('/alert-rules', requirePermission('alert:write'), (req, res) => {
-  const { name, kind, config, notify_email, notify_webhook_url } = req.body || {};
-  if (!name || !kind) return res.status(400).json({ error: 'missing_fields' });
-  // F2-alerts: route alert rule name through shortString so CRLF /
-  // control chars can't leak into email subjects, webhook payload
-  // rule_name fields, or dashboard UI. Matches the hardening pattern
-  // for api_key labels and approval notes. Rejects an all-control-char
-  // name the same way shortString rejects empty strings.
-  const safeName = shortString(name, 120);
-  if (!safeName) {
-    return res.status(400).json({
-      error: 'invalid_name',
-      message: 'name must be a non-empty string (control characters are stripped)',
+// ── Alert-rule notification targets ───────────────────────────────────
+//
+// `kind` and `config` are validated by lib/alerts.js, which owns the
+// per-kind config schema and is the right place for it. The two
+// notification targets and the snooze timestamp had no validation
+// anywhere: createRule/updateRule bind them straight into the statement,
+// so a non-string arrived at better-sqlite3 as an unbindable value and
+// surfaced as the driver's own TypeError message wrapped in a 400. A
+// syntactically valid but nonsensical `snoozedUntil` was worse — it
+// stored fine and the evaluator compares it as a string against an ISO
+// timestamp, so the rule ended up either permanently snoozed or never
+// snoozed, with nothing to indicate which.
+const NOTIFY_EMAIL_MAX = 254; // RFC 5321 §4.5.3.1.3 path limit
+// Real secrets minted by this service are `whsec_` + 64 hex = 70 chars.
+// 512 leaves room for anything an operator legitimately pastes and stops
+// a multi-MB body from being HMAC'd.
+const MAX_WEBHOOK_SECRET_CHARS = 512;
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/;
+
+const AlertNotifyFields = {
+  notify_email: optionalText((value) => {
+    if (typeof value !== 'string') return 'notify_email must be an email address';
+    if (value.length > NOTIFY_EMAIL_MAX) {
+      return `notify_email must be at most ${NOTIFY_EMAIL_MAX} characters`;
+    }
+    return EMAIL_SHAPE.test(value) ? null : 'notify_email must be an email address';
+  }),
+
+  notify_webhook_url: optionalText((value) => {
+    if (typeof value !== 'string') return 'notify_webhook_url must be an https URL';
+    if (value.length > MAX_WEBHOOK_URL_CHARS) {
+      return `notify_webhook_url must be at most ${MAX_WEBHOOK_URL_CHARS} characters`;
+    }
+    try {
+      return new URL(value).protocol === 'https:' ? null : 'notify_webhook_url must use HTTPS';
+    } catch {
+      return 'notify_webhook_url must be an https URL';
+    }
+  }),
+};
+
+// Absent means "leave it alone"; null means "clear the snooze". A present
+// value has to be something Date.parse can read, because the evaluator
+// compares the column against a timestamp — an unparseable string stored
+// fine and left the rule either permanently snoozed or never snoozed. The
+// value is not rewritten: validation does not transform the request (see
+// docs/REQUEST_VALIDATION.md), so what the operator sent is what is
+// stored.
+const snoozedUntilField = z.unknown().superRefine((value, ctx) => {
+  if (value === undefined || value === null) return;
+  const ok = typeof value === 'string' && !Number.isNaN(Date.parse(value));
+  if (!ok) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'snoozedUntil must be an ISO-8601 timestamp or null',
     });
-  }
-  try {
-    const rule = alerts.createRule({
-      dashboardId: req.dashboard.id,
-      name: safeName,
-      kind: String(kind),
-      config: config || {},
-      notifyEmail: notify_email || null,
-      notifyWebhookUrl: notify_webhook_url || null,
-      isPlatformOwner: !!req.user.is_platform_owner,
-    });
-    recordAuditFromReq(req, 'alert.create', {
-      resourceType: 'alert_rule',
-      resourceId: rule?.id,
-      details: { kind, name },
-    });
-    res.status(201).json({ rule });
-  } catch (err) {
-    const msg = /** @type {Error} */ (err).message;
-    // Distinguish authz vs validation so the frontend can render a
-    // sensible error toast.
-    const status = /platform owner/i.test(msg) ? 403 : 400;
-    res.status(status).json({ error: 'invalid_rule', message: msg });
   }
 });
 
-// PATCH /dashboard/alert-rules/:id
-router.patch('/alert-rules/:id', requirePermission('alert:write'), (req, res) => {
-  const { name, config, enabled, snoozedUntil, notify_email, notify_webhook_url } = req.body || {};
-  // F2-alerts: same shortString sanitisation as POST. `undefined` means
-  // "don't touch the name" (existing alerts.updateRule semantics).
-  let safeName;
-  if (name !== undefined) {
-    safeName = shortString(name, 120);
+const validateCreateAlertRule = validate({
+  body: z.object(AlertNotifyFields).passthrough(),
+  // The code a rule the endpoint rejects already returns.
+  defaultErrorCode: 'invalid_rule',
+});
+
+const validateUpdateAlertRule = validate({
+  body: z.object({ ...AlertNotifyFields, snoozedUntil: snoozedUntilField }).passthrough(),
+  defaultErrorCode: 'update_failed',
+});
+
+// POST /dashboard/alert-rules
+router.post(
+  '/alert-rules',
+  requirePermission('alert:write'),
+  validateCreateAlertRule,
+  (req, res) => {
+    const { name, kind, config, notify_email, notify_webhook_url } = req.body || {};
+    if (!name || !kind) return res.status(400).json({ error: 'missing_fields' });
+    // F2-alerts: route alert rule name through shortString so CRLF /
+    // control chars can't leak into email subjects, webhook payload
+    // rule_name fields, or dashboard UI. Matches the hardening pattern
+    // for api_key labels and approval notes. Rejects an all-control-char
+    // name the same way shortString rejects empty strings.
+    const safeName = shortString(name, 120);
     if (!safeName) {
       return res.status(400).json({
         error: 'invalid_name',
         message: 'name must be a non-empty string (control characters are stripped)',
       });
     }
-  }
-  try {
-    const rule = alerts.updateRule(
-      req.dashboard.id,
-      req.params.id,
-      {
+    try {
+      const rule = alerts.createRule({
+        dashboardId: req.dashboard.id,
         name: safeName,
-        config,
-        enabled,
-        snoozedUntil,
-        notifyEmail: notify_email,
-        notifyWebhookUrl: notify_webhook_url,
-      },
-      { isPlatformOwner: !!req.user.is_platform_owner },
-    );
-    if (!rule) return res.status(404).json({ error: 'not_found' });
-    recordAuditFromReq(req, 'alert.update', {
-      resourceType: 'alert_rule',
-      resourceId: req.params.id,
-      details: { name, enabled, snoozedUntil },
-    });
-    res.json({ rule });
-  } catch (err) {
-    const msg = /** @type {Error} */ (err).message;
-    res.status(/platform owner/i.test(msg) ? 403 : 400).json({
-      error: 'update_failed',
-      message: msg,
-    });
-  }
-});
+        kind: String(kind),
+        config: config || {},
+        notifyEmail: notify_email || null,
+        notifyWebhookUrl: notify_webhook_url || null,
+        isPlatformOwner: !!req.user.is_platform_owner,
+      });
+      recordAuditFromReq(req, 'alert.create', {
+        resourceType: 'alert_rule',
+        resourceId: rule?.id,
+        details: { kind, name },
+      });
+      res.status(201).json({ rule });
+    } catch (err) {
+      const msg = /** @type {Error} */ (err).message;
+      // Distinguish authz vs validation so the frontend can render a
+      // sensible error toast.
+      const status = /platform owner/i.test(msg) ? 403 : 400;
+      res.status(status).json({ error: 'invalid_rule', message: msg });
+    }
+  },
+);
+
+// PATCH /dashboard/alert-rules/:id
+router.patch(
+  '/alert-rules/:id',
+  requirePermission('alert:write'),
+  validateUpdateAlertRule,
+  (req, res) => {
+    const { name, config, enabled, snoozedUntil, notify_email, notify_webhook_url } =
+      req.body || {};
+    // F2-alerts: same shortString sanitisation as POST. `undefined` means
+    // "don't touch the name" (existing alerts.updateRule semantics).
+    let safeName;
+    if (name !== undefined) {
+      safeName = shortString(name, 120);
+      if (!safeName) {
+        return res.status(400).json({
+          error: 'invalid_name',
+          message: 'name must be a non-empty string (control characters are stripped)',
+        });
+      }
+    }
+    try {
+      const rule = alerts.updateRule(
+        req.dashboard.id,
+        String(req.params.id),
+        {
+          name: safeName,
+          config,
+          enabled,
+          snoozedUntil,
+          notifyEmail: notify_email,
+          notifyWebhookUrl: notify_webhook_url,
+        },
+        { isPlatformOwner: !!req.user.is_platform_owner },
+      );
+      if (!rule) return res.status(404).json({ error: 'not_found' });
+      recordAuditFromReq(req, 'alert.update', {
+        resourceType: 'alert_rule',
+        resourceId: String(req.params.id),
+        details: { name, enabled, snoozedUntil },
+      });
+      res.json({ rule });
+    } catch (err) {
+      const msg = /** @type {Error} */ (err).message;
+      res.status(/platform owner/i.test(msg) ? 403 : 400).json({
+        error: 'update_failed',
+        message: msg,
+      });
+    }
+  },
+);
 
 // DELETE /dashboard/alert-rules/:id
 router.delete('/alert-rules/:id', requirePermission('alert:write'), (req, res) => {
@@ -1173,39 +1376,79 @@ router.get('/webhook-deliveries', requirePermission('webhook:read'), (req, res) 
 // verify their endpoint works before an agent goes live. Uses the
 // same `fireWebhook` helper so SSRF protection + signing + logging
 // all apply uniformly.
-router.post('/webhook-deliveries/test', requirePermission('webhook:test'), async (req, res, next) => {
-  const { url, webhook_secret } = req.body || {};
-  if (!url) return res.status(400).json({ error: 'missing_url' });
-
-  const testPayload = {
-    order_id: `test-${Date.now()}`,
-    status: 'delivered',
-    amount_usdc: '0.00',
-    payment_asset: 'usdc',
-    card: { number: '4111 1111 1111 1111', cvv: '123', expiry: '12/30', brand: 'VISA' },
-    test: true,
-  };
-
-  try {
-    // F1-webhook-log: pass explicit dashboardId so the delivery
-    // actually lands in webhook_deliveries. The synthetic order_id
-    // in testPayload doesn't resolve against the orders table, so
-    // without this context the log insert would fall through
-    // recordWebhookDelivery's "unattributed" branch and silently
-    // drop — operators clicking "test webhook" and then opening
-    // the log would see nothing even though we returned ok:true.
-    await fireWebhookRaw(url, testPayload, webhook_secret || null, null, {
-      dashboardId: req.dashboard.id,
-    });
-    recordAuditFromReq(req, 'webhook.test', {
-      resourceType: 'webhook',
-      details: { url },
-    });
-    res.json({ ok: true, note: 'Delivered — check webhook log for details' });
-  } catch (err) {
-    return next(new AppError(502, 'delivery_failed', err.message));
-  }
+//
+// `url` was checked for truthiness and nothing else, so a non-string or
+// an unbounded one went straight to fireWebhook → assertSafeUrl, which
+// resolves DNS. A caller error therefore came back as `502
+// delivery_failed` — the status class for "your endpoint is broken", not
+// "your request is". The schema answers 400 before anything is resolved.
+// The absent case stays in the handler so it keeps returning
+// `missing_url` verbatim; the schema only speaks about a url that IS
+// present, which is the case that used to escape as a 502.
+const validateWebhookTest = validate({
+  body: z
+    .object({
+      url: optionalText((value) => {
+        if (typeof value !== 'string') return 'url must be a string';
+        if (value.length > MAX_WEBHOOK_URL_CHARS) {
+          return `url must be at most ${MAX_WEBHOOK_URL_CHARS} characters`;
+        }
+        try {
+          new URL(value);
+          return null;
+        } catch {
+          return 'url must be a valid URL';
+        }
+      }),
+      webhook_secret: optionalText((value) => {
+        if (typeof value !== 'string') return 'webhook_secret must be a string';
+        return value.length > MAX_WEBHOOK_SECRET_CHARS
+          ? `webhook_secret must be at most ${MAX_WEBHOOK_SECRET_CHARS} characters`
+          : null;
+      }),
+    })
+    .passthrough(),
+  errorCodes: { url: 'invalid_url', webhook_secret: 'invalid_webhook_secret' },
 });
+
+router.post(
+  '/webhook-deliveries/test',
+  requirePermission('webhook:test'),
+  validateWebhookTest,
+  async (req, res, next) => {
+    const { url, webhook_secret } = req.body;
+    if (!url) return res.status(400).json({ error: 'missing_url' });
+
+    const testPayload = {
+      order_id: `test-${Date.now()}`,
+      status: 'delivered',
+      amount_usdc: '0.00',
+      payment_asset: 'usdc',
+      card: { number: '4111 1111 1111 1111', cvv: '123', expiry: '12/30', brand: 'VISA' },
+      test: true,
+    };
+
+    try {
+      // F1-webhook-log: pass explicit dashboardId so the delivery
+      // actually lands in webhook_deliveries. The synthetic order_id
+      // in testPayload doesn't resolve against the orders table, so
+      // without this context the log insert would fall through
+      // recordWebhookDelivery's "unattributed" branch and silently
+      // drop — operators clicking "test webhook" and then opening
+      // the log would see nothing even though we returned ok:true.
+      await fireWebhookRaw(url, testPayload, webhook_secret || null, null, {
+        dashboardId: req.dashboard.id,
+      });
+      recordAuditFromReq(req, 'webhook.test', {
+        resourceType: 'webhook',
+        details: { url },
+      });
+      res.json({ ok: true, note: 'Delivered — check webhook log for details' });
+    } catch (err) {
+      return next(new AppError(502, 'delivery_failed', err.message));
+    }
+  },
+);
 
 // ── Audit log ─────────────────────────────────────────────────────────────────
 
