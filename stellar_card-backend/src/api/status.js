@@ -40,6 +40,40 @@ function sysStateInt(key) {
   return parseInt(row?.value || '0', 10) || 0;
 }
 
+/**
+ * @openapi
+ * /status:
+ *   get:
+ *     tags: [System]
+ *     summary: Public system health and order-volume status
+ *     description: Unauthenticated. Powers the public status page and dashboard banner.
+ *     responses:
+ *       200:
+ *         description: Status snapshot.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 frozen: { type: boolean }
+ *                 consecutive_failures: { type: integer }
+ *                 orders:
+ *                   type: object
+ *                   properties:
+ *                     pending_payment: { type: integer }
+ *                     in_progress: { type: integer }
+ *                 stellar_watcher:
+ *                   type: object
+ *                   properties:
+ *                     stalled: { type: boolean }
+ *                     age_seconds: { type: integer, nullable: true }
+ *                     max_age_seconds: { type: integer }
+ *       429:
+ *         description: Too many requests from this IP.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.get('/status', statusLimiter, (req, res) => {
   const frozen =
     /** @type {any} */ (db.prepare(`SELECT value FROM system_state WHERE key = 'frozen'`).get())

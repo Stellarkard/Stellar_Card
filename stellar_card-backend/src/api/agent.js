@@ -109,6 +109,56 @@ const agentStatusLimiter = rateLimit({
   legacyHeaders: false,
   handler: (_, res) => res.status(429).json({ error: 'too_many_requests' }),
 });
+/**
+ * @openapi
+ * /v1/agent/status:
+ *   post:
+ *     tags: [Agent API]
+ *     summary: Report an agent's onboarding / lifecycle state
+ *     description: >
+ *       Idempotent — POSTing the same state repeatedly is a no-op side-effect-wise.
+ *       Drives the live onboarding pill in the dashboard via SSE.
+ *     security: [{ ApiKeyAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             description: At least one of state, wallet_public_key, detail must be provided.
+ *             properties:
+ *               state:
+ *                 type: string
+ *                 enum: [initializing, awaiting_funding, funded]
+ *               wallet_public_key:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Stellar G-address (Ed25519, checksum-validated).
+ *               detail:
+ *                 type: string
+ *                 nullable: true
+ *                 maxLength: 500
+ *     responses:
+ *       200:
+ *         description: State updated.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { ok: { type: boolean } }
+ *       400:
+ *         description: Invalid state, wallet_public_key, detail, or nothing to update.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many status reports for this key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.post('/agent/status', agentStatusLimiter, validateAgentStatus, (req, res) => {
   const { emit: emitBusEvent } = require('../lib/event-bus');
   const { state, wallet_public_key, detail } = req.body;

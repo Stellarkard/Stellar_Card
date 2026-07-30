@@ -126,9 +126,16 @@ const definition = {
   },
 };
 
+// Only src/api/*.js is scanned. app.js used to be in this list because it
+// still carried inline handler bodies and their `@openapi` blocks; those
+// annotations now live beside the handlers in the route modules, and
+// app.js owns no routes at all (asserted by
+// test/integration/route-registry.test.js). Leaving it here would be a
+// standing invitation to document a route in the one file that must not
+// declare any.
 const options = {
   definition,
-  apis: ['./src/api/*.js', './src/app.js'],
+  apis: ['./src/api/*.js'],
 };
 
 const openapiSpec = swaggerJsdoc(/** @type {any} */ (options));

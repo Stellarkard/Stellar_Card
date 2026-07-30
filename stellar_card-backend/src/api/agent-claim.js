@@ -48,6 +48,51 @@ const claimLimiter = rateLimit({
   legacyHeaders: false,
   handler: rateLimitHandler('Too many claim attempts. Wait a minute and try again.'),
 });
+/**
+ * @openapi
+ * /v1/agent/claim:
+ *   post:
+ *     tags: [Agent Onboarding]
+ *     summary: Redeem a one-shot claim code for a live API key
+ *     description: >
+ *       Unauthenticated — the code itself is the credential. Each code can be
+ *       redeemed exactly once; the response is the only time the api_key is
+ *       ever returned in plaintext.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [code]
+ *             properties:
+ *               code: { type: string, description: 'Claim code minted by the dashboard.' }
+ *     responses:
+ *       200:
+ *         description: Claim redeemed.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 api_key: { type: string }
+ *                 webhook_secret: { type: string, nullable: true }
+ *                 api_key_id: { type: string, format: uuid }
+ *                 label: { type: string, nullable: true }
+ *                 api_url: { type: string, format: uri }
+ *       400:
+ *         description: Missing code.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Claim code is invalid, expired, or already used.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       429:
+ *         description: Too many claim attempts from this IP.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.post('/agent/claim', claimLimiter, validateClaim, (req, res, next) => {
   const { event: bizEvent } = require('../lib/logger');
   const secretBox = require('../lib/secret-box');

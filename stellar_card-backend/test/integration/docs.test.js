@@ -39,4 +39,40 @@ describe('OpenAPI documentation', () => {
     assert.ok(res.headers['content-security-policy'], 'expected a CSP header on /docs');
     assert.match(res.headers['content-security-policy'], /'unsafe-inline'/);
   });
+
+  it('documents the routes whose @openapi blocks moved out of app.js', async () => {
+    // The annotations for these paths lived in app.js next to the inline
+    // handler copies, and swagger-jsdoc scanned app.js to find them. The
+    // extraction moved each block into the route module that owns the
+    // handler; if one were dropped on the way, the path would silently
+    // vanish from the published document.
+    const res = await request.get('/docs.json');
+    for (const path of [
+      '/api/version',
+      '/status',
+      '/v1/agent/claim',
+      '/v1/agent/status',
+      '/v1/usage',
+      '/v1/policy/check',
+    ]) {
+      assert.ok(res.body.paths[path], `expected ${path} to be documented`);
+    }
+  });
+
+  it('renders its own document, not the one belonging to /api/docs', async () => {
+    // swagger-ui-express keeps the generated swagger-ui-init.js body in a
+    // module-level variable that setup() writes and the shared `serve`
+    // middleware reads back. With two Swagger UI mounts in one app,
+    // whichever setup() ran last won for BOTH, so one of the two pages
+    // rendered the other's spec. Both mounts use serveFiles(), which
+    // closes over its own bootstrap; these two assertions are what fails
+    // if either regresses to serve/setup.
+    const ours = await request.get('/docs/swagger-ui-init.js');
+    assert.equal(ours.status, 200);
+    assert.match(ours.text, /"url":\s*"\/docs\.json"/);
+
+    const theirs = await request.get('/api/docs/swagger-ui-init.js');
+    assert.equal(theirs.status, 200);
+    assert.match(theirs.text, /"url":\s*"\/api\/openapi\.json"/);
+  });
 });

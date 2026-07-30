@@ -12,6 +12,9 @@ src/
     ├── status.js       # GET  /status
     ├── docs.js         # GET  /api/openapi.json, /api/docs
     ├── openapi.js      # the OpenAPI document docs.js serves
+    ├── swagger.js      # GET  /docs.json, /docs
+    │                   #   (the swagger-jsdoc document, assembled by
+    │                   #    src/docs/openapi.js from @openapi blocks)
     ├── agent-claim.js  # POST /v1/agent/claim        (pre-auth)
     ├── agent.js        # POST /v1/agent/status       (post-auth)
     ├── usage.js        # GET  /v1/usage, /v1/policy/check
@@ -30,15 +33,37 @@ installs the 404 fallback and the terminal error handlers. It is ~250
 lines and contains no route handlers.
 
 That last sentence is enforced, not aspirational.
-`test/integration/route-registry.test.js` asserts it two ways: no
-`app.get`/`app.post`/… declaration survives in `src/app.js`, and no path
-is mounted more than once. Both checks failed before this extraction was
-finished — app.js still carried a second copy of the `/status`,
-`/v1/usage`, `/v1/policy/check` and `/v1/agent/status` handlers alongside
-the `registerRoutes()` call that had replaced them, so each of those paths
-was mounted twice. A double mount is invisible from outside (the first
-handler answers, the second is dead weight) right up until the two drift
-and a fix lands in the copy that never runs.
+`test/integration/route-registry.test.js` asserts it three ways: no
+`app.get`/`app.post`/… declaration survives in `src/app.js`, no path is
+mounted more than once, and the `/v1` auth middleware is installed exactly
+once. All three checks failed before this extraction was finished —
+app.js still carried a second copy of the `/status`, `/v1/usage`,
+`/v1/policy/check` and `/v1/agent/status` handlers alongside the
+`registerRoutes()` call that had replaced them, so each of those paths was
+mounted twice. A double mount is invisible from outside (the first handler
+answers, the second is dead weight) right up until the two drift and a fix
+lands in the copy that never runs.
+
+The third check exists because `app.use()` layers carry no `route`, so the
+path-counting check cannot see them. A duplicated `app.use('/v1', auth)`
+is not merely dead weight: `auth` runs a bcrypt compare, so mounting it
+twice doubles the per-request CPU cost of the whole agent surface, and the
+`authFailureLimiter` mounted beside it counts each failure twice, halving
+its effective budget.
+
+### Regressions this shape is exposed to
+
+The extraction has been undone once already, by a merge that resolved a
+conflict in `app.js` in favour of the pre-extraction side. Nothing about
+the result looked wrong: the file still called `registerRoutes(app)`, the
+header comment still said it owned no handlers, and every integration test
+that exercised a path over HTTP still passed, because the mount table won
+every match and the reinstated copies never ran. What actually broke was
+invisible from the outside — double bcrypt on `/v1`, a halved failed-auth
+budget, and two `swaggerUi.setup()` calls fighting over the library's
+module-level bootstrap (below). The three assertions above are the ones
+that catch it, so a `git merge` that touches `app.js` should be checked
+against them rather than against a passing route test.
 
 `routes/index.js` is the mount table: what is mounted where, in what
 order, and why. It also owns the three route-level rate limiters that are
@@ -115,6 +140,33 @@ stack, which would pin an implementation detail instead of the invariant.
 wins. `requirePlatformOwner` inside the platform router is what actually
 restricts access; the ordering only decides which router sees the
 request.
+
+## The two documentation surfaces
+
+There are two, and they are not redundant by accident:
+
+| Surface                             | Document                                                                                          |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `/api/openapi.json` and `/api/docs` | `src/api/openapi.js` — hand-authored, and the one `openapi.test.js` checks the router against     |
+| `/docs.json` and `/docs`            | `src/docs/openapi.js` — assembled by swagger-jsdoc from the `@openapi` blocks beside the handlers |
+
+Both have callers and tests, so both are mounted (`api/docs.js` and
+`api/swagger.js`). Consolidating them is a separate change.
+
+Serving two of them from one app has one non-obvious constraint.
+swagger-ui-express keeps the generated `swagger-ui-init.js` body in a
+**module-level variable**: `setup()` writes it, and the shared `serve`
+middleware reads it back. With two mounts, whichever `setup()` ran last
+wins for both, and one of the two pages renders the other's document — the
+failure mode looks like a caching bug and is not one. Both routers
+therefore use `serveFiles(doc, opts)`, which closes over its own bootstrap
+and never touches the shared variable. `docs.test.js` asserts each page
+fetches its own spec URL.
+
+Because `@openapi` blocks feed the swagger-jsdoc document, they have to
+live in the module that owns the handler — `src/docs/openapi.js` scans
+`./src/api/*.js` and nothing else. `./src/app.js` used to be in that glob,
+for the same reason it used to contain handlers; it is not any more.
 
 ## Adding a route
 

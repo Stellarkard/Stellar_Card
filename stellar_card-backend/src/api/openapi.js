@@ -59,6 +59,8 @@ const UNDOCUMENTED_PREFIXES = Object.freeze([
   '/v1/mpp', // MPP receipts, feature-flagged
   '/api/docs', // the documentation UI itself
   '/api/openapi.json', // this document
+  '/docs', // the swagger-jsdoc UI (api/swagger.js)
+  '/docs.json', // the swagger-jsdoc document it renders
 ]);
 
 // ── Reusable response bodies ───────────────────────────────────────────────

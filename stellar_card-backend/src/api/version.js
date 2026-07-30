@@ -37,6 +37,28 @@ const VERSION_PAYLOAD = Object.freeze({
   ]),
 });
 
+/**
+ * @openapi
+ * /api/version:
+ *   get:
+ *     tags: [System]
+ *     summary: Service version and enabled features
+ *     description: Unauthenticated — used for deploy-time compatibility checks.
+ *     responses:
+ *       200:
+ *         description: Version info.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 service: { type: string, example: stellar_card }
+ *                 version: { type: string, example: 0.1.0 }
+ *                 hmac_protocol: { type: string, example: v3 }
+ *                 features:
+ *                   type: array
+ *                   items: { type: string }
+ */
 router.get('/api/version', versionLimiter, (_req, res) => {
   res.json(VERSION_PAYLOAD);
 });

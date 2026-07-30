@@ -61,6 +61,39 @@ const validatePolicyCheck = validate({
 // F3-usage: added explicit expired and rejected counters so agents
 //   can see the full picture — previously both were hidden inside the
 //   wrong in_progress bucket.
+/**
+ * @openapi
+ * /v1/usage:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: Caller's own spend budget and order counts
+ *     security: [{ ApiKeyAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Usage summary for the authenticated API key.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 api_key_id: { type: string, format: uuid }
+ *                 label: { type: string, nullable: true }
+ *                 budget: { type: object }
+ *                 orders:
+ *                   type: object
+ *                   properties:
+ *                     total: { type: integer }
+ *                     delivered: { type: integer }
+ *                     failed: { type: integer }
+ *                     refunded: { type: integer }
+ *                     expired: { type: integer }
+ *                     rejected: { type: integer }
+ *                     in_progress: { type: integer }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.get('/usage', orderPollLimiter, (req, res) => {
   const counts = db
     .prepare(
@@ -90,6 +123,40 @@ router.get('/usage', orderPollLimiter, (req, res) => {
 // throttle as /v1/orders polling. Before this limiter was added, a
 // compromised key could enumerate the owner's daily spend and bruteforce
 // policy thresholds without burning order-creation budget.
+/**
+ * @openapi
+ * /v1/policy/check:
+ *   get:
+ *     tags: [Agent API]
+ *     summary: Preview whether an order amount would pass spend policy
+ *     description: Read-only — does not persist a policy decision or create an order.
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - name: amount
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *         description: USD amount to check, e.g. "10.00".
+ *     responses:
+ *       200:
+ *         description: Policy check result.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 allowed: { type: boolean }
+ *                 reason: { type: string, nullable: true }
+ *                 remaining_daily: { type: string, nullable: true }
+ *       400:
+ *         description: Missing or invalid amount.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ *       401:
+ *         description: Missing or invalid API key.
+ *         content:
+ *           application/json: { schema: { $ref: '#/components/schemas/Error' } }
+ */
 router.get('/policy/check', orderPollLimiter, validatePolicyCheck, (req, res) => {
   return res.json(policyCheck(req.apiKey.id, parseFloat(String(req.query.amount).trim())));
 });

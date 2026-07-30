@@ -180,6 +180,21 @@ describe('route registry — app.js owns no routes', () => {
     assert.deepEqual(duplicated, [], `these paths are mounted more than once: ${duplicated}`);
   });
 
+  it('installs the /v1 auth middleware exactly once', () => {
+    // The nastier half of a double mount, and the one the path-counting
+    // check above cannot see: app.use() layers carry no `route`, so a
+    // second `app.use('/v1', auth)` is invisible to it. The cost is not
+    // cosmetic — auth runs a bcrypt compare, so mounting it twice doubles
+    // the per-request CPU on the entire agent surface and halves the
+    // effective budget of the failed-auth limiter mounted alongside it.
+    const app = require('../../src/app');
+    const auth = require('../../src/middleware/auth');
+
+    const stack = app._router ? app._router.stack : app.router.stack;
+    const mounted = stack.filter((layer) => layer.handle === auth).length;
+    assert.equal(mounted, 1, `the auth middleware is mounted ${mounted} times`);
+  });
+
   it('declares no route handlers in app.js itself', () => {
     // The source-level counterpart: app.js may install middleware with
     // app.use(), but an app.get/post/patch/delete belongs in a module

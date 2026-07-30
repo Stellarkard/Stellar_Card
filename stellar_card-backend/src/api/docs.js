@@ -88,19 +88,30 @@ const swaggerCsp = helmet.contentSecurityPolicy({
   },
 });
 
+// `swaggerOptions.url` points the browser at the JSON endpoint instead of
+// embedding a snapshot of the document in the HTML. One source of truth,
+// and the page picks up a spec change without a redeploy of anything else.
+const swaggerUiOptions = {
+  swaggerOptions: { url: '/api/openapi.json', displayRequestDuration: true },
+  customSiteTitle: 'Stellar_Card API',
+};
+
+// `serveFiles` rather than the shared `serve` + `setup` pair.
+// swagger-ui-express keeps the generated `swagger-ui-init.js` body in a
+// module-level variable that `setup()` writes and `serve` reads back, so
+// with two Swagger UI mounts in one app — this one and the /docs surface
+// in api/swagger.js — whichever `setup()` ran last would win for *both*,
+// and each UI would render the other's document. `serveFiles` closes over
+// its own bootstrap instead, which is the library's documented answer for
+// serving more than one document. See the header of api/swagger.js.
+const docsHtml = swaggerUi.generateHTML(null, swaggerUiOptions);
+
 router.use(
   '/api/docs',
   docsLimiter,
   swaggerCsp,
-  swaggerUi.serve,
-  swaggerUi.setup(null, {
-    // `swaggerOptions.url` points the browser at the JSON endpoint instead
-    // of embedding a snapshot of the document in the HTML. One source of
-    // truth, and the page picks up a spec change without a redeploy of
-    // anything else.
-    swaggerOptions: { url: '/api/openapi.json', displayRequestDuration: true },
-    customSiteTitle: 'Stellar_Card API',
-  }),
+  swaggerUi.serveFiles(null, swaggerUiOptions),
+  (_req, res) => res.type('html').send(docsHtml),
 );
 
 module.exports = router;
