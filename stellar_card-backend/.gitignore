@@ -1,7 +1,0 @@
-node_modules/
-.env
-.tokens.json
-*.db
-*.db-shm
-*.db-wal
-/tmp/stage2-debug-*.png
