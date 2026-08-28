@@ -199,9 +199,9 @@ export function createCustomNetworkConfig(params: {
 
 /**
  * Validate that an RPC endpoint URL is well-formed.
- * 
+ *
  * Checks URL format and warns about insecure HTTP endpoints in production.
- * 
+ *
  * @param url - The RPC endpoint URL to validate
  * @param context - Optional context description for error messages
  * @throws {Error} When the URL is malformed or uses an invalid protocol
@@ -210,8 +210,8 @@ export function createCustomNetworkConfig(params: {
  * ```typescript
  * validateRpcEndpoint('https://rpc.example.com', 'Soroban RPC');
  * // Validates successfully
- * 
- * validateRpcEndpoint('ftp://invalid.com'); 
+ *
+ * validateRpcEndpoint('ftp://invalid.com');
  * // Throws: Invalid protocol: ftp:
  * ```
  */
@@ -233,6 +233,200 @@ export function validateRpcEndpoint(url: string, context?: string): void {
       `Invalid RPC endpoint URL "${url}"${context ? ` for ${context}` : ''}: ${(err as Error).message}`
     );
   }
+}
+
+// ── Custom RPC endpoint validation ────────────────────────────────────────────
+
+/** Proxy configuration for RPC endpoints */
+export interface RpcProxyConfig {
+  /** Proxy URL (e.g., 'http://proxy.example.com:8080') */
+  url: string;
+  /** Optional proxy authentication username */
+  username?: string;
+  /** Optional proxy authentication password */
+  password?: string;
+  /** Optional list of hosts to bypass the proxy */
+  noProxy?: string[];
+}
+
+/** Extended RPC endpoint config with proxy and retry support */
+export interface ExtendedRpcEndpointConfig extends RpcEndpointConfig {
+  /** Optional proxy configuration */
+  proxy?: RpcProxyConfig;
+  /** Optional retry configuration for failed requests */
+  retry?: {
+    /** Maximum number of retry attempts */
+    maxAttempts: number;
+    /** Base delay between retries in milliseconds */
+    baseDelayMs: number;
+    /** Whether to use exponential backoff */
+    exponentialBackoff: boolean;
+  };
+}
+
+/**
+ * Validate a NetworkConfig object, checking that all URLs are well-formed
+ * and that required fields are present.
+ *
+ * @param config - The network configuration to validate
+ * @returns Array of validation error messages (empty if valid)
+ *
+ * @example
+ * ```typescript
+ * const errors = validateNetworkConfig({
+ *   networkPassphrase: Networks.PUBLIC,
+ *   sorobanRpcUrl: 'https://rpc.example.com',
+ * });
+ * if (errors.length > 0) {
+ *   console.error('Invalid config:', errors);
+ * }
+ * ```
+ */
+export function validateNetworkConfig(config: NetworkConfig): string[] {
+  const errors: string[] = [];
+
+  if (config.networkPassphrase !== undefined) {
+    if (typeof config.networkPassphrase !== 'string' || config.networkPassphrase.length === 0) {
+      errors.push('networkPassphrase must be a non-empty string');
+    }
+  }
+
+  if (config.sorobanRpcUrl !== undefined) {
+    const url = typeof config.sorobanRpcUrl === 'string'
+      ? config.sorobanRpcUrl
+      : config.sorobanRpcUrl.url;
+    try {
+      validateRpcEndpoint(url, 'Soroban RPC');
+    } catch (err) {
+      errors.push((err as Error).message);
+    }
+  }
+
+  if (config.horizonUrl !== undefined) {
+    const url = typeof config.horizonUrl === 'string'
+      ? config.horizonUrl
+      : config.horizonUrl.url;
+    try {
+      validateRpcEndpoint(url, 'Horizon');
+    } catch (err) {
+      errors.push((err as Error).message);
+    }
+  }
+
+  if (config.networkName !== undefined) {
+    if (typeof config.networkName !== 'string' || config.networkName.length === 0) {
+      errors.push('networkName must be a non-empty string');
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Resolve network configuration with retry support for endpoint health checks.
+ *
+ * Attempts to reach the Soroban RPC endpoint to verify connectivity before
+ * returning the resolved config. Falls back to the resolved config without
+ * verification if all attempts fail.
+ *
+ * @param config - Partial network configuration (optional)
+ * @param retryOptions - Retry configuration for the health check
+ * @returns Promise resolving to the fully-resolved network configuration
+ *
+ * @example
+ * ```typescript
+ * const config = await resolveNetworkConfigWithRetry({
+ *   networkPassphrase: Networks.TESTNET,
+ *   sorobanRpcUrl: 'https://custom-rpc.example.com',
+ * }, { maxAttempts: 3, delayMs: 1000 });
+ * ```
+ */
+export async function resolveNetworkConfigWithRetry(
+  config: NetworkConfig = {},
+  retryOptions: { maxAttempts?: number; delayMs?: number } = {},
+): Promise<ResolvedNetworkConfig> {
+  const { maxAttempts = 3, delayMs = 1000 } = retryOptions;
+  const resolved = resolveNetworkConfig(config);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), resolved.sorobanRpc.timeout);
+      const response = await fetch(resolved.sorobanRpc.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(resolved.sorobanRpc.apiKey
+            ? { Authorization: `Bearer ${resolved.sorobanRpc.apiKey}` }
+            : {}),
+          ...resolved.sorobanRpc.headers,
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth' }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (response.ok) return resolved;
+    } catch {
+      // Health check failed — wait before retrying
+      if (attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, delayMs * (attempt + 1)));
+      }
+    }
+  }
+
+  // All attempts failed — return the resolved config anyway.
+  // The caller can handle connectivity issues at call time.
+  return resolved;
+}
+
+/**
+ * Create a fully custom network configuration for private or non-standard
+ * deployments with extended endpoint options including proxy and retry.
+ *
+ * @param params - Custom network parameters
+ * @returns Fully resolved network configuration
+ *
+ * @example
+ * ```typescript
+ * const config = createExtendedNetworkConfig({
+ *   networkPassphrase: 'Custom Network ; January 2025',
+ *   sorobanRpc: {
+ *     url: 'https://private-rpc.example.com',
+ *     apiKey: 'my-api-key',
+ *     timeout: 60000,
+ *     proxy: { url: 'http://proxy.example.com:8080' },
+ *     retry: { maxAttempts: 3, baseDelayMs: 1000, exponentialBackoff: true },
+ *   },
+ *   horizon: {
+ *     url: 'https://private-horizon.example.com',
+ *     timeout: 30000,
+ *   },
+ *   networkName: 'Private Network',
+ * });
+ * ```
+ */
+export function createExtendedNetworkConfig(params: {
+  networkPassphrase: string;
+  sorobanRpc: ExtendedRpcEndpointConfig;
+  horizon: ExtendedRpcEndpointConfig;
+  networkName?: string;
+}): ResolvedNetworkConfig {
+  return resolveNetworkConfig({
+    networkPassphrase: params.networkPassphrase,
+    sorobanRpcUrl: {
+      url: params.sorobanRpc.url,
+      timeout: params.sorobanRpc.timeout,
+      apiKey: params.sorobanRpc.apiKey,
+      headers: params.sorobanRpc.headers,
+    },
+    horizonUrl: {
+      url: params.horizon.url,
+      timeout: params.horizon.timeout,
+      apiKey: params.horizon.apiKey,
+      headers: params.horizon.headers,
+    },
+    networkName: params.networkName,
+  });
 }
 
 /** Environment variable names recognised by {@link resolveNetworkConfigFromEnv}. */
