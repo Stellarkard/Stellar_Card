@@ -481,4 +481,211 @@ describe('Soroban integration', () => {
       expect(result.tx).toBeDefined();
     });
   });
+
+  // ── submitSorobanTx — Horizon fallback & advanced paths ─────────────────
+
+  describe('submitSorobanTx — Horizon fallback and advanced error paths', () => {
+    const makeTx = () => ({
+      hash: vi.fn().mockReturnValue(Buffer.alloc(32)),
+      signatures: [],
+      toEnvelope: vi.fn().mockReturnValue({
+        toXDR: vi.fn().mockReturnValue('AAAAAg=='),
+      }),
+    });
+
+    it('falls back to Horizon when getTransaction throws XDR mismatch ("Bad union switch")', async () => {
+      const { submitSorobanTx } = await import('../soroban');
+      const txHash = 'e'.repeat(64);
+
+      const server = {
+        sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: txHash }),
+        getTransaction: vi
+          .fn()
+          .mockRejectedValue(new Error('Bad union switch: 4')),
+      } as any;
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ successful: true }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const hash = await submitSorobanTx(makeTx() as any, server, 'https://horizon-testnet.stellar.org');
+      expect(hash).toBe(txHash);
+      expect(fetchMock).toHaveBeenCalledWith(
+        `https://horizon-testnet.stellar.org/transactions/${txHash}`,
+      );
+
+      vi.unstubAllGlobals();
+    });
+
+    it('throws on-chain failure when Horizon confirms tx failed (XDR mismatch path)', async () => {
+      const { submitSorobanTx } = await import('../soroban');
+      const txHash = 'f'.repeat(64);
+
+      const server = {
+        sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: txHash }),
+        getTransaction: vi
+          .fn()
+          .mockRejectedValue(new Error('Bad union switch: 4')),
+      } as any;
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ successful: false }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(
+        submitSorobanTx(makeTx() as any, server, 'https://horizon-testnet.stellar.org'),
+      ).rejects.toThrow('failed on-chain (Horizon)');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('continues polling when Horizon is unreachable during XDR mismatch', async () => {
+      const { submitSorobanTx } = await import('../soroban');
+      const txHash = '1'.repeat(64);
+
+      let pollCount = 0;
+      const server = {
+        sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: txHash }),
+        getTransaction: vi.fn().mockImplementation(async () => {
+          pollCount += 1;
+          if (pollCount === 1) throw new Error('Bad union switch: 4');
+          // Second poll succeeds
+          return { status: 'SUCCESS', hash: txHash };
+        }),
+      } as any;
+
+      // Horizon is unreachable on the first poll's fallback attempt
+      const fetchMock = vi.fn().mockRejectedValue(new Error('Network error'));
+      vi.stubGlobal('fetch', fetchMock);
+
+      vi.useFakeTimers();
+      const promise = submitSorobanTx(makeTx() as any, server, 'https://horizon.stellar.org');
+      // Advance past the 2000ms poll delay so the second getTransaction fires
+      await vi.advanceTimersByTimeAsync(3000);
+      const hash = await promise;
+      expect(hash).toBe(txHash);
+      expect(pollCount).toBe(2);
+
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('throws with dropped:true when Horizon returns 404 at deadline', async () => {
+      const { submitSorobanTx } = await import('../soroban');
+      const txHash = '2'.repeat(64);
+
+      vi.useFakeTimers();
+
+      const server = {
+        sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: txHash }),
+        // Always return NOT_FOUND so the loop runs to the deadline
+        getTransaction: vi.fn().mockResolvedValue({ status: 'NOT_FOUND', hash: txHash }),
+      } as any;
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        json: async () => ({}),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      // Attach .catch early to prevent unhandled rejection warning
+      let caughtErr: unknown;
+      const promise = submitSorobanTx(makeTx() as any, server, 'https://horizon.stellar.org')
+        .catch((e: unknown) => { caughtErr = e; });
+
+      // Advance well past the 120s deadline
+      await vi.advanceTimersByTimeAsync(130_000);
+      await promise;
+
+      expect(caughtErr).toMatchObject({ dropped: true, txHash });
+
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('throws with txHash attached when Horizon is unreachable at deadline', async () => {
+      const { submitSorobanTx } = await import('../soroban');
+      const txHash = '3'.repeat(64);
+
+      vi.useFakeTimers();
+
+      const server = {
+        sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: txHash }),
+        getTransaction: vi.fn().mockResolvedValue({ status: 'NOT_FOUND', hash: txHash }),
+      } as any;
+
+      // Horizon completely unreachable
+      const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+      vi.stubGlobal('fetch', fetchMock);
+
+      // Attach .catch early to prevent unhandled rejection warning
+      let caughtErr: unknown;
+      const promise = submitSorobanTx(makeTx() as any, server, 'https://horizon.stellar.org')
+        .catch((e: unknown) => { caughtErr = e; });
+
+      await vi.advanceTimersByTimeAsync(130_000);
+      await promise;
+
+      const err = caughtErr as Error & { txHash?: string };
+      expect(err.txHash).toBe(txHash);
+      expect(err.message).toContain('Horizon is unreachable');
+
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('throws after exhausting all TRY_AGAIN_LATER send attempts', async () => {
+      const { submitSorobanTx } = await import('../soroban');
+
+      vi.useFakeTimers();
+
+      const server = {
+        sendTransaction: vi.fn().mockResolvedValue({ status: 'TRY_AGAIN_LATER' }),
+      } as any;
+
+      // Attach .catch early to prevent unhandled rejection warning
+      let caughtErr: unknown;
+      const promise = submitSorobanTx(makeTx() as any, server)
+        .catch((e: unknown) => { caughtErr = e; });
+
+      // Advance past 5 × 1500ms = 7500ms of retry delays
+      await vi.advanceTimersByTimeAsync(10_000);
+      await promise;
+
+      expect((caughtErr as Error).message).toContain('TRY_AGAIN_LATER');
+
+      vi.useRealTimers();
+    });
+
+    it('uses testnet Horizon URL when provided as horizonUrl parameter', async () => {
+      const { submitSorobanTx } = await import('../soroban');
+      const txHash = '4'.repeat(64);
+
+      const server = {
+        sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: txHash }),
+        getTransaction: vi
+          .fn()
+          .mockRejectedValue(new Error('Bad union switch: 4')),
+      } as any;
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ successful: true }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      await submitSorobanTx(makeTx() as any, server, 'https://horizon-testnet.stellar.org');
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('horizon-testnet.stellar.org'),
+      );
+
+      vi.unstubAllGlobals();
+    });
+  });
 });
