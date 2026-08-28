@@ -1,0 +1,654 @@
+// MCP server entry. Exposed via `stellar_card` or `stellar_card mcp` and
+// dispatched through ./cli. Not intended to be imported as a module
+// from anywhere else — the top-level Server setup registers handlers
+// eagerly so any import runs the full initialisation path.
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  createOWSWallet,
+  getOWSPublicKey,
+  getOWSBalance,
+  addUsdcTrustlineOWS,
+  purchaseCardOWS,
+} from './ows';
+import { Stellar_CardClient } from './client';
+// Audit A-38: version string imported from package.json instead of hardcoded.
+// The `with { type: 'json' }` import lets tsc emit a real assertion and
+// bun/node24 load it as JSON.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const PKG_VERSION = require('../package.json').version as string;
+
+const API_KEY = process.env.CARDS402_API_KEY ?? '';
+const BASE_URL = process.env.CARDS402_BASE_URL ?? 'https://api.stellar_card.com/v1';
+const OWS_WALLET_NAME = process.env.OWS_WALLET_NAME ?? '';
+const OWS_WALLET_PASSPHRASE = process.env.OWS_WALLET_PASSPHRASE ?? undefined;
+const OWS_VAULT_PATH = process.env.OWS_VAULT_PATH ?? undefined;
+
+if (!API_KEY) {
+  process.stderr.write('Warning: CARDS402_API_KEY is not set. Get one at https://stellar_card.com\n');
+}
+
+if (!OWS_WALLET_NAME) {
+  process.stderr.write('Warning: OWS_WALLET_NAME is not set. Run setup_wallet for instructions.\n');
+}
+
+const server = new Server(
+  { name: 'stellar_card', version: PKG_VERSION },
+  { capabilities: { tools: {} } },
+);
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: 'purchase_vcc',
+      description:
+        'Purchase a prepaid Visa virtual card. Pay with USDC or XLM on Stellar. Returns card number, CVV, and expiry. Requires OWS_WALLET_NAME — run setup_wallet to configure. Minimum $0.01, maximum $10,000 per card.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          amount_usdc: {
+            type: 'string',
+            // Matches backend/src/api/orders.js — positive decimal string
+            // between 0.01 and 10000 inclusive.
+            pattern: '^\\d+(\\.\\d{1,2})?$',
+            description:
+              "Card value in USD as a decimal string, e.g. '10.00'. Minimum '0.01', maximum '10000.00'.",
+          },
+          payment_asset: {
+            type: 'string',
+            enum: ['auto', 'usdc', 'xlm'],
+            description:
+              "Payment asset: 'auto' (default — picks USDC if the wallet has enough, else XLM), 'usdc', or 'xlm'.",
+          },
+        },
+        required: ['amount_usdc'],
+      },
+    },
+    {
+      name: 'setup_wallet',
+      description:
+        'Set up or inspect the OWS encrypted wallet used to pay stellar_card. Creates the wallet on first run. Shows public key and balances.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+    {
+      name: 'check_order',
+      description: 'Check the status of a stellar_card order',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          order_id: {
+            type: 'string',
+            description: 'The stellar_card order ID',
+          },
+        },
+        required: ['order_id'],
+      },
+    },
+    {
+      name: 'check_budget',
+      description:
+        "Check this agent's spend summary — how much has been spent, the configured limit, and how much budget remains. Use this to report spending to your owner or to decide whether you can afford a card.",
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  ],
+}));
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+
+  if (name === 'setup_wallet') {
+    if (!OWS_WALLET_NAME) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: [
+              'OWS_WALLET_NAME is not set.',
+              '',
+              'To configure your wallet:',
+              '  1. Set OWS_WALLET_NAME=<name> in your MCP server environment',
+              '  2. Optionally set OWS_WALLET_PASSPHRASE=<passphrase> for extra encryption',
+              '  3. Optionally set OWS_VAULT_PATH=<path> to store the vault file at a custom location',
+              '  4. Run setup_wallet to create the wallet and get your public key',
+              '',
+              'Also set CARDS402_API_KEY=<your key> (get one at stellar_card.com)',
+            ].join('\n'),
+          },
+        ],
+      };
+    }
+
+    try {
+      let publicKey: string;
+      let created = false;
+      try {
+        publicKey = getOWSPublicKey(OWS_WALLET_NAME, OWS_VAULT_PATH);
+      } catch {
+        const result = createOWSWallet(OWS_WALLET_NAME, OWS_WALLET_PASSPHRASE, OWS_VAULT_PATH);
+        publicKey = result.publicKey;
+        created = true;
+      }
+
+      const lines: string[] = [
+        created ? 'OWS Wallet Created' : 'OWS Wallet',
+        '',
+        `Wallet name: ${OWS_WALLET_NAME}`,
+        `Public key:  ${publicKey}`,
+      ];
+
+      let accountStatus = 'unknown';
+      try {
+        const bal = await getOWSBalance(OWS_WALLET_NAME, OWS_VAULT_PATH);
+        const xlmNum = parseFloat(bal.xlm);
+        const usdcNum = parseFloat(bal.usdc);
+
+        if (xlmNum >= 2 && usdcNum === 0) {
+          // Wallet is funded but no USDC trustline yet — add it automatically
+          lines.push('');
+          lines.push('USDC trustline: adding…');
+          try {
+            const txHash = await addUsdcTrustlineOWS({
+              walletName: OWS_WALLET_NAME,
+              passphrase: OWS_WALLET_PASSPHRASE,
+              vaultPath: OWS_VAULT_PATH,
+            });
+            if (txHash === null) {
+              lines.push(`USDC trustline: already exists`);
+            } else {
+              lines.push(`USDC trustline: added (txid: ${txHash})`);
+            }
+            accountStatus = 'ready_no_usdc';
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            lines.push(`USDC trustline: could not add (${errMsg.slice(0, 120)})`);
+            lines.push(
+              '  This may mean the trustline already exists, or XLM balance is too low for fees.',
+            );
+            accountStatus = usdcNum > 0 ? 'ready' : 'funded_no_trustline';
+          }
+          // Re-fetch balance after trustline op
+          try {
+            const bal2 = await getOWSBalance(OWS_WALLET_NAME, OWS_VAULT_PATH);
+            lines.push('');
+            lines.push(`XLM balance:  ${bal2.xlm}`);
+            lines.push(`USDC balance: ${bal2.usdc}`);
+            lines.push('');
+            lines.push('Status: Wallet ready. Fund with USDC to purchase cards with USDC,');
+            lines.push('        or top up XLM to purchase with native XLM (no USDC needed).');
+          } catch {
+            lines.push('');
+            lines.push(`XLM balance:  ${bal.xlm}`);
+            lines.push(`USDC balance: ${bal.usdc}`);
+          }
+        } else if (xlmNum >= 2 && usdcNum > 0) {
+          accountStatus = 'ready';
+          lines.push('');
+          lines.push(`XLM balance:  ${bal.xlm}`);
+          lines.push(`USDC balance: ${bal.usdc}`);
+          lines.push('');
+          lines.push('Status: Ready to purchase cards.');
+        } else if (xlmNum > 0 && xlmNum < 2) {
+          accountStatus = 'low_xlm';
+          lines.push('');
+          lines.push(`XLM balance:  ${bal.xlm}`);
+          lines.push(`USDC balance: ${bal.usdc}`);
+          lines.push('');
+          lines.push('Status: Account active but XLM balance is low.');
+          lines.push('        Send at least 2 XLM total to cover reserves and fees.');
+        } else {
+          accountStatus = 'unfunded';
+          lines.push('');
+          lines.push(`XLM balance:  ${bal.xlm}`);
+          lines.push(`USDC balance: ${bal.usdc}`);
+          lines.push('');
+          lines.push('Status: Account not yet funded. Send at least 2 XLM to activate.');
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (
+          errMsg.includes('404') ||
+          errMsg.toLowerCase().includes('not found') ||
+          errMsg.includes('request failed')
+        ) {
+          // Account does not exist on-chain yet (not activated)
+          accountStatus = 'not_activated';
+          lines.push('');
+          lines.push('Status: Account not activated (no on-chain balance).');
+        } else {
+          // Network error or Horizon outage — don't guess account state
+          lines.push('');
+          lines.push(`Status: Could not fetch balance (${errMsg.slice(0, 120)})`);
+          lines.push('Check your network connection and try again.');
+        }
+      }
+
+      lines.push('');
+      lines.push('Environment variables:');
+      lines.push(`  OWS_WALLET_NAME       — wallet identifier (set: "${OWS_WALLET_NAME}")`);
+      lines.push(
+        `  OWS_WALLET_PASSPHRASE — encryption passphrase (${OWS_WALLET_PASSPHRASE ? 'set' : 'not set'})`,
+      );
+      lines.push(
+        `  OWS_VAULT_PATH        — vault file path (${OWS_VAULT_PATH ?? 'default: ~/.ows/wallets/'})`,
+      );
+      lines.push('  CARDS402_API_KEY      — your stellar_card API key');
+
+      if (accountStatus === 'not_activated' || accountStatus === 'unfunded') {
+        lines.push('');
+        lines.push('──────────────────────────────────────────────────────────────────');
+        lines.push('ACTION REQUIRED — copy this block and send it to your human operator');
+        lines.push('──────────────────────────────────────────────────────────────────');
+        lines.push('');
+        lines.push('Your AI agent has a Stellar wallet that needs funding before it can');
+        lines.push('purchase cards. Please send XLM (and optionally USDC) to the');
+        lines.push('address below.');
+        lines.push('');
+        lines.push(`  Wallet address:  ${publicKey}`);
+        lines.push('  (copy the G... address exactly — it is case-sensitive)');
+        lines.push('');
+        lines.push('  How much to send:');
+        lines.push('    • At least 2 XLM to activate the account and cover reserves.');
+        lines.push('    • For XLM-funded purchases: enough XLM to cover the card');
+        lines.push('      face value at the current XLM/USD rate. The exact amount');
+        lines.push('      is quoted when the order is created; top up with a safety');
+        lines.push('      margin because the rate moves.');
+        lines.push('    • For USDC-funded purchases: 2 XLM + the USDC face value.');
+        lines.push('      The SDK adds the USDC trustline on the first purchase.');
+        lines.push('');
+        lines.push('  Where to get XLM / USDC:');
+        lines.push('    Coinbase: coinbase.com → Buy XLM or USDC → Send → paste address');
+        lines.push('    Lobstr:   lobstr.co → Buy XLM or USDC → Send → paste address');
+        lines.push('    Kraken:   kraken.com → Buy → Withdraw (Stellar) → paste address');
+        lines.push('');
+        lines.push('  After sending: tell your agent to run setup_wallet again to confirm.');
+        lines.push('──────────────────────────────────────────────────────────────────');
+      } else if (accountStatus === 'low_xlm') {
+        lines.push('');
+        lines.push('──────────────────────────────────────────────────────────────────');
+        lines.push('ACTION REQUIRED — wallet needs more XLM');
+        lines.push('──────────────────────────────────────────────────────────────────');
+        lines.push('');
+        lines.push(`  Wallet address:  ${publicKey}`);
+        lines.push('');
+        lines.push('  Send more XLM to cover the Stellar account reserve, a USDC');
+        lines.push('  trustline entry, and transaction fees — at least 2 XLM total.');
+        lines.push('  For XLM-funded purchases, also send enough XLM to cover the');
+        lines.push('  card face value at the current XLM/USD rate (topped up with a');
+        lines.push('  safety margin because the rate moves).');
+        lines.push('──────────────────────────────────────────────────────────────────');
+      } else if (accountStatus === 'ready_no_usdc') {
+        lines.push('');
+        lines.push('Next steps:');
+        lines.push(`  Wallet address: ${publicKey}`);
+        lines.push('');
+        lines.push('  To pay with XLM (recommended):');
+        lines.push('    Send more XLM to the address above, then call:');
+        lines.push('    purchase_vcc { amount_usdc: "10.00", payment_asset: "xlm" }');
+        lines.push('');
+        lines.push('  To pay with USDC:');
+        lines.push('    Send USDC to the address above (trustline is already set up), then call:');
+        lines.push('    purchase_vcc { amount_usdc: "10.00", payment_asset: "usdc" }');
+      } else if (accountStatus === 'funded_no_trustline') {
+        // Wallet has enough XLM but the USDC trustline add attempt failed
+        // (usually because the wallet XLM balance dropped below 2 just as
+        // we tried, or Horizon flaked). Agents can retry or pay in XLM.
+        lines.push('');
+        lines.push('──────────────────────────────────────────────────────────────────');
+        lines.push('USDC trustline could not be added automatically');
+        lines.push('──────────────────────────────────────────────────────────────────');
+        lines.push('');
+        lines.push(`  Wallet address: ${publicKey}`);
+        lines.push('');
+        lines.push('  Options:');
+        lines.push('    1. Run setup_wallet again — the retry often succeeds.');
+        lines.push('    2. Top up the wallet with a bit more XLM (you need 2 XLM');
+        lines.push('       minimum: 1 for the account reserve + 1 for the trustline');
+        lines.push('       entry + fees).');
+        lines.push('    3. Pay with XLM instead of USDC — no trustline required:');
+        lines.push('       purchase_vcc { amount_usdc: "10.00", payment_asset: "xlm" }');
+      }
+
+      return {
+        content: [{ type: 'text', text: lines.join('\n') }],
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: 'text', text: `Error in setup_wallet: ${message}` }],
+        isError: true,
+      };
+    }
+  }
+
+  if (!API_KEY) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: 'Error: CARDS402_API_KEY environment variable is not set. Get your API key at https://stellar_card.com',
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  if (name === 'purchase_vcc') {
+    if (!OWS_WALLET_NAME) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: 'Error: OWS_WALLET_NAME is not set. Run setup_wallet for configuration instructions.',
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Validate and extract args explicitly — never trust MCP client types
+    const rawArgs = args as Record<string, unknown>;
+    const amount_usdc = String(rawArgs.amount_usdc ?? '').trim();
+    const raw_asset = String(rawArgs.payment_asset ?? 'auto').toLowerCase();
+
+    // Amount validation — mirrors backend/src/api/orders.js bounds so the
+    // agent gets a specific error here instead of a generic 400 from the
+    // backend. Min $0.01, max $10,000, decimal string, ≤2 decimal places.
+    if (!/^\d+(\.\d{1,2})?$/.test(amount_usdc)) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: 'Error: amount_usdc must be a decimal string, e.g. "10.00" or "25.5"',
+          },
+        ],
+        isError: true,
+      };
+    }
+    const amountNum = parseFloat(amount_usdc);
+    if (amountNum < 0.01) {
+      return {
+        content: [{ type: 'text', text: 'Error: amount_usdc must be at least 0.01 (one US cent)' }],
+        isError: true,
+      };
+    }
+    if (amountNum > 10000) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: "Error: amount_usdc cannot exceed 10000.00 (Pathward's per-card balance ceiling). For larger aggregate spend, issue multiple cards.",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    if (raw_asset !== 'usdc' && raw_asset !== 'xlm' && raw_asset !== 'auto') {
+      return {
+        content: [{ type: 'text', text: 'Error: payment_asset must be "auto", "usdc", or "xlm"' }],
+        isError: true,
+      };
+    }
+
+    // Pre-purchase balance check. Also resolves payment_asset when the
+    // caller asked for 'auto': pick USDC if the wallet holds enough,
+    // else fall back to XLM. Matches the CLI's `purchase --asset auto`
+    // behaviour at sdk/src/commands/purchase.ts:184 so agents see the
+    // same resolution logic regardless of which surface they use.
+    let payment_asset: 'usdc' | 'xlm';
+    const autoPickNotes: string[] = [];
+
+    try {
+      const balance = await getOWSBalance(OWS_WALLET_NAME, OWS_VAULT_PATH);
+      const publicKey = getOWSPublicKey(OWS_WALLET_NAME, OWS_VAULT_PATH);
+      const xlmNum = parseFloat(balance.xlm);
+      const usdcNum = parseFloat(balance.usdc);
+
+      if (raw_asset === 'auto') {
+        if (usdcNum >= amountNum && amountNum > 0) {
+          payment_asset = 'usdc';
+          autoPickNotes.push(
+            `Auto-picked USDC (wallet has ${usdcNum.toFixed(2)} USDC; covers $${amount_usdc}).`,
+          );
+        } else {
+          payment_asset = 'xlm';
+          autoPickNotes.push(
+            usdcNum > 0
+              ? `Auto-picked XLM (wallet has only ${usdcNum.toFixed(2)} USDC; needs $${amount_usdc}).`
+              : 'Auto-picked XLM (no USDC in wallet).',
+          );
+        }
+      } else {
+        payment_asset = raw_asset as 'usdc' | 'xlm';
+      }
+
+      if (payment_asset === 'usdc') {
+        if (usdcNum < amountNum) {
+          const shortfall = (amountNum - usdcNum).toFixed(2);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: [
+                  'Insufficient USDC balance.',
+                  '',
+                  `  You have:    ${balance.usdc} USDC`,
+                  `  You need:    ${amount_usdc} USDC`,
+                  `  Shortfall:   ${shortfall} USDC`,
+                  '',
+                  `Send USDC to your wallet address:`,
+                  `  ${publicKey}`,
+                  '',
+                  'After funding, run purchase_vcc again.',
+                  'Or switch to XLM payment: purchase_vcc { payment_asset: "xlm" }',
+                ].join('\n'),
+              },
+            ],
+            isError: true,
+          };
+        }
+      } else {
+        // XLM: we don't know the exact rate until the order is created, but
+        // we can gate on a hard floor of 3 XLM (~1.5 XLM for reserves + a
+        // trustline entry + comfortable headroom for fees) to catch
+        // obviously-unfunded wallets before hitting the API.
+        if (xlmNum < 3) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: [
+                  'XLM balance is too low to purchase a card.',
+                  '',
+                  `  You have:  ${balance.xlm} XLM`,
+                  `  Minimum:   3 XLM (Stellar base reserve + trustline + fee headroom)`,
+                  '',
+                  'The exact XLM amount for this order is quoted by the backend',
+                  'when the order is created. Top up with extra for safety.',
+                  '',
+                  `Send XLM to your wallet address:`,
+                  `  ${publicKey}`,
+                  '',
+                  'Where to get XLM:',
+                  '  Coinbase:  coinbase.com → Buy XLM → Send',
+                  '  Lobstr:    lobstr.co → Buy XLM → Send',
+                  '',
+                  'After funding, run purchase_vcc again.',
+                ].join('\n'),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    } catch {
+      // Could not fetch balance (wallet not activated, Horizon outage, etc.).
+      // Fall through to the purchase call with a sensible default — XLM, since
+      // it doesn't need a trustline so it has the lowest chance of an
+      // immediate error. The real error will surface out of purchaseCardOWS.
+      payment_asset = raw_asset === 'auto' ? 'xlm' : (raw_asset as 'usdc' | 'xlm');
+      if (raw_asset === 'auto') {
+        autoPickNotes.push(
+          'Could not read wallet balance — auto-picked XLM as the no-trustline-required fallback.',
+        );
+      }
+    }
+
+    try {
+      const card = await purchaseCardOWS({
+        apiKey: API_KEY,
+        walletName: OWS_WALLET_NAME,
+        amountUsdc: amount_usdc,
+        paymentAsset: payment_asset,
+        passphrase: OWS_WALLET_PASSPHRASE,
+        vaultPath: OWS_VAULT_PATH,
+        baseUrl: BASE_URL,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: [
+              'Virtual Visa Card Ready',
+              ...(autoPickNotes.length ? ['', ...autoPickNotes] : []),
+              '',
+              `Number: ${card.number}`,
+              `CVV:    ${card.cvv}`,
+              `Expiry: ${card.expiry}`,
+              `Brand:  ${card.brand ?? 'Visa'}`,
+              '',
+              `Order ID: ${card.order_id}`,
+              '',
+              'This is a one-time use virtual card. Keep these details safe.',
+            ].join('\n'),
+          },
+        ],
+      };
+    } catch (err) {
+      // Only expose typed API errors — other errors may contain internal details
+      const message =
+        err instanceof Error && err.constructor.name.endsWith('Error') && 'status' in err
+          ? err.message
+          : err instanceof Error
+            ? err.message.slice(0, 200)
+            : 'Purchase failed';
+      return {
+        content: [{ type: 'text', text: `Error purchasing card: ${message}` }],
+        isError: true,
+      };
+    }
+  }
+
+  if (name === 'check_order') {
+    // Validate order_id before using it in a URL path
+    const rawOrderId = String((args as Record<string, unknown>).order_id ?? '').trim();
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(rawOrderId)) {
+      return {
+        content: [{ type: 'text', text: 'Error: invalid order ID format' }],
+        isError: true,
+      };
+    }
+    const order_id = rawOrderId;
+
+    try {
+      const client = new Stellar_CardClient({ apiKey: API_KEY, baseUrl: BASE_URL });
+      const order = await client.getOrder(order_id);
+
+      const lines = [
+        `Order: ${order.order_id}`,
+        `Status: ${order.status} (phase: ${order.phase})`,
+        `Amount: $${order.amount_usdc} USDC`,
+        `Asset: ${order.payment_asset}`,
+        `Created: ${order.created_at}`,
+        `Updated: ${order.updated_at}`,
+      ];
+      if (order.phase === 'ready' && order.card) {
+        lines.push('');
+        lines.push('Card details:');
+        lines.push(`  Number: ${order.card.number}`);
+        lines.push(`  CVV:    ${order.card.cvv}`);
+        lines.push(`  Expiry: ${order.card.expiry}`);
+        lines.push(`  Brand:  ${order.card.brand ?? 'Visa'}`);
+      }
+      if (order.error) {
+        lines.push('');
+        lines.push(`Error: ${order.error}`);
+      }
+      if (order.refund) {
+        lines.push(`Refund txid: ${order.refund.stellar_txid}`);
+      }
+      if (order.note) {
+        lines.push(`Note: ${order.note}`);
+      }
+      return {
+        content: [{ type: 'text', text: lines.join('\n') }],
+      };
+    } catch (err) {
+      // Match purchase_vcc's sanitization: typed API errors through,
+      // everything else truncated so we don't leak stack frames or
+      // internal URLs into the MCP transcript.
+      const message =
+        err instanceof Error && err.constructor.name.endsWith('Error') && 'status' in err
+          ? err.message
+          : err instanceof Error
+            ? err.message.slice(0, 200)
+            : 'Check order failed';
+      return {
+        content: [{ type: 'text', text: `Error checking order: ${message}` }],
+        isError: true,
+      };
+    }
+  }
+
+  if (name === 'check_budget') {
+    try {
+      const client = new Stellar_CardClient({ apiKey: API_KEY, baseUrl: BASE_URL });
+      const usage = await client.getUsage();
+      const { budget, orders, label } = usage;
+      const lines = [
+        `Budget summary${label ? ` for "${label}"` : ''}`,
+        '',
+        `Spent:     $${budget.spent_usdc} USDC`,
+        budget.limit_usdc ? `Limit:     $${budget.limit_usdc} USDC` : 'Limit:     unlimited',
+        budget.remaining_usdc !== null
+          ? `Remaining: $${budget.remaining_usdc} USDC`
+          : 'Remaining: unlimited',
+        '',
+        `Orders — total: ${orders.total}, delivered: ${orders.delivered}, failed: ${orders.failed}, refunded: ${orders.refunded}, in progress: ${orders.in_progress}`,
+      ];
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
+    } catch (err) {
+      const message =
+        err instanceof Error && err.constructor.name.endsWith('Error') && 'status' in err
+          ? err.message
+          : err instanceof Error
+            ? err.message.slice(0, 200)
+            : 'Check budget failed';
+      return {
+        content: [{ type: 'text', text: `Error checking budget: ${message}` }],
+        isError: true,
+      };
+    }
+  }
+
+  return {
+    content: [{ type: 'text', text: `Unknown tool: ${name}` }],
+    isError: true,
+  };
+});
+
+/** Start the stdio-based MCP server exported by the SDK. */
+export async function startMcpServer(): Promise<void> {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}

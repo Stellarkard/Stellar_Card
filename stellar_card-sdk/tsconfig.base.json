@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "moduleDetection": "force",
+    "lib": ["ES2022"],
+    "target": "ES2022",
+    // TS 6.0 emits TS5107 (an error) for moduleResolution=node10 (the
+    // legacy 'node' value). The SDK still uses that and a proper
+    // migration to 'node16' requires adding .js extensions to every
+    // relative import — out of scope for this bump. Silence the
+    // deprecation for the TS 6 window; this MUST be removed (and the
+    // migration done) before TS 7.0 ships, otherwise the build will
+    // hard-fail.
+    "ignoreDeprecations": "6.0"
+  }
+}
