@@ -142,7 +142,7 @@ async function deriveKey(
 
   return crypto.subtle.deriveKey(
     {
-      name: PBKDF2,
+      name: PBKDF2_ALGO,
       salt,
       iterations: PBKDF2_ITERATIONS,
       hash: SHA_256,
