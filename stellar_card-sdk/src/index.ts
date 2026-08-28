@@ -89,19 +89,37 @@ export {
 
 export { InsufficientFeeError } from './soroban';
 
+export {
+  encrypt,
+  decrypt,
+  encryptStellarKey,
+  decryptStellarKey,
+  reEncrypt,
+  verifyPassphrase,
+} from './encryption';
+export type { EncryptedPayload, EncryptOptions, DecryptOptions } from './encryption';
+
 export { mppCharge } from './mpp';
 export type { MppChargeOpts, MppChargeResult } from './mpp';
 
 export { loadStellar_CardConfig, saveStellar_CardConfig, resolveCredentials } from './config';
 export type { Stellar_CardConfig } from './config';
 
-export { paginate, iteratePages, collectAllPages, mapPaginated } from './pagination';
+export {
+  paginate,
+  iteratePages,
+  collectAllPages,
+  mapPaginated,
+  createOrderPaginator,
+} from './pagination';
 export type {
   PaginationCursor,
   PaginatedResult,
   PaginateOptions,
   IteratePagesOptions,
   MapPaginatedOptions,
+  OrderPaginatorOptions,
+  OrderPaginator,
 } from './pagination';
 
 export {
