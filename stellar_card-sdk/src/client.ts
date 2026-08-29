@@ -129,6 +129,10 @@ export interface RetryOptions {
   baseDelayMs?: number;
   /** Max backoff cap in ms. */
   maxDelayMs?: number;
+  /** Jitter strategy used for retry delays. Defaults to full jitter. */
+  jitter?: 'full' | 'equal' | 'decorrelated' | 'none';
+  /** Optional callback invoked before waiting for each retry. */
+  onRetry?: (error: unknown, attempt: number, delayMs: number) => void;
 }
 
 export interface CreateOrderOptions extends OrderOptions {
@@ -309,6 +313,8 @@ export class Stellar_CardClient {
       attempts: retry.attempts ?? 2,
       baseDelayMs: retry.baseDelayMs ?? 500,
       maxDelayMs: retry.maxDelayMs ?? 5000,
+      jitter: retry.jitter ?? 'full',
+      onRetry: retry.onRetry ?? (() => undefined),
     };
   }
 
@@ -326,7 +332,7 @@ export class Stellar_CardClient {
   }
 
   private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
-    const { attempts, baseDelayMs, maxDelayMs } = this.retry;
+    const { attempts, baseDelayMs, maxDelayMs, jitter, onRetry } = this.retry;
     let lastErr: unknown;
     for (let i = 0; i <= attempts; i++) {
       try {
@@ -339,9 +345,10 @@ export class Stellar_CardClient {
           baseDelayMs,
           maxDelayMs,
           retryAfter: res.headers?.get?.('Retry-After') ?? null,
-          jitter: 'full', // Use full jitter to avoid thundering herd
+          jitter,
           factor: 2, // Standard exponential backoff factor
         });
+        onRetry(lastErr, i, delayMs);
         await sleep(delayMs);
         continue;
       } catch (err) {
@@ -352,9 +359,10 @@ export class Stellar_CardClient {
           attempt: i,
           baseDelayMs,
           maxDelayMs,
-          jitter: 'full',
+          jitter,
           factor: 2,
         });
+        onRetry(err, i, delayMs);
         await sleep(delayMs);
       }
     }

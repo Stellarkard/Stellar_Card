@@ -143,11 +143,15 @@ const client = new Stellar_CardClient({
     attempts: 4,
     baseDelayMs: 250,
     maxDelayMs: 4000,
+    jitter: 'full',
+    onRetry: (error, attempt, delayMs) => {
+      console.warn(`Retry ${attempt + 1} in ${delayMs}ms`, error);
+    },
   },
 });
 ```
 
-The SDK uses exponential backoff with full jitter for transient API failures and honors `Retry-After` headers when the backend asks clients to slow down.
+The SDK uses exponential backoff with full jitter for transient API failures and honors `Retry-After` headers when the backend asks clients to slow down. Set `jitter: 'none'` for deterministic delays in tests; `onRetry` is called immediately before each retry delay.
 
 ## MCP server — for Claude Desktop, Cursor, and other MCP clients
 
