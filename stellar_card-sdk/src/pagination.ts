@@ -247,6 +247,10 @@ export interface OrderPaginator<T> {
    */
   reset(): void;
   /**
+   * The current zero-based offset of the paginator.
+   */
+  readonly currentOffset: number;
+  /**
    * Async iterator support — allows `for await (const item of paginator)`.
    */
   [Symbol.asyncIterator](): AsyncGenerator<T, void, void>;
@@ -332,6 +336,7 @@ export function createOrderPaginator<T>(
     next,
     all,
     reset,
+    get currentOffset() { return currentOffset; },
     [Symbol.asyncIterator]: iterate,
   };
 }
