@@ -14,7 +14,7 @@ import { Button } from '../../_ui/Button';
 import { Toggle } from '../../_ui/Toggle';
 import { Input } from '../../_ui/Input';
 import { EmptyState } from '../../_ui/EmptyState';
-import { SpendChart } from '../../_ui/SpendChart';
+import { DynamicSpendChart } from '../../../lib/dynamic-imports';
 import { Drawer } from '../../_ui/Drawer';
 import { QrCode } from '../../_ui/QrCode';
 import { AgentStatePill } from '../../_ui/AgentStatePill';
@@ -202,7 +202,7 @@ export default function AgentDetailPage({ params }: PageProps) {
         </KpiRow>
 
         <Card title="Spend — last 14 days">
-          <SpendChart data={chartData} height={200} />
+          <DynamicSpendChart data={chartData} height={200} />
         </Card>
 
         <Card title="Recent orders" padding={0}>
