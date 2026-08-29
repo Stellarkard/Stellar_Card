@@ -194,6 +194,15 @@ describe('createOWSWallet', () => {
     const result2 = createOWSWallet('my-agent');
     expect(result1.walletId).toBe(result2.walletId);
   });
+
+  it('throws when underlying OWS core wallet creation fails', async () => {
+    const core = await import('@ctx.com/stellar-ows-core');
+    vi.mocked(core.createWallet).mockImplementationOnce(() => {
+      throw new Error('Vault access denied');
+    });
+
+    expect(() => createOWSWallet('failing-agent')).toThrow('Vault access denied');
+  });
 });
 
 describe('importStellarKey', () => {
@@ -222,6 +231,15 @@ describe('importStellarKey', () => {
       '/data/vault',
     );
     expect(result.publicKey).toMatch(/^G/);
+  });
+
+  it('throws when underlying OWS core key import fails', async () => {
+    const core = await import('@ctx.com/stellar-ows-core');
+    vi.mocked(core.importWalletPrivateKey).mockImplementationOnce(() => {
+      throw new Error('Invalid key format');
+    });
+
+    expect(() => importStellarKey('imported-wallet', VALID_STELLAR_SECRET)).toThrow('Invalid key format');
   });
 });
 
