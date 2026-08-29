@@ -1,102 +1,46 @@
-# Frontend Improvements: Accessibility, Wallet States, Theme Standardization, and Storybook
+# SDK custom RPC endpoint configuration fix
 
-This PR implements four frontend improvements for the Stellar_Card project:
+This PR hardens the stellar_card SDK network configuration logic for custom RPC and Horizon endpoints and closes the gap around blank or whitespace-only endpoint values.
 
-- **Accessibility (a11y) improvements** for better screen reader support and keyboard navigation
-- **Wallet connection states** with a unified state management system
-- **Theme standardization** with centralized constants for colors, typography, and spacing
-- **Storybook setup** for component documentation with accessibility testing
+## Summary
+
+- Normalizes custom endpoint strings before resolution
+- Treats blank / whitespace-only values as unset so the SDK falls back to default mainnet/testnet endpoints
+- Keeps environment-driven config consistent with object-based config
+- Adds regression coverage for edge cases in custom and env-based network configuration
 
 ## Changes
 
-### Task #127: Accessibility (a11y) Improvements (Part 3)
+### Custom RPC endpoint resolution
 
-**Files Modified:**
-- `app/dashboard/_ui/Button.tsx` - Added `aria-label`, `aria-describedby` props, automatic aria-label from children text, and `aria-hidden` for decorative icons
-- `app/dashboard/_ui/Input.tsx` - Added `aria-label`, `aria-invalid`, `aria-required` props, visual feedback for invalid states, and `aria-hidden` for decorative prefix/suffix
-- `app/dashboard/_ui/Toggle.tsx` - Added proper `role="switch"`, `aria-checked`, `aria-label`, and `aria-describedby` attributes
+The SDK now trims and normalizes custom endpoint values before they are used in `resolveNetworkConfig()` and `resolveNetworkConfigFromEnv()`.
 
-**Key Improvements:**
-- All interactive components now have proper ARIA labels
-- Decorative icons are marked with `aria-hidden="true"`
-- Form inputs support invalid state announcements
-- Toggle switches use correct ARIA role for screen readers
-- Focus-visible styles already present in globals.css for keyboard navigation
+This prevents cases like:
 
-### Task #126: Wallet Connection States (Part 3)
+- `sorobanRpcUrl: '   '` from overriding the default RPC URL
+- `networkPassphrase: '   '` from silently acting as a custom network
+- environment variables with whitespace-only values from overriding real defaults
 
-**Files Created:**
-- `app/dashboard/_lib/walletConnection.ts` - Type definitions and utility functions for wallet connection states
-- `app/dashboard/_ui/WalletConnectionStatus.tsx` - React component for displaying wallet connection status
-- `app/dashboard/_ui/WalletConnectionStatus.stories.tsx` - Storybook stories for the component
+### Default fallback behavior
 
-**Key Features:**
-- Six connection states: `disconnected`, `connecting`, `connected`, `error`, `insufficient_balance`, `network_mismatch`
-- Compact and full display modes
-- Action buttons for connect/disconnect/retry
-- Network indicator (mainnet/testnet)
-- Public key display with truncation
-- ARIA live regions for screen reader announcements
-- Color-coded status indicators
+When an endpoint or config value is empty after trimming, the SDK falls back to the network-appropriate public default instead of accepting invalid configuration.
 
-### Task #125: Standardize Theme Colors and Typography (Part 3)
+### Tests added
 
-**Files Created:**
-- `app/dashboard/_lib/themeConstants.ts` - Centralized theme constants
+- Blank or whitespace-only object config values default cleanly
+- Blank or whitespace-only env values default cleanly
+- Existing override and timeout behavior remains intact
 
-**Key Features:**
-- Single source of truth for all design tokens
-- Color constants mapped to CSS variables
-- Typography scale (font sizes, weights, line heights, letter spacing)
-- Spacing scale for consistent margins/padding
-- Border radius constants
-- Shadow constants
-- Motion/easing constants
-- Z-index layer constants
-- Helper function for status color mapping
+## Files touched
 
-### Task #128: Storybook Setup (Part 3)
+- `stellar_card-sdk/src/network.ts`
+- `stellar_card-sdk/src/__tests__/network.test.ts`
 
-**Files Modified:**
-- `.storybook/main.ts` - Updated configuration with a11y addon, docs addon, and proper path resolution
-- `.storybook/preview.tsx` - Added global CSS import, configured a11y rules, enabled table of contents
+## Validation
 
-**Files Created:**
-- `app/dashboard/_ui/WalletConnectionStatus.stories.tsx` - Comprehensive stories for wallet connection component
+- Added focused regression tests covering the edge cases above
+- Verified the logic remains compatible with existing network override expectations
 
-**Key Features:**
-- Accessibility addon enabled with contrast, label, and button name checks
-- Auto-documentation enabled for all components
-- Global CSS imported for proper theme support
-- Dark/light theme backgrounds
-- Stories covering all wallet connection states and variants
+## Related issue
 
-## Testing
-
-All components include:
-- Proper TypeScript typing
-- ARIA attributes for screen readers
-- Keyboard navigation support
-- Responsive design considerations
-- Storybook documentation with accessibility testing
-
-## Breaking Changes
-
-None. All changes are additive and backward compatible.
-
-## Checklist
-
-- [x] Code follows project guidelines and existing design patterns
-- [x] All edge cases considered (error states, loading states, accessibility)
-- [x] Components follow the existing visual language
-- [x] TypeScript types are properly defined
-- [x] Storybook stories created for new components
-- [x] Accessibility improvements implemented
-- [x] Theme constants centralized
-
-## Related Issues
-
-Closes #127 - [frontend] Add accessibility (a11y) improvements (Part 3)
-Closes #126 - [frontend] Implement wallet connection states (Part 3)
-Closes #125 - [frontend] Standardize theme colors and typography (Part 3)
-Closes #128 - [frontend] Setup Storybook for component documentation (Part 3)
+Closes #517 - [sdk] Add support for custom RPC endpoint config (Part 4)

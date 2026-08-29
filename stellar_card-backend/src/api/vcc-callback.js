@@ -468,6 +468,8 @@ router.post('/', (req, res) => {
     // its terminal state; this call only fires the side-effects
     // (refund tx OR ops alert).
     refundOrQuarantine(order_id, safeError).catch(() => {});
+  } else {
+    return res.status(400).json({ error: 'invalid_status' });
   }
 
   res.json({ ok: true });

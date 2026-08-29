@@ -1,0 +1,13 @@
+Contact: mailto:security@stellar_card.com
+Contact: https://stellar_card.com/security
+Expires: 2027-04-14T00:00:00Z
+Preferred-Languages: en
+Canonical: https://stellar_card.com/.well-known/security.txt
+Policy: https://stellar_card.com/security
+Acknowledgments: https://stellar_card.com/security
+
+# Stellar_Card responsible disclosure
+# Report vulnerabilities to security@stellar_card.com.
+# We acknowledge within 24 hours, triage within 72, and publish a
+# postmortem to https://stellar_card.com/changelog once the fix is live.
+# See https://stellar_card.com/security for bounty tiers and scope.

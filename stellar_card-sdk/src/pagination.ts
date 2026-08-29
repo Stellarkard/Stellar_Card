@@ -209,3 +209,129 @@ export async function* mapPaginated<T, R>(
     index++;
   }
 }
+
+// ── Order listing pagination wrapper (Issue #530) ──────────────────────────
+
+/**
+ * Options for {@link createOrderPaginator}.
+ */
+export interface OrderPaginatorOptions {
+  /**
+   * Async function that fetches a page of orders.
+   * Receives offset and limit, returns the items for that page.
+   */
+  fetchPage: (offset: number, limit: number) => Promise<readonly unknown[]>;
+  /** Number of orders per page. Defaults to 20. */
+  pageSize?: number;
+  /** Optional status filter forwarded to the fetch function. */
+  status?: string;
+}
+
+/**
+ * A cursor handle returned by {@link createOrderPaginator}.
+ * Call `next()` to advance and `all()` to collect all remaining items.
+ */
+export interface OrderPaginator<T> {
+  /**
+   * Fetch the next page of orders.
+   * Returns `{ items, hasMore, nextOffset }` or `null` when exhausted.
+   */
+  next(): Promise<{ items: T[]; hasMore: boolean; nextOffset: number | null } | null>;
+  /**
+   * Collect all remaining pages into a single array.
+   * Convenience for cases where the full result set fits in memory.
+   */
+  all(): Promise<T[]>;
+  /**
+   * Reset the cursor to the beginning.
+   */
+  reset(): void;
+  /**
+   * Async iterator support — allows `for await (const item of paginator)`.
+   */
+  [Symbol.asyncIterator](): AsyncGenerator<T, void, void>;
+}
+
+/**
+ * Create a cursor-based paginator for listing orders with forward-only
+ * navigation. Wraps the generic {@link paginate} helpers with a
+ * Stellar_Card-friendly API that handles offset tracking internally.
+ *
+ * @example
+ * ```typescript
+ * const paginator = createOrderPaginator<OrderListItem>({
+ *   fetchPage: (offset, limit) => client.listOrders({ offset, limit, status: 'delivered' }),
+ *   pageSize: 10,
+ * });
+ *
+ * // Page-by-page
+ * const page1 = await paginator.next(); // { items: [...], hasMore: true, nextOffset: 10 }
+ * const page2 = await paginator.next(); // { items: [...], hasMore: false, nextOffset: null }
+ *
+ * // Or collect all at once
+ * const all = await paginator.all();
+ *
+ * // Or iterate as an async generator
+ * for await (const order of paginator) {
+ *   console.log(order.id);
+ * }
+ * ```
+ */
+export function createOrderPaginator<T>(
+  opts: OrderPaginatorOptions,
+): OrderPaginator<T> {
+  const pageSize = opts.pageSize ?? 20;
+  let currentOffset = 0;
+
+  function reset(): void {
+    currentOffset = 0;
+  }
+
+  async function next(): Promise<
+    { items: T[]; hasMore: boolean; nextOffset: number | null } | null
+  > {
+    const page = await paginate<T>({
+      fetchPage: async (cursor) => {
+        const items = await opts.fetchPage(cursor.offset, cursor.limit);
+        return [...items];
+      },
+      limit: pageSize,
+      initialOffset: currentOffset,
+    });
+
+    if (page.items.length === 0) return null;
+
+    currentOffset = page.nextCursor?.offset ?? currentOffset + page.items.length;
+
+    return {
+      items: page.items,
+      hasMore: page.hasMore,
+      nextOffset: page.nextCursor?.offset ?? null,
+    };
+  }
+
+  async function all(): Promise<T[]> {
+    const items: T[] = [];
+    let result: Awaited<ReturnType<typeof next>>;
+    while ((result = await next()) !== null) {
+      items.push(...result.items);
+    }
+    return items;
+  }
+
+  async function* iterate(): AsyncGenerator<T, void, void> {
+    let result: Awaited<ReturnType<typeof next>>;
+    while ((result = await next()) !== null) {
+      for (const item of result.items) {
+        yield item;
+      }
+    }
+  }
+
+  return {
+    next,
+    all,
+    reset,
+    [Symbol.asyncIterator]: iterate,
+  };
+}
