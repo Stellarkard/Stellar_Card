@@ -139,6 +139,7 @@ export function resolveNetworkConfig(config: NetworkConfig = {}): ResolvedNetwor
     sorobanRpc: normalizeRpcEndpoint(config.sorobanRpcUrl, defaultSorobanRpc),
     horizon: normalizeRpcEndpoint(config.horizonUrl, defaultHorizon),
     networkName: normalizeString(config.networkName) ?? defaultName,
+    customUserAgent: normalizeString(config.customUserAgent),
   };
 }
 
