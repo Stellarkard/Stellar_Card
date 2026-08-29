@@ -77,11 +77,13 @@ function normalizeRpcEndpoint(
   defaultUrl: string,
 ): ResolvedRpcEndpoint {
   if (typeof input === 'string') {
-    return { url: input, timeout: 30000 };
+    const url = normalizeString(input);
+    return { url: url ?? defaultUrl, timeout: 30000 };
   }
   if (input && typeof input === 'object') {
+    const url = normalizeString(input.url);
     return {
-      url: input.url,
+      url: url ?? defaultUrl,
       timeout: input.timeout ?? 30000,
       apiKey: input.apiKey,
       headers: input.headers,
@@ -109,7 +111,7 @@ function normalizeRpcEndpoint(
  * ```
  */
 export function resolveNetworkConfig(config: NetworkConfig = {}): ResolvedNetworkConfig {
-  const networkPassphrase = config.networkPassphrase ?? Networks.PUBLIC;
+  const networkPassphrase = normalizeString(config.networkPassphrase) ?? Networks.PUBLIC;
   
   let defaultSorobanRpc: string;
   let defaultHorizon: string;
@@ -133,7 +135,7 @@ export function resolveNetworkConfig(config: NetworkConfig = {}): ResolvedNetwor
     networkPassphrase,
     sorobanRpc: normalizeRpcEndpoint(config.sorobanRpcUrl, defaultSorobanRpc),
     horizon: normalizeRpcEndpoint(config.horizonUrl, defaultHorizon),
-    networkName: config.networkName ?? defaultName,
+    networkName: normalizeString(config.networkName) ?? defaultName,
   };
 }
 
@@ -464,11 +466,11 @@ export function resolveNetworkConfigFromEnv(
   const env: Record<string, string | undefined> =
     typeof process !== 'undefined' && process.env ? process.env : {};
 
-  const apiKey = env[NETWORK_ENV_VARS.apiKey];
+  const apiKey = normalizeString(env[NETWORK_ENV_VARS.apiKey]);
 
   let timeout: number | undefined;
-  const rawTimeout = env[NETWORK_ENV_VARS.timeout];
-  if (rawTimeout !== undefined && rawTimeout !== '') {
+  const rawTimeout = normalizeString(env[NETWORK_ENV_VARS.timeout]);
+  if (rawTimeout !== undefined) {
     const parsed = Number(rawTimeout);
     if (!Number.isInteger(parsed) || parsed <= 0) {
       throw new Error(
@@ -478,26 +480,34 @@ export function resolveNetworkConfigFromEnv(
     timeout = parsed;
   }
 
-  // Build endpoint configs only when a URL is present so the public defaults
-  // still apply when a URL is omitted. The env apiKey/timeout are attached to
-  // any explicitly-configured endpoint URL.
   const buildEndpoint = (
     url: string | undefined,
   ): string | RpcEndpointConfig | undefined => {
-    if (url === undefined || url === '') return undefined;
+    const cleaned = normalizeString(url);
+    if (cleaned === undefined) return undefined;
     if (apiKey || timeout !== undefined) {
-      return { url, apiKey, timeout };
+      return { url: cleaned, apiKey, timeout };
     }
-    return url;
+    return cleaned;
   };
 
   return resolveNetworkConfig({
     networkPassphrase:
-      overrides.networkPassphrase ?? env[NETWORK_ENV_VARS.networkPassphrase],
+      normalizeString(overrides.networkPassphrase) ?? normalizeString(env[NETWORK_ENV_VARS.networkPassphrase]),
     sorobanRpcUrl:
       overrides.sorobanRpcUrl ?? buildEndpoint(env[NETWORK_ENV_VARS.sorobanRpcUrl]),
     horizonUrl:
       overrides.horizonUrl ?? buildEndpoint(env[NETWORK_ENV_VARS.horizonUrl]),
-    networkName: overrides.networkName ?? env[NETWORK_ENV_VARS.networkName],
+    networkName:
+      normalizeString(overrides.networkName) ?? normalizeString(env[NETWORK_ENV_VARS.networkName]),
   });
+}
+
+/**
+ * Normalize a string value, trimming whitespace and converting empty strings to undefined.
+ */
+function normalizeString(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
