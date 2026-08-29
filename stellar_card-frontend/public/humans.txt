@@ -1,0 +1,27 @@
+/* TEAM */
+
+Stellar_Card is built by a small distributed team focused on payment
+infrastructure for autonomous agents. We publish every salary and we write
+everything down. Come work with us: https://stellar_card.com/careers
+
+Contact: hello@stellar_card.com
+Press:   press@stellar_card.com
+Security: security@stellar_card.com
+Location: Remote-first · London HQ
+
+/* THANKS */
+
+- Stellar Development Foundation, for a payment network that agents can
+  actually settle on.
+- Pathward, N.A., for issuing the cards we sell at face value.
+- Every customer who shipped an agent on top of this in the first quarter
+  and told us what was broken.
+
+/* SITE */
+
+Last update: 2026-04-14
+Standards: HTML5, CSS3, TypeScript
+Components: Next.js 16, React 19
+Typography: Fraunces (display), IBM Plex Sans (body), IBM Plex Mono (data)
+Design: Editorial minimalism, single mint accent
+Tooling: Turbopack, pnpm, Vitest, Playwright
