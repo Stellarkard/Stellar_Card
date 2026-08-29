@@ -1,12 +1,17 @@
 /**
  * Domino's UK — full checkout automation (plausibility study)
  *
- * Run:
- *   cd web
- *   CARD_NUMBER=4111111111111111 CARD_CVV=123 npx playwright test dominos-order --headed --project=chromium
+ * This test drives a REAL third-party production site (dominos.co.uk) and
+ * is not a regression test for this app — it lives outside `e2e/` and uses
+ * its own `playwright.manual.config.ts` (no mocked backend, no local dev
+ * server) specifically so it is never picked up by `npm run test:e2e` or
+ * CI's automated e2e workflow. Run it explicitly, and only when you mean to:
+ *
+ *   cd stellar_card-frontend
+ *   CARD_NUMBER=4111111111111111 CARD_CVV=123 npm run test:e2e:dominos -- --headed
  *
  * Set DRY_RUN=false to actually submit the order:
- *   DRY_RUN=false CARD_NUMBER=... CARD_CVV=... npx playwright test dominos-order --headed --project=chromium
+ *   DRY_RUN=false CARD_NUMBER=... CARD_CVV=... npm run test:e2e:dominos -- --headed
  */
 
 import { test, type Page, type FrameLocator } from '@playwright/test';
@@ -161,6 +166,7 @@ async function stage1_selectStore(page: Page): Promise<{ storeId: string; storeS
 // ── stage 2: add pizza to basket via UI — intercept the basket API call ────────
 
 async function stage2_addToBasket(page: Page, _storeId: string): Promise<string> {
+  void _storeId;
   log('basket', 'intercepting API calls to capture product/basket format…');
 
   // Capture basket API calls so we can learn the real add-item format

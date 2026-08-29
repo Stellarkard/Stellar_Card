@@ -12,7 +12,7 @@ interface GlobalStateContext {
   retry?: () => void;
 }
 
-const stateContext: React.Context<GlobalStateContext | null> = null as any;
+const stateContext = null as unknown as React.Context<GlobalStateContext | null>;
 
 export function useGlobalState(): GlobalStateContext {
   const context = useContext(stateContext);

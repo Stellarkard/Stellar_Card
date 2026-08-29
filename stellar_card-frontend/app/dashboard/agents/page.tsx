@@ -29,6 +29,7 @@ export default function AgentsPage() {
   const [stateFilter, setStateFilter] = useState<'all' | AgentStateName>('all');
   const [groupFilter, setGroupFilter] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [now] = useState(() => Date.now());
 
   // Unique groups present across all agents; drives the filter chips row.
   const uniqueGroups = useMemo(() => {
@@ -42,8 +43,8 @@ export default function AgentsPage() {
 
   // Spend-per-agent for the last 7d so we can surface fleet-wide
   // activity without an extra round-trip to the backend.
+  const cutoff = now - 7 * 86_400_000;
   const spend7d = useMemo(() => {
-    const cutoff = Date.now() - 7 * 86_400_000;
     const map = new Map<string, number>();
     for (const o of orders) {
       if (o.status !== 'delivered') continue;
@@ -51,7 +52,7 @@ export default function AgentsPage() {
       map.set(o.api_key_id, (map.get(o.api_key_id) || 0) + parseFloat(o.amount_usdc));
     }
     return map;
-  }, [orders]);
+  }, [orders, cutoff]);
 
   const filtered = useMemo(() => {
     let list = agents;

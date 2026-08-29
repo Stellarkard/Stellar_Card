@@ -8,6 +8,7 @@ import type { AsyncStatus } from "../lib/useAsyncState";
 import { LoadingState } from "./LoadingState";
 import { ErrorState } from "./ErrorState";
 import { EmptyState } from "./EmptyState";
+import { DEFAULT_STATE_COPY } from "./stateConfig";
 
 interface GlobalStateProviderProps {
   /** Current async status from useAsyncState */
@@ -66,11 +67,11 @@ export function GlobalStateProvider({
   status,
   error,
   isEmpty = false,
-  emptyTitle = "No data found",
+  emptyTitle = DEFAULT_STATE_COPY.empty.title,
   emptyDescription,
   emptyIcon,
   emptyAction,
-  errorTitle = "Failed to load",
+  errorTitle = DEFAULT_STATE_COPY.error.pageTitle,
   errorAction,
   onRetry,
   loadingLines = 5,

@@ -9,7 +9,7 @@ import {
 
 // fetchPage backed by an in-memory array.
 const arraySource =
-  <T,>(source: T[]) =>
+  <T>(source: T[]) =>
   async (cur: PaginationCursor): Promise<T[]> =>
     source.slice(cur.offset, cur.offset + cur.limit);
 
@@ -60,9 +60,9 @@ describe('paginate', () => {
   });
 
   it('throws RangeError for negative offset', async () => {
-    await expect(
-      paginate({ fetchPage: async () => [], initialOffset: -1 }),
-    ).rejects.toThrow(RangeError);
+    await expect(paginate({ fetchPage: async () => [], initialOffset: -1 })).rejects.toThrow(
+      RangeError,
+    );
   });
 
   it('handles exact page boundary — last item fills the page exactly', async () => {

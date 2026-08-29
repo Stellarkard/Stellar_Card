@@ -92,6 +92,7 @@ export function getElevatedCardStyle(): CardStyle {
 
 // Badge styles
 export function getBadgeStyle(_tone: 'green' | 'red' | 'yellow' | 'blue' | 'purple' | 'neutral' = 'neutral'): BadgeStyle {
+  void _tone;
   return {
     padding: `${SPACING.xs} ${SPACING.sm}`,
     fontSize: TYPOGRAPHY.fontSize.sm,

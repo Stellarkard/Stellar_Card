@@ -26,6 +26,7 @@ export default function OrdersPage() {
   const [query, setQuery] = useState('');
   const [preset, setPreset] = useState<Preset>('all');
   const [selected, setSelected] = useState<Order | null>(null);
+  const [now] = useState(() => Date.now());
   const [page, setPage] = useState(0);
 
   // Reset to first page when filters change
@@ -33,7 +34,6 @@ export default function OrdersPage() {
   const handleQueryChange = (q: string) => { setQuery(q); setPage(0); };
 
   const filtered = useMemo(() => {
-    const now = Date.now();
     const DAY = 86_400_000;
     let list = orders;
     switch (preset) {
@@ -65,13 +65,12 @@ export default function OrdersPage() {
       });
     }
     return list;
-  }, [orders, query, preset]);
+  }, [orders, query, preset, now]);
 
   const totalPages = Math.ceil(filtered.length / ROWS_PER_PAGE);
   const paginated = filtered.slice(page * ROWS_PER_PAGE, (page + 1) * ROWS_PER_PAGE);
 
   const counts = useMemo(() => {
-    const now = Date.now();
     const DAY = 86_400_000;
     return {
       all: orders.length,
@@ -85,7 +84,7 @@ export default function OrdersPage() {
       refunded: orders.filter((o) => o.status === 'refunded' || o.status === 'refund_pending')
         .length,
     };
-  }, [orders]);
+  }, [orders, now]);
 
   return (
     <PageContainer>

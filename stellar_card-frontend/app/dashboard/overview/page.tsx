@@ -4,7 +4,7 @@
 
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useDashboard } from '../_lib/DashboardProvider';
 import { KpiTile, KpiRow } from '../_ui/KpiTile';
@@ -21,9 +21,9 @@ import { IN_FLIGHT_ORDER_STATUSES } from '../_lib/constants';
 export default function OverviewPage() {
   const { user, info, agents, orders } = useDashboard();
   const isPlatformOwner = !!user?.is_platform_owner;
+  const [now] = useState(() => Date.now());
 
   const stats = useMemo(() => {
-    const now = Date.now();
     const DAY = 86_400_000;
     const in24h = orders.filter((o) => now - parseTimestamp(o.created_at) < DAY);
     const in7d = orders.filter((o) => now - parseTimestamp(o.created_at) < 7 * DAY);
@@ -68,7 +68,7 @@ export default function OverviewPage() {
       delivered7d: delivered7d.length,
       topAgents,
     };
-  }, [orders, agents]);
+  }, [orders, agents, now]);
 
   const chartData = useMemo(() => bucketSpendByDay(orders, 14), [orders]);
 
@@ -94,7 +94,7 @@ export default function OverviewPage() {
         <KpiTile
           label="Spend 7d"
           value={formatUsd(stats.spend7d)}
-          hint={`${orders.filter((o) => parseTimestamp(o.created_at) > Date.now() - 7 * 86400000).length} orders`}
+          hint={`${orders.filter((o) => parseTimestamp(o.created_at) > now - 7 * 86400000).length} orders`}
         />
         <KpiTile
           label="Success rate 7d"
