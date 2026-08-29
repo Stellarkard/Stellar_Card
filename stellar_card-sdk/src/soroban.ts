@@ -21,10 +21,42 @@ const TESTNET_RPC = 'https://soroban-testnet.stellar.org';
 const MAINNET_HORIZON = 'https://horizon.stellar.org';
 const TESTNET_HORIZON = 'https://horizon-testnet.stellar.org';
 
+/**
+ * Resolve the Soroban RPC endpoint URL for the given network.
+ *
+ * @param networkPassphrase - Stellar network passphrase (e.g. `Networks.TESTNET` or `Networks.PUBLIC`)
+ * @returns The Soroban RPC base URL for that network
+ *
+ * @example
+ * ```typescript
+ * const rpcUrl = getSorobanRpcUrl(Networks.TESTNET);
+ * // 'https://soroban-testnet.stellar.org'
+ * ```
+ */
 export function getSorobanRpcUrl(networkPassphrase: string): string {
   return networkPassphrase === Networks.TESTNET ? TESTNET_RPC : MAINNET_RPC;
 }
 
+/**
+ * Resolve the Horizon REST API base URL for the given network.
+ *
+ * Used as the fallback confirmation endpoint in `submitSorobanTx` when
+ * the Soroban RPC returns an XDR-version mismatch or becomes unreachable.
+ * Defaults to mainnet so callers that omit the passphrase get the same
+ * behaviour as before the F3-soroban network-awareness fix.
+ *
+ * @param networkPassphrase - Optional Stellar network passphrase. Omit for mainnet.
+ * @returns The Horizon base URL for that network
+ *
+ * @example
+ * ```typescript
+ * const horizonUrl = getHorizonUrl(Networks.TESTNET);
+ * // 'https://horizon-testnet.stellar.org'
+ *
+ * const mainnetUrl = getHorizonUrl(); // defaults to mainnet
+ * // 'https://horizon.stellar.org'
+ * ```
+ */
 // F3-soroban (2026-04-16): network-aware Horizon URL. Pre-fix, every
 // Horizon fallback in submitSorobanTx was hardcoded to mainnet.
 // Testnet agents got 404s from mainnet Horizon for their testnet txs,
@@ -37,6 +69,19 @@ export function getHorizonUrl(networkPassphrase?: string): string {
 /**
  * Convert a decimal string like "10.00" or "1.2345678" to a 7-decimal i128
  * bigint (stroops / micro-USDC). Rejects inputs with >7 fractional digits.
+ *
+ * @param decimal - A non-negative decimal string with at most 7 fractional digits
+ * @returns The amount expressed as an i128 bigint in stroops (1 unit = 10,000,000 stroops)
+ * @throws {Error} If the string is not a valid non-negative decimal
+ * @throws {Error} If the fractional part has more than 7 digits
+ * @throws {Error} If the resulting amount is zero or negative
+ *
+ * @example
+ * ```typescript
+ * decimalToStroops('10.00')      // 100_000_000n
+ * decimalToStroops('0.0000001')  // 1n (minimum representable amount)
+ * decimalToStroops('1.2345678')  // 12_345_678n
+ * ```
  */
 export function decimalToStroops(decimal: string): bigint {
   if (!/^\d+(\.\d+)?$/.test(decimal)) {
@@ -66,8 +111,21 @@ export function decimalToStroops(decimal: string): bigint {
  * too low. `requiredFee` is the minimum the network demanded (in stroops),
  * taken directly from the error response — callers should use it as the
  * floor when rebuilding the transaction.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await submitSorobanTx(tx, server);
+ * } catch (err) {
+ *   if (err instanceof InsufficientFeeError) {
+ *     // Rebuild the tx using err.requiredFee as the minimum fee
+ *     const { tx: retryTx } = await buildContractPaymentTx({ ...opts, fee: err.requiredFee });
+ *   }
+ * }
+ * ```
  */
 export class InsufficientFeeError extends Error {
+  /** Minimum fee (in stroops) that the network demanded for this transaction. */
   requiredFee: string;
   constructor(requiredFee: string) {
     super(`Soroban transaction rejected: fee too low (network requires ${requiredFee} stroops)`);
@@ -117,6 +175,33 @@ export interface BuildContractTxOpts {
  * Build a Soroban transaction that invokes the receiver contract's pay_usdc
  * or pay_xlm function. Returns an unsigned, simulation-prepared Transaction
  * ready for the caller to sign (either via keypair or OWS) and submit.
+ *
+ * @param opts - Transaction build options
+ * @param opts.contractId - Soroban contract address (C-address)
+ * @param opts.fn - Contract function to invoke: `'pay_usdc'` or `'pay_xlm'`
+ * @param opts.fromPublicKey - Signer's Stellar public key (G-address)
+ * @param opts.amountStroops - Payment amount as a 7-decimal i128 bigint (see `decimalToStroops`)
+ * @param opts.orderId - stellar_card order ID encoded into the contract call for backend indexing
+ * @param opts.networkPassphrase - Stellar network passphrase (e.g. `Networks.TESTNET`)
+ * @param opts.rpcUrl - Optional Soroban RPC URL override. Defaults to the network-appropriate endpoint.
+ * @param opts.preservedSequence - Optional sequence number to reuse for retry mutual-exclusion (see `BuildContractTxOpts`)
+ * @param opts.fee - Optional fee override in stroops. Defaults to `BASE_FEE`. Pass `InsufficientFeeError.requiredFee` on retry.
+ * @returns The simulation-prepared transaction and the RPC server instance used to build it
+ * @throws {Error} If Soroban simulation fails
+ *
+ * @example
+ * ```typescript
+ * const { tx, server } = await buildContractPaymentTx({
+ *   contractId: 'CXXXX...',
+ *   fn: 'pay_usdc',
+ *   fromPublicKey: keypair.publicKey(),
+ *   amountStroops: decimalToStroops('10.00'),
+ *   orderId: 'ord_abc123',
+ *   networkPassphrase: Networks.TESTNET,
+ * });
+ * tx.sign(keypair);
+ * const txHash = await submitSorobanTx(tx, server);
+ * ```
  */
 export async function buildContractPaymentTx(
   opts: BuildContractTxOpts,
@@ -166,6 +251,24 @@ export async function buildContractPaymentTx(
  * always follows up with waitForCard against the order id, so even if
  * this function gives up before finalization, the watcher still has a
  * chance to credit the order if the tx eventually lands.
+ *
+ * @param tx - The signed Soroban transaction to submit
+ * @param server - Soroban RPC server instance (returned by `buildContractPaymentTx`)
+ * @param horizonUrl - Horizon base URL used as a fallback when Soroban RPC returns
+ *   an XDR mismatch or becomes unreachable. Defaults to mainnet for backward compatibility.
+ * @returns The transaction hash (64-char hex string) once the transaction is confirmed on-chain
+ * @throws {InsufficientFeeError} When the network rejects the tx due to an insufficient fee
+ * @throws {Error} When the transaction fails on-chain (no recovery possible)
+ * @throws {Error & \{ txHash: string; dropped: true \}} When the tx was accepted by the RPC
+ *   but never applied on the ledger — callers may retry with the same sequence number
+ * @throws {Error & \{ txHash: string \}} When the polling deadline is reached and Horizon
+ *   is unreachable — the tx may still land; callers should wait on the order ID
+ *
+ * @example
+ * ```typescript
+ * const txHash = await submitSorobanTx(tx, server, getHorizonUrl(networkPassphrase));
+ * console.log('Transaction confirmed:', txHash);
+ * ```
  */
 export async function submitSorobanTx(
   tx: Transaction,
@@ -377,6 +480,19 @@ export async function submitSorobanTx(
 /**
  * Decide which contract function + asset amount to use based on the
  * PaymentInstructions returned from POST /v1/orders.
+ *
+ * @param payment - Payment instruction object containing USDC and optional XLM quotes
+ * @param payment.usdc - USDC quote with the `amount` decimal string
+ * @param payment.xlm - Optional XLM quote with the `amount` decimal string
+ * @param paymentAsset - Asset to pay with: `'usdc'` or `'xlm'`
+ * @returns The matching contract function name and the decimal amount string to use
+ * @throws {Error} When `paymentAsset` is `'xlm'` but no XLM quote is present in `payment`
+ *
+ * @example
+ * ```typescript
+ * const { fn, amountDecimal } = selectContractCall(paymentInstructions, 'usdc');
+ * const amountStroops = decimalToStroops(amountDecimal);
+ * ```
  */
 export function selectContractCall(
   payment: { usdc: { amount: string }; xlm?: { amount: string } },
