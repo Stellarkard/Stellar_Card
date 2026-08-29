@@ -1,6 +1,16 @@
 'use client';
 
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
+import {
+  DEFAULT_ONBOARDING_STORAGE_KEY,
+  readOnboardingCompleted,
+  markOnboardingCompleted,
+  clearOnboardingCompleted,
+  getOnboardingProgress,
+  isValidStepIndex,
+  canGoNext,
+  canGoPrevious,
+} from './onboardingConfig';
 
 interface OnboardingStep {
   id: string;
@@ -45,39 +55,35 @@ export function OnboardingProvider({
   children,
   onComplete,
   onSkip,
-  storageKey = 'onboarding-completed',
+  storageKey = DEFAULT_ONBOARDING_STORAGE_KEY,
 }: OnboardingProviderProps) {
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [isOpen, setIsOpen] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const completed = localStorage.getItem(storageKey);
-      /* eslint-disable react-hooks/set-state-in-effect -- intentional hydration */
-      if (completed) {
-        setIsCompleted(true);
-      } else {
-        setIsOpen(true);
-      }
-      /* eslint-enable react-hooks/set-state-in-effect */
+    const completed = readOnboardingCompleted(storageKey);
+    /* eslint-disable react-hooks/set-state-in-effect -- intentional hydration */
+    if (completed) {
+      setIsCompleted(true);
+    } else {
+      setIsOpen(true);
     }
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [storageKey]);
 
   const currentStep = steps[currentStepIndex] || null;
-  const progress = currentStep ? ((currentStepIndex + 1) / steps.length) * 100 : 0;
+  const progress = currentStep ? getOnboardingProgress(currentStepIndex, steps.length) : 0;
 
   const completeOnboarding = useCallback(() => {
     setIsCompleted(true);
     setIsOpen(false);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(storageKey, 'true');
-    }
+    markOnboardingCompleted(storageKey);
     onComplete?.();
   }, [storageKey, onComplete]);
 
   const nextStep = useCallback(() => {
-    if (currentStepIndex < steps.length - 1) {
+    if (canGoNext(currentStepIndex, steps.length)) {
       setCurrentStepIndex(currentStepIndex + 1);
     } else {
       completeOnboarding();
@@ -85,7 +91,7 @@ export function OnboardingProvider({
   }, [currentStepIndex, steps.length, completeOnboarding]);
 
   const previousStep = useCallback(() => {
-    if (currentStepIndex > 0) {
+    if (canGoPrevious(currentStepIndex)) {
       setCurrentStepIndex(currentStepIndex - 1);
     }
   }, [currentStepIndex]);
@@ -99,9 +105,7 @@ export function OnboardingProvider({
     setIsOpen(true);
     setCurrentStepIndex(0);
     setIsCompleted(false);
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem(storageKey);
-    }
+    clearOnboardingCompleted(storageKey);
   }, [storageKey]);
 
   const closeOnboarding = useCallback(() => {
@@ -109,7 +113,7 @@ export function OnboardingProvider({
   }, []);
 
   const goToStep = useCallback((index: number) => {
-    if (index >= 0 && index < steps.length) {
+    if (isValidStepIndex(index, steps.length)) {
       setCurrentStepIndex(index);
     }
   }, [steps.length]);
