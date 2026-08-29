@@ -11,7 +11,7 @@ import { KpiTile, KpiRow } from '../_ui/KpiTile';
 import { Card } from '../_ui/Card';
 import { Pill } from '../_ui/Pill';
 import { EmptyState } from '../_ui/EmptyState';
-import { SpendChart } from '../_ui/SpendChart';
+import { DynamicSpendChart } from '@/app/lib/dynamic-imports';
 import { OrderStatusPill } from '../_ui/OrderStatusPill';
 import { PageContainer } from '../_ui/PageContainer';
 import { PageHeader } from '../_ui/PageHeader';
@@ -128,7 +128,7 @@ export default function OverviewPage() {
             </Link>
           }
         >
-          <SpendChart data={chartData} height={220} />
+          <DynamicSpendChart data={chartData} height={220} />
         </Card>
 
         {isPlatformOwner ? (

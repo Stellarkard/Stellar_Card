@@ -19,12 +19,19 @@ import type { Order } from '../_lib/types';
 
 type Preset = 'all' | 'failed_today' | 'in_flight' | 'delivered_7d' | 'refunded';
 
+const ROWS_PER_PAGE = 50;
+
 export default function OrdersPage() {
   const { orders, agents } = useDashboard();
   const [query, setQuery] = useState('');
   const [preset, setPreset] = useState<Preset>('all');
   const [selected, setSelected] = useState<Order | null>(null);
   const [now] = useState(() => Date.now());
+  const [page, setPage] = useState(0);
+
+  // Reset to first page when filters change
+  const handlePresetChange = (p: Preset) => { setPreset(p); setPage(0); };
+  const handleQueryChange = (q: string) => { setQuery(q); setPage(0); };
 
   const filtered = useMemo(() => {
     const DAY = 86_400_000;
@@ -60,6 +67,9 @@ export default function OrdersPage() {
     return list;
   }, [orders, query, preset, now]);
 
+  const totalPages = Math.ceil(filtered.length / ROWS_PER_PAGE);
+  const paginated = filtered.slice(page * ROWS_PER_PAGE, (page + 1) * ROWS_PER_PAGE);
+
   const counts = useMemo(() => {
     const DAY = 86_400_000;
     return {
@@ -88,15 +98,15 @@ export default function OrdersPage() {
           <Input
             placeholder="Search by order id, agent, txid…"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => handleQueryChange(e.target.value)}
           />
         </div>
-        <FilterChip active={preset === 'all'} onClick={() => setPreset('all')} count={counts.all}>
+        <FilterChip active={preset === 'all'} onClick={() => handlePresetChange('all')} count={counts.all}>
           All
         </FilterChip>
         <FilterChip
           active={preset === 'in_flight'}
-          onClick={() => setPreset('in_flight')}
+          onClick={() => handlePresetChange('in_flight')}
           count={counts.in_flight}
           tone="yellow"
         >
@@ -104,7 +114,7 @@ export default function OrdersPage() {
         </FilterChip>
         <FilterChip
           active={preset === 'delivered_7d'}
-          onClick={() => setPreset('delivered_7d')}
+          onClick={() => handlePresetChange('delivered_7d')}
           count={counts.delivered_7d}
           tone="green"
         >
@@ -112,7 +122,7 @@ export default function OrdersPage() {
         </FilterChip>
         <FilterChip
           active={preset === 'failed_today'}
-          onClick={() => setPreset('failed_today')}
+          onClick={() => handlePresetChange('failed_today')}
           count={counts.failed_today}
           tone="red"
         >
@@ -120,7 +130,7 @@ export default function OrdersPage() {
         </FilterChip>
         <FilterChip
           active={preset === 'refunded'}
-          onClick={() => setPreset('refunded')}
+          onClick={() => handlePresetChange('refunded')}
           count={counts.refunded}
           tone="blue"
         >
@@ -147,7 +157,7 @@ export default function OrdersPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.slice(0, 200).map((o) => (
+              {paginated.map((o) => (
                 <tr key={o.id} onClick={() => setSelected(o)} style={{ cursor: 'pointer' }}>
                   <td
                     style={{
@@ -191,6 +201,57 @@ export default function OrdersPage() {
           </table>
         )}
       </Card>
+
+      {totalPages > 1 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            fontSize: '0.72rem',
+            color: 'var(--fg-dim)',
+          }}
+        >
+          <span>
+            Showing {page * ROWS_PER_PAGE + 1}–{Math.min((page + 1) * ROWS_PER_PAGE, filtered.length)} of {filtered.length}
+          </span>
+          <div style={{ display: 'flex', gap: '0.4rem' }}>
+            <button
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0}
+              style={{
+                padding: '0.3rem 0.6rem',
+                border: '1px solid var(--border)',
+                borderRadius: 4,
+                background: 'var(--surface)',
+                color: page === 0 ? 'var(--fg-dim)' : 'var(--fg)',
+                cursor: page === 0 ? 'not-allowed' : 'pointer',
+                fontSize: '0.72rem',
+              }}
+            >
+              ← Prev
+            </button>
+            <span style={{ padding: '0.3rem 0.5rem' }}>
+              {page + 1} / {totalPages}
+            </span>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={page >= totalPages - 1}
+              style={{
+                padding: '0.3rem 0.6rem',
+                border: '1px solid var(--border)',
+                borderRadius: 4,
+                background: 'var(--surface)',
+                color: page >= totalPages - 1 ? 'var(--fg-dim)' : 'var(--fg)',
+                cursor: page >= totalPages - 1 ? 'not-allowed' : 'pointer',
+                fontSize: '0.72rem',
+              }}
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+      )}
 
       {selected && (
         <OrderDrawer
