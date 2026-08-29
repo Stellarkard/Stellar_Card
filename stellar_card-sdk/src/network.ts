@@ -7,6 +7,7 @@
  */
 
 import { Networks } from '@stellar/stellar-sdk';
+import { calculateExponentialBackoffDelay } from './retry';
 
 /** Well-known Soroban RPC endpoints. */
 const MAINNET_RPC = 'https://mainnet.sorobanrpc.com';
@@ -375,7 +376,12 @@ export async function resolveNetworkConfigWithRetry(
     } catch {
       // Health check failed — wait before retrying
       if (attempt < maxAttempts - 1) {
-        await new Promise((r) => setTimeout(r, delayMs * (attempt + 1)));
+        const backoffMs = calculateExponentialBackoffDelay({
+          attempt,
+          baseDelayMs: delayMs,
+          maxDelayMs: delayMs * 10,
+        });
+        await new Promise((r) => setTimeout(r, backoffMs));
       }
     }
   }
