@@ -1,63 +1,114 @@
-'use client';
+// SectionLoadingState - Handles async state for page sections (Part 3)
+// Compact variant for inline use within pages
 
-import type { ReactNode } from 'react';
-import type { AsyncStatus } from '../lib/useAsyncState';
-import { LoadingState } from './LoadingState';
-import { EmptyState } from './EmptyState';
-import { ErrorState } from './ErrorState';
+"use client";
 
-interface Props {
+import type { ReactNode } from "react";
+import type { AsyncStatus } from "../lib/useAsyncState";
+import { LoadingState, Skeleton } from "./LoadingState";
+import { ErrorState } from "./ErrorState";
+import { EmptyState } from "./EmptyState";
+
+interface SectionLoadingStateProps {
+  /** Current async status */
   status: AsyncStatus;
+  /** Error from async operation */
   error?: Error | null;
+  /** Whether data is empty */
   isEmpty?: boolean;
+  /** Compact variant for inline sections */
+  variant?: "default" | "compact";
+  /** Custom empty state title */
   emptyTitle?: string;
+  /** Custom empty state description */
   emptyDescription?: ReactNode;
+  /** Custom empty state action */
   emptyAction?: ReactNode;
-  emptyIcon?: ReactNode;
-  loadingLines?: number;
+  /** Callback to retry */
   onRetry?: () => void;
+  /** Number of skeleton lines */
+  loadingLines?: number;
+  /** Children render function */
   children: () => ReactNode;
-  variant?: 'full' | 'compact' | 'inline';
 }
 
+/**
+ * SectionLoadingState handles state for individual sections within a page.
+ * Use compact variant for inline sections that don't need full-page treatment.
+ *
+ * @example
+ * ```tsx
+ * function DashboardSection() {
+ *   const { status, data, error, run } = useAsyncState(fetchData);
+ *
+ *   return (
+ *     <SectionLoadingState
+ *       status={status}
+ *       error={error}
+ *       isEmpty={!data?.length}
+ *       variant="compact"
+ *       onRetry={run}
+ *     >
+ *       {() => <ItemList items={data} />}
+ *     </SectionLoadingState>
+ *   );
+ * }
+ * ```
+ */
 export function SectionLoadingState({
   status,
   error,
   isEmpty = false,
-  emptyTitle = 'Nothing here yet',
+  variant = "default",
+  emptyTitle = "No data",
   emptyDescription,
   emptyAction,
-  emptyIcon,
-  loadingLines = 2,
   onRetry,
+  loadingLines = 3,
   children,
-  variant = 'full',
-}: Props) {
-  const isCompact = variant === 'compact';
+}: SectionLoadingStateProps) {
+  const isCompact = variant === "compact";
 
-  if (status === 'loading' || status === 'idle') {
-    return (
-      <LoadingState
-        lines={loadingLines}
-        className={isCompact ? 'section-loading-compact' : ''}
-      />
-    );
+  // Loading state
+  if (status === "loading" || status === "idle") {
+    if (isCompact) {
+      return (
+        <div
+          style={{
+            padding: "1rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.6rem",
+          }}
+        >
+          {Array.from({ length: loadingLines }).map((_, i) => (
+            <Skeleton
+              key={i}
+              width={i === loadingLines - 1 ? "60%" : "100%"}
+              height={10}
+            />
+          ))}
+        </div>
+      );
+    }
+    return <LoadingState lines={loadingLines} />;
   }
 
-  if (status === 'error') {
+  // Error state
+  if (status === "error") {
     return (
       <ErrorState
-        title={isCompact ? 'Error' : 'Something went wrong'}
-        message={error?.message}
+        title={isCompact ? "Error" : "Failed to load"}
+        message={error?.message || "Something went wrong"}
         onRetry={onRetry}
       />
     );
   }
 
-  if (isEmpty) {
+  // Empty state
+  if (status === "success" && isEmpty) {
     return (
       <EmptyState
-        icon={emptyIcon}
         title={emptyTitle}
         description={emptyDescription}
         action={emptyAction}
@@ -66,5 +117,6 @@ export function SectionLoadingState({
     );
   }
 
+  // Success with data
   return <>{children()}</>;
 }
