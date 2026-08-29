@@ -50,8 +50,8 @@ export function Toggle({
         role="switch"
         aria-checked={checked}
         aria-labelledby={labelId}
-        aria-label={ariaLabel}
-        aria-describedby={ariaDescribedBy}
+        aria-label={rest['aria-label'] || (typeof label === 'string' ? label : 'Toggle switch')}
+        aria-describedby={rest['aria-describedby']}
         onClick={() => onChange(!checked)}
         style={{
           marginTop: 2,

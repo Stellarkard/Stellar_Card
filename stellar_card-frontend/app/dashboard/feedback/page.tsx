@@ -58,7 +58,7 @@ export default function FeedbackPage() {
           Feedback
         </div>
         <div style={{ fontSize: '0.78rem', color: 'var(--fg-dim)' }}>
-          What's broken, what's confusing, what would you like to see?
+          What&apos;s broken, what&apos;s confusing, what would you like to see?
         </div>
       </div>
 

@@ -107,7 +107,7 @@ function normalizeRpcEndpoint(
  *
  * @example
  * ```typescript
- * const config = resolveNetworkConfig({ 
+ * const config = resolveNetworkConfig({
  *   networkPassphrase: Networks.TESTNET,
  *   sorobanRpcUrl: 'https://custom-rpc.example.com'
  * });
@@ -146,9 +146,9 @@ export function resolveNetworkConfig(config: NetworkConfig = {}): ResolvedNetwor
 
 /**
  * Return the default Soroban RPC URL for a given network passphrase.
- * 
+ *
  * Supports Mainnet, Testnet, and Futurenet networks.
- * 
+ *
  * @param networkPassphrase - Stellar network passphrase (defaults to mainnet)
  * @returns The default Soroban RPC URL for the specified network
  *
@@ -166,9 +166,9 @@ export function getDefaultSorobanRpcUrl(networkPassphrase = Networks.PUBLIC): st
 
 /**
  * Return the default Horizon URL for a given network passphrase.
- * 
+ *
  * Supports Mainnet, Testnet, and Futurenet networks.
- * 
+ *
  * @param networkPassphrase - Stellar network passphrase (defaults to mainnet)
  * @returns The default Horizon URL for the specified network
  *
@@ -186,7 +186,7 @@ export function getDefaultHorizonUrl(networkPassphrase = Networks.PUBLIC): strin
 
 /**
  * Create a custom network configuration for private or non-standard deployments.
- * 
+ *
  * @example
  * const config = createCustomNetworkConfig({
  *   networkPassphrase: 'Custom Network ; January 2025',
@@ -232,12 +232,12 @@ export function validateRpcEndpoint(url: string, context?: string): void {
     if (parsed.protocol === 'http:' && !url.includes('localhost') && !url.includes('127.0.0.1')) {
       console.warn(
         `Warning: Using insecure HTTP endpoint ${url}${context ? ` for ${context}` : ''}. ` +
-        'Consider using HTTPS for production deployments.'
+          'Consider using HTTPS for production deployments.',
       );
     }
   } catch (err) {
     throw new Error(
-      `Invalid RPC endpoint URL "${url}"${context ? ` for ${context}` : ''}: ${(err as Error).message}`
+      `Invalid RPC endpoint URL "${url}"${context ? ` for ${context}` : ''}: ${(err as Error).message}`,
     );
   }
 }
@@ -470,9 +470,7 @@ export const NETWORK_ENV_VARS = {
  * build) this behaves exactly like {@link resolveNetworkConfig} with only the
  * supplied `overrides` applied.
  */
-export function resolveNetworkConfigFromEnv(
-  overrides: NetworkConfig = {},
-): ResolvedNetworkConfig {
+export function resolveNetworkConfigFromEnv(overrides: NetworkConfig = {}): ResolvedNetworkConfig {
   const env: Record<string, string | undefined> =
     typeof process !== 'undefined' && process.env ? process.env : {};
 

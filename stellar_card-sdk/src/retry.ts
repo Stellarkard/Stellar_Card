@@ -118,15 +118,13 @@ export function parseRetryAfterMs(
  * await sleep(delay);
  * ```
  */
-export function calculateExponentialBackoffDelay(
-  opts: ExponentialBackoffDelayOptions,
-): number {
+export function calculateExponentialBackoffDelay(opts: ExponentialBackoffDelayOptions): number {
   const factor = opts.factor ?? 2;
   const jitter = opts.jitter ?? 'full';
   const cappedDelay = Math.min(opts.baseDelayMs * Math.pow(factor, opts.attempt), opts.maxDelayMs);
-  
+
   let jitteredDelay: number;
-  
+
   switch (jitter) {
     case 'none':
       jitteredDelay = cappedDelay;
@@ -140,7 +138,10 @@ export function calculateExponentialBackoffDelay(
       if (opts.attempt === 0) {
         jitteredDelay = opts.baseDelayMs;
       } else {
-        const prevDelay = Math.min(opts.baseDelayMs * Math.pow(factor, opts.attempt - 1), opts.maxDelayMs);
+        const prevDelay = Math.min(
+          opts.baseDelayMs * Math.pow(factor, opts.attempt - 1),
+          opts.maxDelayMs,
+        );
         jitteredDelay = Math.random() * (prevDelay * 3 - opts.baseDelayMs) + opts.baseDelayMs;
       }
       jitteredDelay = Math.min(jitteredDelay, opts.maxDelayMs);
@@ -150,7 +151,7 @@ export function calculateExponentialBackoffDelay(
       jitteredDelay = Math.floor(Math.random() * Math.max(cappedDelay, 1));
       break;
   }
-  
+
   const retryAfterMs = parseRetryAfterMs(opts.retryAfter, opts.nowMs);
   return retryAfterMs === null ? jitteredDelay : Math.max(jitteredDelay, retryAfterMs);
 }
@@ -187,26 +188,26 @@ export function calculateExponentialBackoffDelay(
  */
 export async function withAdvancedRetry<T>(
   fn: (attempt: number) => Promise<T>,
-  strategy: AdvancedRetryStrategy
+  strategy: AdvancedRetryStrategy,
 ): Promise<T> {
   let lastError: unknown;
-  
+
   for (let attempt = 0; attempt < strategy.maxAttempts; attempt++) {
     try {
       return await fn(attempt);
     } catch (error) {
       lastError = error;
-      
+
       // Check if we should retry this error
       if (strategy.shouldRetry && !strategy.shouldRetry(error, attempt)) {
         throw error;
       }
-      
+
       // Don't delay on the last attempt
       if (attempt === strategy.maxAttempts - 1) {
         throw error;
       }
-      
+
       // Calculate delay based on backoff strategy
       let delay: number;
       switch (strategy.backoffStrategy) {
@@ -227,11 +228,11 @@ export async function withAdvancedRetry<T>(
           });
           break;
       }
-      
+
       await sleep(Math.min(delay, strategy.maxDelayMs));
     }
   }
-  
+
   throw lastError ?? new Error('Advanced retry: maximum attempts reached');
 }
 

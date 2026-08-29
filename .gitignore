@@ -26,6 +26,10 @@ out/
 
 # OS generated files
 .DS_Store
+<<<<<<< HEAD
+/node_modules
+fix.md
+=======
 .DS_Store?
 ._*
 .Spotlight-V100
@@ -38,3 +42,4 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+>>>>>>> 4d0a50519a8359418773cf40e8dcd15587e17f92
