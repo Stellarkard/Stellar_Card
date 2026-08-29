@@ -20,10 +20,30 @@ export interface Stellar_CardConfig {
   created_at: string;
 }
 
+/**
+ * Browser stub for {@link loadStellar_CardConfig} (config.ts).
+ *
+ * There is no `~/.stellar_card/config.json` in a browser — credentials must
+ * be passed explicitly to `Stellar_CardClient`. Always returns `null` so
+ * callers fall through to explicit-credential resolution.
+ *
+ * @param _configPath - Ignored; accepted only to match the Node entry point's signature.
+ * @returns Always `null`.
+ */
 export function loadStellar_CardConfig(_configPath?: string): null {
   return null;
 }
 
+/**
+ * Browser stub for {@link saveStellar_CardConfig} (config.ts).
+ *
+ * Persisting a config file isn't meaningful in a browser context, so this
+ * always throws rather than silently no-op-ing.
+ *
+ * @param _config - Ignored.
+ * @param _configPath - Ignored.
+ * @throws {Error} Always — config persistence is not available in browsers.
+ */
 export function saveStellar_CardConfig(
   _config: Stellar_CardConfig,
   _configPath?: string,
