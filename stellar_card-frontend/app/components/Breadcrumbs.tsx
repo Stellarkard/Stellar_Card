@@ -41,7 +41,7 @@ const LABEL_MAP: Record<string, string> = {
 };
 
 export function Breadcrumbs({ overrides = {}, className }: Props) {
-  const pathname = usePathname();
+  const pathname = usePathname() || '';
   const segments = pathname.split('/').filter(Boolean);
 
   if (segments.length <= 1) return null;

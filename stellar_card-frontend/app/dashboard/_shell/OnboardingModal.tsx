@@ -16,8 +16,9 @@
 
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
+import { useFocusTrap } from '../_lib/useFocusTrap';
 
 export const STORAGE_KEY = 'sc_onboarding_done';
 export const TOTAL_STEPS = 4;
@@ -147,6 +148,7 @@ export function OnboardingModal() {
   const [visible, setVisible] = useState(false);
   const [step, setStep] = useState(1);
   const [isAnimating, setIsAnimating] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     try {
@@ -171,14 +173,20 @@ export function OnboardingModal() {
     }, 150);
   }, []);
 
-  // Keyboard navigation
+  useFocusTrap({
+    active: visible,
+    containerRef: dialogRef,
+    onEscape: dismiss,
+    restoreFocus: true,
+    lockScroll: true,
+  });
+
+  // Keyboard navigation for arrow keys
   useEffect(() => {
     if (!visible) return;
 
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        dismiss();
-      } else if (e.key === 'ArrowRight' && step < TOTAL_STEPS) {
+      if (e.key === 'ArrowRight' && step < TOTAL_STEPS) {
         goToStep(step + 1);
       } else if (e.key === 'ArrowLeft' && step > 1) {
         goToStep(step - 1);
@@ -187,7 +195,7 @@ export function OnboardingModal() {
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [visible, step, dismiss, goToStep]);
+  }, [visible, step, goToStep]);
 
   if (!visible) return null;
 
@@ -211,6 +219,7 @@ export function OnboardingModal() {
 
       {/* Dialog */}
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Getting started"

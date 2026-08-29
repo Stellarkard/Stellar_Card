@@ -23,10 +23,12 @@ export function LazyLoad({
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting) {
+        if (entry?.isIntersecting) {
           setIsVisible(true);
           onVisible?.();
-          observer.unobserve(entry.target);
+          if (entry.target) {
+            observer.unobserve(entry.target);
+          }
         }
       },
       { threshold }

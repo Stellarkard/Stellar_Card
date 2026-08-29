@@ -12,7 +12,7 @@ export default meta;
 type Story = StoryObj<typeof ErrorBoundary>;
 
 // Component that throws an error
-function ThrowError() {
+function ThrowError(): React.JSX.Element {
   throw new Error('This is a simulated error for demonstration');
 }
 

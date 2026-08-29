@@ -22,8 +22,6 @@ interface Props extends Omit<InputHTMLAttributes<HTMLInputElement>, 'prefix'> {
   /** Marks the field invalid — should be paired with a visible error. */
   'aria-invalid'?: boolean | 'true' | 'false' | 'grammar' | 'spelling';
   'aria-label'?: string;
-  'aria-describedby'?: string;
-  'aria-invalid'?: boolean;
   'aria-required'?: boolean;
 }
 
