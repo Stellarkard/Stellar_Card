@@ -1,76 +1,119 @@
-// GlobalStateProvider — renders the correct loading / empty / error UI
-// based on async data state. Accepts children as a render prop so
-// consuming pages stay clean:
-//
-//   <GlobalStateProvider status={status} error={error} isEmpty={!data.length}>
-//     {() => <MyContent data={data} />}
-//   </GlobalStateProvider>
-//
-// All three fallback renders delegate to the shared LoadingState,
-// EmptyState, and ErrorState primitives so the visual language is
-// consistent across every page.
+// GlobalStateProvider - Unified state wrapper for page-level async content (Part 3)
+// Final integration: combines loading, empty, and error states with children render pattern
 
-'use client';
+"use client";
 
-import type { ReactNode } from 'react';
-import type { AsyncStatus } from '../lib/useAsyncState';
-import { LoadingState } from './LoadingState';
-import { EmptyState } from './EmptyState';
-import { ErrorState } from './ErrorState';
+import type { ReactNode } from "react";
+import type { AsyncStatus } from "../lib/useAsyncState";
+import { LoadingState } from "./LoadingState";
+import { ErrorState } from "./ErrorState";
+import { EmptyState } from "./EmptyState";
 
-interface Props {
+interface GlobalStateProviderProps {
+  /** Current async status from useAsyncState */
   status: AsyncStatus;
+  /** Error from async operation */
   error?: Error | null;
-  /** Evaluated only when status === 'success'. */
+  /** Whether data is empty (no results) */
   isEmpty?: boolean;
-  /** Shown when isEmpty is true. */
+  /** Custom empty state title */
   emptyTitle?: string;
+  /** Custom empty state description */
   emptyDescription?: ReactNode;
-  emptyAction?: ReactNode;
+  /** Custom empty state icon */
   emptyIcon?: ReactNode;
-  /** Shown while loading. */
-  loadingLines?: number;
-  /** Callback passed to ErrorState's retry button. */
+  /** Custom empty state action */
+  emptyAction?: ReactNode;
+  /** Custom error title */
+  errorTitle?: string;
+  /** Custom error action */
+  errorAction?: ReactNode;
+  /** Callback to retry failed operation */
   onRetry?: () => void;
-  /** Rendered when status === 'success' and isEmpty is false. */
+  /** Number of skeleton lines to show while loading */
+  loadingLines?: number;
+  /** Show avatar skeleton while loading */
+  loadingAvatar?: boolean;
+  /** Show title skeleton while loading */
+  loadingTitle?: boolean;
+  /** Children render function - only called when status is success and not empty */
   children: () => ReactNode;
 }
 
+/**
+ * GlobalStateProvider wraps page content and automatically renders
+ * appropriate UI based on async status: loading, error, empty, or success.
+ *
+ * @example
+ * ```tsx
+ * function Page() {
+ *   const { status, data, error, run } = useAsyncState(fetchData);
+ *
+ *   return (
+ *     <GlobalStateProvider
+ *       status={status}
+ *       error={error}
+ *       isEmpty={!data?.length}
+ *       onRetry={run}
+ *     >
+ *       {() => <Content data={data} />}
+ *     </GlobalStateProvider>
+ *   );
+ * }
+ * ```
+ */
 export function GlobalStateProvider({
   status,
   error,
   isEmpty = false,
-  emptyTitle = 'Nothing here yet',
+  emptyTitle = "No data found",
   emptyDescription,
-  emptyAction,
   emptyIcon,
-  loadingLines = 3,
+  emptyAction,
+  errorTitle = "Failed to load",
+  errorAction,
   onRetry,
+  loadingLines = 5,
+  loadingAvatar = false,
+  loadingTitle = false,
   children,
-}: Props) {
-  if (status === 'loading' || status === 'idle') {
-    return <LoadingState lines={loadingLines} />;
-  }
-
-  if (status === 'error') {
+}: GlobalStateProviderProps) {
+  // Loading state
+  if (status === "loading" || status === "idle") {
     return (
-      <ErrorState
-        message={error?.message}
-        onRetry={onRetry}
+      <LoadingState
+        lines={loadingLines}
+        avatar={loadingAvatar}
+        title={loadingTitle}
       />
     );
   }
 
-  if (isEmpty) {
+  // Error state
+  if (status === "error") {
+    return (
+      <ErrorState
+        title={errorTitle}
+        message={error?.message}
+        digest={error?.name}
+        onRetry={onRetry}
+        action={errorAction}
+      />
+    );
+  }
+
+  // Empty state (success but no data)
+  if (status === "success" && isEmpty) {
     return (
       <EmptyState
-        icon={emptyIcon}
         title={emptyTitle}
         description={emptyDescription}
+        icon={emptyIcon}
         action={emptyAction}
       />
     );
   }
 
+  // Success state with data
   return <>{children()}</>;
 }
