@@ -12,6 +12,12 @@ import {
   type ReactNode,
 } from "react";
 import type { AsyncStatus } from "../lib/useAsyncState";
+import {
+  DEFAULT_RETRY_CONFIG,
+  buildPersistKey,
+  retryDelayForAttempt,
+  isWithinRetryLimit,
+} from "./stateConfig";
 
 interface StateConfig {
   retryAttempts?: number;
@@ -41,8 +47,8 @@ interface Props {
 
 export function StateManager({ children, asyncFn, config = {} }: Props) {
   const {
-    retryAttempts = 3,
-    retryDelay = 1000,
+    retryAttempts = DEFAULT_RETRY_CONFIG.attempts,
+    retryDelay = DEFAULT_RETRY_CONFIG.baseDelayMs,
     persistKey,
     onSuccess,
     onError,
@@ -56,7 +62,7 @@ export function StateManager({ children, asyncFn, config = {} }: Props) {
   // Load persisted state on mount
   useEffect(() => {
     if (persistKey && typeof window !== "undefined") {
-      const stored = localStorage.getItem(`state_${persistKey}`);
+      const stored = localStorage.getItem(buildPersistKey(persistKey));
       if (stored) {
         try {
           const parsed = JSON.parse(stored);
@@ -81,7 +87,7 @@ export function StateManager({ children, asyncFn, config = {} }: Props) {
 
       // Persist successful state
       if (persistKey && typeof window !== "undefined") {
-        localStorage.setItem(`state_${persistKey}`, JSON.stringify(result));
+        localStorage.setItem(buildPersistKey(persistKey), JSON.stringify(result));
       }
 
       onSuccess?.(result);
@@ -94,12 +100,12 @@ export function StateManager({ children, asyncFn, config = {} }: Props) {
   }, [asyncFn, persistKey, onSuccess, onError]);
 
   const retry = useCallback(async () => {
-    if (retryCount >= retryAttempts) return;
+    if (!isWithinRetryLimit(retryCount, retryAttempts)) return;
 
     setRetryCount((prev) => prev + 1);
 
     // Exponential backoff
-    const delay = retryDelay * Math.pow(2, retryCount);
+    const delay = retryDelayForAttempt(retryCount, retryDelay);
     await new Promise((resolve) => setTimeout(resolve, delay));
 
     await execute();
@@ -112,7 +118,7 @@ export function StateManager({ children, asyncFn, config = {} }: Props) {
     setData(null);
 
     if (persistKey && typeof window !== "undefined") {
-      localStorage.removeItem(`state_${persistKey}`);
+      localStorage.removeItem(buildPersistKey(persistKey));
     }
   }, [persistKey]);
 
@@ -125,7 +131,7 @@ export function StateManager({ children, asyncFn, config = {} }: Props) {
     status,
     error,
     retryCount,
-    canRetry: retryCount < retryAttempts,
+    canRetry: isWithinRetryLimit(retryCount, retryAttempts),
     retry,
     reset,
     setOptimisticData,

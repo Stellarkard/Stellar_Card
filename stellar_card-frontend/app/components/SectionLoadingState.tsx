@@ -8,6 +8,7 @@ import type { AsyncStatus } from "../lib/useAsyncState";
 import { LoadingState, Skeleton } from "./LoadingState";
 import { ErrorState } from "./ErrorState";
 import { EmptyState } from "./EmptyState";
+import { DEFAULT_LOADING_LINES, DEFAULT_STATE_COPY } from "./stateConfig";
 
 interface SectionLoadingStateProps {
   /** Current async status */
@@ -60,11 +61,11 @@ export function SectionLoadingState({
   error,
   isEmpty = false,
   variant = "default",
-  emptyTitle = "No data",
+  emptyTitle = DEFAULT_STATE_COPY.empty.sectionTitle,
   emptyDescription,
   emptyAction,
   onRetry,
-  loadingLines = 3,
+  loadingLines = DEFAULT_LOADING_LINES,
   children,
 }: SectionLoadingStateProps) {
   const isCompact = variant === "compact";
@@ -98,8 +99,8 @@ export function SectionLoadingState({
   if (status === "error") {
     return (
       <ErrorState
-        title={isCompact ? "Error" : "Failed to load"}
-        message={error?.message || "Something went wrong"}
+        title={isCompact ? DEFAULT_STATE_COPY.error.compactTitle : DEFAULT_STATE_COPY.error.pageTitle}
+        message={error?.message || DEFAULT_STATE_COPY.error.message}
         onRetry={onRetry}
       />
     );
