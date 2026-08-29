@@ -125,15 +125,20 @@ export type {
 export {
   resolveNetworkConfig,
   resolveNetworkConfigFromEnv,
+  resolveNetworkConfigWithRetry,
   getDefaultSorobanRpcUrl,
   getDefaultHorizonUrl,
   createCustomNetworkConfig,
+  createExtendedNetworkConfig,
   validateRpcEndpoint,
+  validateNetworkConfig,
   NETWORK_ENV_VARS,
 } from './network';
 export type {
   NetworkConfig,
   RpcEndpointConfig,
+  RpcProxyConfig,
+  ExtendedRpcEndpointConfig,
   ResolvedRpcEndpoint,
   ResolvedNetworkConfig,
 } from './network';
@@ -157,6 +162,8 @@ export type {
   ExtendedPaymentInstructions,
   DetailedOrderPhase,
   OrderStatusHistory,
+  OrderHistoryEventType,
+  OrderHistoryEvent,
   ExtendedOrderStatus,
   DetailedBudget,
   OrderStatistics,
@@ -180,6 +187,16 @@ export type {
   CardIssuanceResult,
   BudgetGuard,
   StellarCardSDKVersion,
+  // Order event typings (#486)
+  OrderEventType,
+  OrderEventSource,
+  OrderEvent,
+  WebhookDeliveryStatus,
+  OrderWebhookConfig,
+  WebhookDelivery,
+  OrderEventSubscription,
+  OrderHistoryEntry,
+  OrderHistoryResponse,
 } from './types';
 
 export {
@@ -190,4 +207,9 @@ export {
   isRetryableError,
   isOrderSummary,
   isCardIssuanceResult,
+  // Order event type guards (#486)
+  isOrderEventType,
+  isOrderEvent,
+  isWebhookDelivery,
+  isOrderEventSubscription,
 } from './types';
