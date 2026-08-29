@@ -1,6 +1,17 @@
 'use client';
 
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
+import {
+  getOnboardingState,
+  initializeOnboarding,
+  completeStep as completeOnboardingStep,
+  skipOnboarding as skipOnboardingState,
+  nextStep as nextOnboardingStep,
+  previousStep as previousOnboardingStep,
+  shouldShowOnboarding,
+  getProgress,
+  type OnboardingState,
+} from '@/app/lib/onboarding';
 
 interface OnboardingStep {
   id: string;
@@ -51,23 +62,30 @@ export function OnboardingProvider({
   const [isOpen, setIsOpen] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
 
+  // Initialize from persisted state
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const completed = localStorage.getItem(storageKey);
-      if (completed) {
-        setIsCompleted(true);
-      } else {
+      const state = getOnboardingState();
+      if (state) {
+        setCurrentStepIndex(state.currentStep);
+        setIsCompleted(state.completed || state.skipped);
+        setIsOpen(shouldShowOnboarding());
+      } else if (shouldShowOnboarding()) {
+        initializeOnboarding();
         setIsOpen(true);
       }
     }
-  }, [storageKey]);
+  }, []);
 
   const currentStep = steps[currentStepIndex] || null;
-  const progress = currentStep ? ((currentStepIndex + 1) / steps.length) * 100 : 0;
+  const state = getOnboardingState();
+  const progress = state ? getProgress(state) : ((currentStepIndex + 1) / steps.length) * 100;
 
   const nextStep = useCallback(() => {
     if (currentStepIndex < steps.length - 1) {
-      setCurrentStepIndex(currentStepIndex + 1);
+      const newIndex = currentStepIndex + 1;
+      setCurrentStepIndex(newIndex);
+      nextOnboardingStep();
     } else {
       completeOnboarding();
     }
@@ -75,32 +93,34 @@ export function OnboardingProvider({
 
   const previousStep = useCallback(() => {
     if (currentStepIndex > 0) {
-      setCurrentStepIndex(currentStepIndex - 1);
+      const newIndex = currentStepIndex - 1;
+      setCurrentStepIndex(newIndex);
+      previousOnboardingStep();
     }
   }, [currentStepIndex]);
 
   const completeOnboarding = useCallback(() => {
     setIsCompleted(true);
     setIsOpen(false);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(storageKey, 'true');
+    if (currentStep) {
+      completeOnboardingStep(currentStep.id);
     }
     onComplete?.();
-  }, [storageKey, onComplete]);
+  }, [currentStep, onComplete]);
 
   const skipOnboarding = useCallback(() => {
-    completeOnboarding();
+    skipOnboardingState();
+    setIsCompleted(true);
+    setIsOpen(false);
     onSkip?.();
-  }, [completeOnboarding, onSkip]);
+  }, [onSkip]);
 
   const startOnboarding = useCallback(() => {
     setIsOpen(true);
     setCurrentStepIndex(0);
     setIsCompleted(false);
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem(storageKey);
-    }
-  }, [storageKey]);
+    initializeOnboarding();
+  }, []);
 
   const closeOnboarding = useCallback(() => {
     setIsOpen(false);
