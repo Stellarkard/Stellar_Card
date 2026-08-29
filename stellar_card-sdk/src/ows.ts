@@ -80,6 +80,10 @@ function getStellarAddress(wallet: WalletInfo): string {
  * them. Agents running on ephemeral filesystems (Lambda, Cloud Run,
  * scratch containers) should pass a `vaultPath` pointing at a
  * persistent volume, or set the `OWS_VAULT_PATH` environment variable.
+ * @param name - The name of the wallet to create or fetch.
+ * @param passphrase - Optional passphrase to encrypt the wallet at rest.
+ * @param vaultPath - Optional custom path for the OWS vault directory.
+ * @returns Object containing the generated `walletId` and Stellar `publicKey`.
  */
 export function createOWSWallet(
   name: string,
@@ -101,6 +105,11 @@ export function createOWSWallet(
 /**
  * Import an existing Stellar secret key (S...) into an OWS wallet.
  * Useful for migrating from a raw STELLAR_WALLET_SECRET to OWS custody.
+ * @param name - The name of the wallet to store the key under.
+ * @param stellarSecret - The raw Stellar secret key (S-address) to import.
+ * @param passphrase - Optional passphrase to encrypt the wallet at rest.
+ * @param vaultPath - Optional custom path for the OWS vault directory.
+ * @returns Object containing the `walletId` and Stellar `publicKey`.
  */
 export function importStellarKey(
   name: string,
@@ -208,6 +217,8 @@ export interface OnboardAgentResult {
  *
  * The backend broadcasts these transitions over the live SSE dashboard
  * feed, so operators see the agent moving through states in real time.
+ * @param opts - Onboarding options including API key and wallet configuration.
+ * @returns Object containing the new `publicKey` and current `balance`.
  */
 export async function onboardAgent(opts: OnboardAgentOpts): Promise<OnboardAgentResult> {
   const { Stellar_CardClient } = await import('./client');
@@ -308,6 +319,9 @@ function owsSignTx<T extends SignableTx>(
  * Used by purchaseCardOWS's resume branch to decide whether a
  * dropped-pre-apply Soroban tx should be re-submitted or whether we
  * should wait for a still-in-flight one to finalize.
+ * @param txHash - The Soroban transaction hash to check.
+ * @param opts - Options including the optional network passphrase.
+ * @returns 'landed' if successful, 'dropped' if 404/failed, or 'pending' if unknown.
  */
 export async function checkSorobanTxLanded(
   txHash: string,
@@ -356,6 +370,8 @@ export interface TrustlineOpts {
  * silently no-ops them, but charges the base fee each time — so
  * pre-checking saves ~0.00001 XLM per accidental re-run). Returns the
  * new tx hash when a trustline is actually opened.
+ * @param opts - Trustline options including wallet name and network.
+ * @returns The transaction hash if a trustline was created, or `null` if one already exists.
  */
 export async function addUsdcTrustlineOWS(opts: TrustlineOpts): Promise<string | null> {
   const { walletName, passphrase, vaultPath, networkPassphrase = Networks.PUBLIC } = opts;
@@ -443,6 +459,15 @@ const PAY_VIA_CONTRACT_MAX_ATTEMPTS = 3;
  */
 const PAY_VIA_CONTRACT_RETRY_DELAY_MS = 6_000;
 
+/**
+ * Pay the stellar_card receiver contract using an OWS-custody wallet. Builds a
+ * Soroban `pay_usdc` or `pay_xlm` invocation, signs the transaction hash via
+ * OWS, and submits it to the Soroban RPC.
+ *
+ * @param opts - Options including the wallet name, payment instructions, and network config.
+ * @param deps - Optional injectable dependencies for testing (defaults to real implementations).
+ * @returns The resulting transaction hash as a string.
+ */
 export async function payViaContractOWS(
   opts: PayViaContractOwsOpts,
   deps: PayViaContractOwsDeps = {},
@@ -617,6 +642,8 @@ export interface PurchaseCardOwsOpts {
  * txHash attached (deadline reached but tx may still land), we proceed to
  * waitForCard — the stellar_card backend watcher is the source of truth and
  * will credit the order when the tx finalizes.
+ * @param opts - Options including API key, wallet name, payment amounts, and resumption state.
+ * @returns Object containing the issued `CardDetails` and the `order_id`.
  */
 export async function purchaseCardOWS(
   opts: PurchaseCardOwsOpts,
