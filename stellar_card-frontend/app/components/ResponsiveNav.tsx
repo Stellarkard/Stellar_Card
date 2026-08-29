@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
 interface NavItem {
@@ -25,24 +25,28 @@ export function ResponsiveNav({
   onNavigate,
   variant = 'horizontal',
 }: ResponsiveNavProps) {
-  const pathname = usePathname();
+  const pathname = usePathname() || '';
   const [mobileOpen, setMobileOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (variant === 'horizontal' && mobileOpen) {
+      const origHtml = document.documentElement.style.overflow;
+      const origBody = document.body.style.overflow;
       document.documentElement.style.overflow = 'hidden';
       document.body.style.overflow = 'hidden';
       return () => {
-        document.documentElement.style.overflow = '';
-        document.body.style.overflow = '';
+        document.documentElement.style.overflow = origHtml;
+        document.body.style.overflow = origBody;
       };
     }
+    return undefined;
   }, [mobileOpen, variant]);
 
-  useEffect(() => {
+  const [prevPathname, setPrevPathname] = useState(pathname);
+  if (pathname !== prevPathname) {
+    setPrevPathname(pathname);
     setMobileOpen(false);
-  }, [pathname]);
+  }
 
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/');
 
@@ -124,6 +128,7 @@ export function ResponsiveNav({
 
   return (
     <nav className={`responsive-nav responsive-nav-${variant} ${className || ''}`}>
+      {variant === 'vertical' && navContent}
       {variant === 'horizontal' && (
         <>
           {navContent}

@@ -1,5 +1,4 @@
-import { memo } from 'react';
-import type { ComponentType, PropsWithChildren } from 'react';
+import { memo, type ComponentType } from 'react';
 
 export function createOptimizedComponent<P extends object>(
   Component: ComponentType<P>,

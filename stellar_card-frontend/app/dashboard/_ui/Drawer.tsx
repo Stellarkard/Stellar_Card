@@ -1,33 +1,34 @@
 // Right-side sliding drawer for modal-ish details (top-up QR, order
-// detail, etc). Keyboard-dismissable. No animation yet — Phase 1
-// prioritises correctness over polish.
+// detail, etc). Keyboard-dismissable with focus trap and ARIA tags.
 
 'use client';
 
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useId, useRef, type ReactNode } from 'react';
+import { useFocusTrap } from '../_lib/useFocusTrap';
 
 interface Props {
   open: boolean;
   onClose: () => void;
   title?: ReactNode;
+  description?: ReactNode;
   width?: number;
   children: ReactNode;
 }
 
-export function Drawer({ open, onClose, title, width = 420, children }: Props) {
+export function Drawer({ open, onClose, title, description, width = 420, children }: Props) {
   const titleId = useId();
+  const descriptionId = useId();
+  const drawerRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    // Move focus to the close button so keyboard users land inside the drawer
-    closeRef.current?.focus();
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  useFocusTrap({
+    active: open,
+    containerRef: drawerRef,
+    initialFocusRef: closeRef,
+    onEscape: onClose,
+    restoreFocus: true,
+    lockScroll: true,
+  });
 
   if (!open) return null;
 
@@ -44,17 +45,22 @@ export function Drawer({ open, onClose, title, width = 420, children }: Props) {
       {/* Backdrop — clicking it closes the drawer */}
       <div
         role="presentation"
+        aria-hidden="true"
         onClick={onClose}
         style={{
           position: 'absolute',
           inset: 0,
           background: 'rgba(0, 0, 0, 0.55)',
+          backdropFilter: 'blur(2px)',
+          WebkitBackdropFilter: 'blur(2px)',
         }}
       />
       <div
+        ref={drawerRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
+        aria-describedby={description ? descriptionId : undefined}
         style={{
           position: 'relative',
           width,
@@ -65,6 +71,7 @@ export function Drawer({ open, onClose, title, width = 420, children }: Props) {
           display: 'flex',
           flexDirection: 'column',
           boxShadow: '-8px 0 24px rgba(0, 0, 0, 0.4)',
+          zIndex: 61,
         }}
       >
         <div
@@ -76,14 +83,25 @@ export function Drawer({ open, onClose, title, width = 420, children }: Props) {
             justifyContent: 'space-between',
           }}
         >
-          <div
-            id={titleId}
-            style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--fg)' }}
-          >
-            {title}
+          <div>
+            <div
+              id={titleId}
+              style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--fg)' }}
+            >
+              {title}
+            </div>
+            {description && (
+              <div
+                id={descriptionId}
+                style={{ fontSize: '0.72rem', color: 'var(--fg-dim)', marginTop: '0.2rem' }}
+              >
+                {description}
+              </div>
+            )}
           </div>
           <button
             ref={closeRef}
+            type="button"
             onClick={onClose}
             style={{
               background: 'transparent',
@@ -94,10 +112,13 @@ export function Drawer({ open, onClose, title, width = 420, children }: Props) {
               borderRadius: 6,
               cursor: 'pointer',
               fontSize: '0.85rem',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
             }}
             aria-label="Close drawer"
           >
-            ×
+            <span aria-hidden="true">×</span>
           </button>
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '1.25rem' }}>{children}</div>

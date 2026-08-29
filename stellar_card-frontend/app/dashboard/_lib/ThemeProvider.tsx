@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, ReactNode } from 'react';
+import { createContext, useContext, type ReactNode } from 'react';
 import { useTheme } from './useTheme';
 
 type Theme = ReturnType<typeof useTheme>;

@@ -25,7 +25,7 @@ const MORE: { href: string; label: string; body: string }[] = [
 ];
 
 export function NavLinks() {
-  const pathname = usePathname();
+  const pathname = usePathname() || '';
   const [moreOpen, setMoreOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const moreWrapRef = useRef<HTMLDivElement>(null);
