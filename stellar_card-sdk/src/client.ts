@@ -430,6 +430,11 @@ export class Stellar_CardClient {
    *
    * Uses SSE first and falls back to HTTP polling if the stream cannot
    * be established or is interrupted by the network path.
+   *
+   * @param orderId - Order UUID to wait for.
+   * @param opts - Options for waiting including timeout and poll interval.
+   * @returns A promise resolving to the card details once ready.
+   * @throws {WaitTimeoutError} When the timeout is reached before the order is ready.
    */
   async waitForCard(
     orderId: string,
