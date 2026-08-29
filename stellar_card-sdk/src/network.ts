@@ -47,6 +47,8 @@ export interface NetworkConfig {
   horizonUrl?: string | RpcEndpointConfig;
   /** Optional network name for identification */
   networkName?: string;
+  /** Optional custom user agent for requests */
+  customUserAgent?: string;
 }
 
 /**
@@ -67,6 +69,7 @@ export interface ResolvedNetworkConfig {
   sorobanRpc: ResolvedRpcEndpoint;
   horizon: ResolvedRpcEndpoint;
   networkName: string;
+  customUserAgent?: string;
 }
 
 /**
