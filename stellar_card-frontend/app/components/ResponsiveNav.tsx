@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
+import { isActivePath } from './navigationConfig';
 
 interface NavItem {
   href: string;
@@ -49,7 +50,7 @@ export function ResponsiveNav({
   }
 
 
-  const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/');
+  const isActive = (href: string) => isActivePath(pathname, href);
 
   const handleNavClick = (href: string) => {
     onNavigate?.(href);
