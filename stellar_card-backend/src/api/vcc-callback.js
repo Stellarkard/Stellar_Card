@@ -4,6 +4,7 @@
 // Auth: HMAC-SHA256 signature on the raw request body (not session auth).
 
 const { Router } = require('express');
+const { z } = require('zod');
 const db = require('../db');
 const { enqueueWebhook, refundOrQuarantine } = require('../fulfillment');
 const { verifyVccSignature } = require('../vcc-client');
@@ -31,6 +32,32 @@ function dashboardIdForOrder(orderId) {
 }
 
 const router = Router();
+
+// Zod validation for the card fulfillment payload (Part 2).
+//
+// Before this, `card` was passed straight from req.body into sealCard()
+// with only an `if (status === 'fulfilled' && card)` truthy check —
+// sealCard() does guard against null/non-object input, but a `card` with
+// missing or wrong-typed `number`/`cvv`/`expiry` still reached the vault
+// layer and either threw an uncaught error mid-request or, depending on
+// the field, silently sealed an empty/garbage string into card storage.
+// A status:'fulfilled' callback with no `card` at all previously fell
+// through to the unrelated `invalid_status` branch, which is the wrong
+// error for what's actually a missing-card request.
+//
+// Validating the shape here means a malformed callback is rejected with
+// a specific 400 before it ever reaches sealCard() or an UPDATE.
+const cardSchema = z.object({
+  number: z.string().min(1, 'card.number is required'),
+  cvv: z.string().min(1, 'card.cvv is required'),
+  expiry: z.string().min(1, 'card.expiry is required'),
+  brand: z.string().optional(),
+});
+
+const baseBodySchema = z.object({
+  order_id: z.string().min(1),
+  status: z.string().min(1),
+});
 
 // POST /vcc-callback
 // Body: { order_id, status: 'fulfilled'|'failed', card?: { number, cvv, expiry, brand }, error?: string }
@@ -179,9 +206,14 @@ router.post('/', (req, res) => {
   // avoids a confusing 404 after a successful signature verify.
   void orderExistsForPreCheck;
 
-  const { order_id, status, card, error } = req.body;
-  if (!order_id || !status) {
+  const baseParsed = baseBodySchema.safeParse(req.body);
+  if (!baseParsed.success) {
     return res.status(400).json({ error: 'missing_fields' });
+  }
+  const { order_id, status } = baseParsed.data;
+  const { error } = req.body;
+  if (status !== 'fulfilled' && status !== 'failed') {
+    return res.status(400).json({ error: 'invalid_status' });
   }
 
   // Defence in depth: if the caller provided an X-VCC-Order-Id header (v2)
@@ -211,12 +243,26 @@ router.post('/', (req, res) => {
     return res.json({ ok: true, note: 'already_terminal' });
   }
 
-  if (status === 'fulfilled' && card) {
+  if (status === 'fulfilled') {
+    // Card shape is validated here rather than earlier — an idempotent
+    // retry callback for an already-terminal order (caught by the
+    // TERMINAL check above) never needs a valid card body, and a
+    // nonexistent order_id should still 404 before we ever inspect the
+    // card. Only a live fulfillment attempt is required to carry one.
+    const cardParsed = cardSchema.safeParse(req.body.card);
+    if (!cardParsed.success) {
+      return res.status(400).json({
+        error: 'invalid_card',
+        message: cardParsed.error.issues.map((i) => i.message).join('; '),
+      });
+    }
+    const validatedCard = cardParsed.data;
+
     // F1: seal PAN/CVV/expiry before writing. The seal helper throws in
     // production when CARDS402_SECRET_BOX_KEY is unset (F5 enforced it at
     // env validation time, so this is belt-and-braces). card_brand stays
     // plaintext — Visa/Mastercard isn't sensitive.
-    const sealed = sealCard(card);
+    const sealed = sealCard(validatedCard);
     const claimed = db
       .prepare(
         `
@@ -274,7 +320,7 @@ router.post('/', (req, res) => {
         details: {
           amount_usdc: order.amount_usdc,
           payment_asset: order.payment_asset,
-          card_brand: normalizeCardBrand(card.brand),
+          card_brand: normalizeCardBrand(validatedCard.brand),
           api_key_id: order.api_key_id,
         },
         ip: req.ip || req.headers?.['x-forwarded-for'] || null,
@@ -301,14 +347,14 @@ router.post('/', (req, res) => {
           amount_usdc: order.amount_usdc,
           payment_asset: order.payment_asset,
           card: {
-            number: card.number,
-            cvv: card.cvv,
-            expiry: card.expiry,
+            number: validatedCard.number,
+            cvv: validatedCard.cvv,
+            expiry: validatedCard.expiry,
             // Normalise the upstream merchant-catalog string before it
             // hits the agent transcript. Raw value stays in the orders
             // row for ops; agents see "USD Visa Card" not "Visa® Reward
             // Card, 6-Month Expiration [ITNL] eGift Card".
-            brand: normalizeCardBrand(card.brand),
+            brand: normalizeCardBrand(validatedCard.brand),
           },
         },
         keyRow?.webhook_secret || null,

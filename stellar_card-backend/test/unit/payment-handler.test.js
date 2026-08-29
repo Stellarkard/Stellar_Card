@@ -359,3 +359,170 @@ describe('F3-payment-handler: usdc_overpaid bizEvent', () => {
     }
   });
 });
+
+// ── F7-payment-handler: unmatched-payment routing (Part 2) ─────────────────
+//
+// handlePayment routes every payment it can't safely claim to
+// unmatched_payments with a specific `reason` (see the F7 comments in
+// src/payment-handler.js) so ops has a queue to refund from. Only the
+// F2 corrupt-amount and F3 overpayment reasons had direct unit coverage
+// before this — the other five routing branches (unknown order, wrong
+// order status, underpayment on both assets, an unquoted XLM order, and
+// an unrecognised asset) were only reachable indirectly through the e2e
+// integration suite. This fills in direct coverage for each one.
+
+describe('F7-payment-handler: unmatched-payment routing', () => {
+  let apiKeyId;
+
+  beforeEach(async () => {
+    resetDb();
+    const key = await createTestKey({ label: 'f7-test' });
+    apiKeyId = key.id;
+  });
+
+  function seedOrder({
+    id = uuidv4(),
+    amountUsdc = '10.00',
+    status = 'pending_payment',
+    expectedXlmAmount = null,
+  } = {}) {
+    db.prepare(
+      `INSERT INTO orders (id, status, amount_usdc, payment_asset, api_key_id, expected_xlm_amount, created_at, updated_at)
+       VALUES (?, ?, ?, 'usdc', ?, ?, datetime('now'), datetime('now'))`,
+    ).run(id, status, amountUsdc, apiKeyId, expectedXlmAmount);
+    return id;
+  }
+
+  function getOrder(id) {
+    return db.prepare(`SELECT * FROM orders WHERE id = ?`).get(id);
+  }
+
+  function findUnmatched(txid) {
+    return db.prepare(`SELECT * FROM unmatched_payments WHERE stellar_txid = ?`).get(txid);
+  }
+
+  it('routes to unknown_order when the order_id does not exist', async () => {
+    const orderId = uuidv4(); // never inserted
+    await handlePayment({
+      txid: 'TX_UNKNOWN_ORDER',
+      paymentAsset: 'usdc_soroban',
+      amountUsdc: '10.00',
+      amountXlm: null,
+      senderAddress: 'GTESTSENDER',
+      orderId,
+    });
+    const unmatched = findUnmatched('TX_UNKNOWN_ORDER');
+    assert.ok(unmatched, 'expected an unmatched_payments row');
+    assert.equal(unmatched.reason, 'unknown_order');
+    assert.equal(unmatched.claimed_order_id, orderId);
+  });
+
+  it('routes to order_status_<status> when the order is not pending_payment', async () => {
+    const orderId = seedOrder({ status: 'ordering' });
+    await handlePayment({
+      txid: 'TX_WRONG_STATUS',
+      paymentAsset: 'usdc_soroban',
+      amountUsdc: '10.00',
+      amountXlm: null,
+      senderAddress: 'GTESTSENDER',
+      orderId,
+    });
+    // The order's own status must be left untouched — this event just
+    // isn't for the current lifecycle state.
+    assert.equal(getOrder(orderId).status, 'ordering');
+    assert.equal(findUnmatched('TX_WRONG_STATUS').reason, 'order_status_ordering');
+  });
+
+  it('routes to underpaid_usdc and leaves the order in pending_payment', async () => {
+    const orderId = seedOrder({ amountUsdc: '10.00' });
+    await handlePayment({
+      txid: 'TX_UNDERPAID_USDC',
+      paymentAsset: 'usdc_soroban',
+      amountUsdc: '5.00',
+      amountXlm: null,
+      senderAddress: 'GTESTSENDER',
+      orderId,
+    });
+    assert.equal(getOrder(orderId).status, 'pending_payment');
+    assert.equal(findUnmatched('TX_UNDERPAID_USDC').reason, 'underpaid_usdc');
+  });
+
+  it('routes to xlm_not_quoted when the order never offered an XLM price', async () => {
+    const orderId = seedOrder({ expectedXlmAmount: null });
+    await handlePayment({
+      txid: 'TX_XLM_NOT_QUOTED',
+      paymentAsset: 'xlm_soroban',
+      amountUsdc: null,
+      amountXlm: '100',
+      senderAddress: 'GTESTSENDER',
+      orderId,
+    });
+    assert.equal(getOrder(orderId).status, 'pending_payment');
+    assert.equal(findUnmatched('TX_XLM_NOT_QUOTED').reason, 'xlm_not_quoted');
+  });
+
+  it('routes to underpaid_xlm and leaves the order in pending_payment', async () => {
+    const orderId = seedOrder({ expectedXlmAmount: '100' });
+    await handlePayment({
+      txid: 'TX_UNDERPAID_XLM',
+      paymentAsset: 'xlm_soroban',
+      amountUsdc: null,
+      amountXlm: '50',
+      senderAddress: 'GTESTSENDER',
+      orderId,
+    });
+    assert.equal(getOrder(orderId).status, 'pending_payment');
+    assert.equal(findUnmatched('TX_UNDERPAID_XLM').reason, 'underpaid_xlm');
+  });
+
+  it('emits payment.xlm_overpaid and still claims the order on XLM overpayment', async () => {
+    const logger = require('../../src/lib/logger');
+    const origEvent = logger.event;
+    const events = [];
+    logger.event = (name, fields) => events.push({ name, fields });
+    // Downstream getInvoice/xlm-sender calls hit real network stubs that
+    // fail in this unit-test environment — same pattern as the F3
+    // overpaid test, we only assert on the claim + bizEvent, not the
+    // fulfillment pipeline past that point.
+    const origError = console.error;
+    console.error = () => {};
+
+    try {
+      const orderId = seedOrder({ expectedXlmAmount: '100' });
+      await handlePayment({
+        txid: 'TX_XLM_OVERPAID',
+        paymentAsset: 'xlm_soroban',
+        amountUsdc: null,
+        amountXlm: '150',
+        senderAddress: 'GTESTSENDER',
+        orderId,
+      });
+
+      const overpaid = events.find((e) => e.name === 'payment.xlm_overpaid');
+      assert.ok(overpaid, 'expected payment.xlm_overpaid bizEvent');
+      assert.equal(overpaid.fields.order_id, orderId);
+      assert.match(overpaid.fields.excess_xlm, /^50\.0000000$/);
+      assert.equal(overpaid.fields.txid, 'TX_XLM_OVERPAID');
+      // The order must have been claimed (left pending_payment) despite
+      // the overpayment — overpaying is accepted, not rejected.
+      assert.notEqual(getOrder(orderId).status, 'pending_payment');
+    } finally {
+      logger.event = origEvent;
+      console.error = origError;
+    }
+  });
+
+  it('routes to unknown_asset for an unrecognised payment_asset value', async () => {
+    const orderId = seedOrder();
+    await handlePayment({
+      txid: 'TX_UNKNOWN_ASSET',
+      paymentAsset: 'btc_soroban',
+      amountUsdc: '10.00',
+      amountXlm: null,
+      senderAddress: 'GTESTSENDER',
+      orderId,
+    });
+    assert.equal(getOrder(orderId).status, 'pending_payment');
+    assert.equal(findUnmatched('TX_UNKNOWN_ASSET').reason, 'unknown_asset');
+  });
+});
