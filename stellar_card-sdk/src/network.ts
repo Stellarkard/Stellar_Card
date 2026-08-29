@@ -47,6 +47,8 @@ export interface NetworkConfig {
   horizonUrl?: string | RpcEndpointConfig;
   /** Optional network name for identification */
   networkName?: string;
+  /** Optional custom user agent for requests */
+  customUserAgent?: string;
 }
 
 /**
@@ -67,6 +69,7 @@ export interface ResolvedNetworkConfig {
   sorobanRpc: ResolvedRpcEndpoint;
   horizon: ResolvedRpcEndpoint;
   networkName: string;
+  customUserAgent?: string;
 }
 
 /**
@@ -136,6 +139,7 @@ export function resolveNetworkConfig(config: NetworkConfig = {}): ResolvedNetwor
     sorobanRpc: normalizeRpcEndpoint(config.sorobanRpcUrl, defaultSorobanRpc),
     horizon: normalizeRpcEndpoint(config.horizonUrl, defaultHorizon),
     networkName: normalizeString(config.networkName) ?? defaultName,
+    customUserAgent: normalizeString(config.customUserAgent),
   };
 }
 

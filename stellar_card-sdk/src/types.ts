@@ -197,6 +197,24 @@ export interface OrderStatusHistory {
   note?: string;
 }
 
+/** Specific order history event types for detailed tracking */
+export type OrderHistoryEventType = 
+  | 'payment_initiated'
+  | 'payment_confirmed'
+  | 'card_issued'
+  | 'refund_processed'
+  | 'order_cancelled';
+
+/** Order history event with typed payload */
+export interface OrderHistoryEvent {
+  /** Type of the event */
+  type: OrderHistoryEventType;
+  /** Timestamp of the event */
+  timestamp: string;
+  /** Additional payload data */
+  payload?: Record<string, unknown>;
+}
+
 /** Extended order status with history */
 export interface ExtendedOrderStatus {
   /** Order identifier */
