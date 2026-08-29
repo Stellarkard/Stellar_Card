@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Interactive basic purchase example (Issue #529 — Part 5).
+ * Interactive basic purchase example (Issue #529 — Part 5; also closes #489,
+ * a duplicate "Part 1" issue filed for the same feature).
  *
  * Wraps the stellar_card SDK purchase flow with a readline-based interactive
  * prompt so users can walk through each step of buying a card without needing
