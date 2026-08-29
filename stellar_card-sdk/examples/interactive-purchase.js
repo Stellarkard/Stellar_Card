@@ -150,6 +150,7 @@ async function main() {
     rlOutput.write('\n');
     rlOutput.write('Save these details to a secrets manager immediately.\n');
     rlOutput.write('Do not log or share card numbers in plaintext.\n');
+    rlOutput.write('Billing address is typically any valid US address.\n');
 
     return 0;
   } catch (err) {
