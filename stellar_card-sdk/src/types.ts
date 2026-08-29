@@ -197,6 +197,24 @@ export interface OrderStatusHistory {
   note?: string;
 }
 
+/** Specific order history event types for detailed tracking */
+export type OrderHistoryEventType = 
+  | 'payment_initiated'
+  | 'payment_confirmed'
+  | 'card_issued'
+  | 'refund_processed'
+  | 'order_cancelled';
+
+/** Order history event with typed payload */
+export interface OrderHistoryEvent {
+  /** Type of the event */
+  type: OrderHistoryEventType;
+  /** Timestamp of the event */
+  timestamp: string;
+  /** Additional payload data */
+  payload?: Record<string, unknown>;
+}
+
 /** Extended order status with history */
 export interface ExtendedOrderStatus {
   /** Order identifier */
@@ -871,5 +889,214 @@ export function isCardIssuanceResult(value: unknown): value is CardIssuanceResul
     typeof v['number'] === 'string' &&
     typeof v['cvv'] === 'string' &&
     typeof v['expiry'] === 'string'
+  );
+}
+
+// ============================================================================
+// ORDER HISTORY EVENT TYPES (Part 5)
+// ============================================================================
+
+/** Order lifecycle event types emitted during order processing */
+export type OrderEventType =
+  | 'order_created'
+  | 'payment_initiated'
+  | 'payment_received'
+  | 'payment_confirmed'
+  | 'payment_failed'
+  | 'trustline_added'
+  | 'trustline_failed'
+  | 'processing_started'
+  | 'card_issued'
+  | 'card_delivery_failed'
+  | 'order_completed'
+  | 'order_failed'
+  | 'order_refunded'
+  | 'order_cancelled'
+  | 'order_expired';
+
+/** Source of an order event */
+export type OrderEventSource = 'api' | 'webhook' | 'sse' | 'polling' | 'system';
+
+/** Order lifecycle event with metadata */
+export interface OrderEvent {
+  /** Unique event identifier */
+  event_id: string;
+  /** Order this event belongs to */
+  order_id: string;
+  /** Type of lifecycle event */
+  event_type: OrderEventType;
+  /** When the event occurred */
+  timestamp: string;
+  /** Source that generated the event */
+  source: OrderEventSource;
+  /** Human-readable description of the event */
+  message?: string;
+  /** Event-specific metadata */
+  metadata?: Record<string, unknown>;
+  /** Error details if the event represents a failure */
+  error?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  };
+}
+
+/** Webhook delivery status for order events */
+export type WebhookDeliveryStatus = 'pending' | 'delivered' | 'failed' | 'retrying';
+
+/** Webhook configuration for order event notifications */
+export interface OrderWebhookConfig {
+  /** Webhook URL to receive order events */
+  url: string;
+  /** Event types to subscribe to (empty = all events) */
+  events?: OrderEventType[];
+  /** Optional secret for HMAC signature verification */
+  secret?: string;
+  /** Maximum delivery attempts before marking as failed */
+  maxRetries?: number;
+  /** Custom headers to include in webhook requests */
+  headers?: Record<string, string>;
+}
+
+/** Webhook delivery record for an order event */
+export interface WebhookDelivery {
+  /** Delivery identifier */
+  delivery_id: string;
+  /** Event that was delivered */
+  event_id: string;
+  /** Order this delivery belongs to */
+  order_id: string;
+  /** Webhook URL that received the event */
+  webhook_url: string;
+  /** HTTP status code of the delivery attempt */
+  status_code?: number;
+  /** Delivery status */
+  status: WebhookDeliveryStatus;
+  /** Number of delivery attempts made */
+  attempts: number;
+  /** Timestamp of the last delivery attempt */
+  last_attempt_at: string;
+  /** Timestamp of successful delivery (if delivered) */
+  delivered_at?: string;
+  /** Error message if delivery failed */
+  error?: string;
+}
+
+/** Order event subscription for receiving real-time order updates */
+export interface OrderEventSubscription {
+  /** Subscription identifier */
+  subscription_id: string;
+  /** Order IDs to subscribe to (empty = all orders for the API key) */
+  order_ids?: string[];
+  /** Event types to receive (empty = all events) */
+  event_types?: OrderEventType[];
+  /** Transport mechanism for receiving events */
+  transport: 'webhook' | 'sse' | 'polling';
+  /** Whether the subscription is currently active */
+  active: boolean;
+  /** Subscription creation timestamp */
+  created_at: string;
+  /** Subscription expiration timestamp (if applicable) */
+  expires_at?: string;
+}
+
+/** Order history timeline entry with event context */
+export interface OrderHistoryEntry {
+  /** The event that occurred */
+  event: OrderEvent;
+  /** Order status at the time of this event */
+  status_at_event: string;
+  /** Phase at the time of this event */
+  phase_at_event: DetailedOrderPhase;
+  /** Previous phase (if phase changed) */
+  previous_phase?: DetailedOrderPhase;
+}
+
+/** Full order history response with timeline */
+export interface OrderHistoryResponse {
+  /** Order identifier */
+  order_id: string;
+  /** Chronological list of events */
+  entries: OrderHistoryEntry[];
+  /** Total event count */
+  total: number;
+  /** Whether more events are available via pagination */
+  has_more: boolean;
+  /** Cursor for fetching the next page */
+  next_cursor?: string;
+}
+
+// ============================================================================
+// ORDER EVENT TYPE GUARDS
+// ============================================================================
+
+/** Type guard for OrderEventType */
+export function isOrderEventType(value: unknown): value is OrderEventType {
+  const types: OrderEventType[] = [
+    'order_created',
+    'payment_initiated',
+    'payment_received',
+    'payment_confirmed',
+    'payment_failed',
+    'trustline_added',
+    'trustline_failed',
+    'processing_started',
+    'card_issued',
+    'card_delivery_failed',
+    'order_completed',
+    'order_failed',
+    'order_refunded',
+    'order_cancelled',
+    'order_expired',
+  ];
+  return typeof value === 'string' && types.includes(value as OrderEventType);
+}
+
+/** Type guard for OrderEvent */
+export function isOrderEvent(value: unknown): value is OrderEvent {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'event_id' in value &&
+    'order_id' in value &&
+    'event_type' in value &&
+    'timestamp' in value &&
+    'source' in value &&
+    typeof (value as { event_id: unknown }).event_id === 'string' &&
+    typeof (value as { order_id: unknown }).order_id === 'string' &&
+    isOrderEventType((value as { event_type: unknown }).event_type) &&
+    typeof (value as { timestamp: unknown }).timestamp === 'string'
+  );
+}
+
+/** Type guard for WebhookDelivery */
+export function isWebhookDelivery(value: unknown): value is WebhookDelivery {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'delivery_id' in value &&
+    'event_id' in value &&
+    'status' in value &&
+    typeof (value as { delivery_id: unknown }).delivery_id === 'string' &&
+    typeof (value as { event_id: unknown }).event_id === 'string' &&
+    ['pending', 'delivered', 'failed', 'retrying'].includes(
+      (value as { status: unknown }).status as string,
+    )
+  );
+}
+
+/** Type guard for OrderEventSubscription */
+export function isOrderEventSubscription(value: unknown): value is OrderEventSubscription {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'subscription_id' in value &&
+    'transport' in value &&
+    'active' in value &&
+    typeof (value as { subscription_id: unknown }).subscription_id === 'string' &&
+    typeof (value as { active: unknown }).active === 'boolean' &&
+    ['webhook', 'sse', 'polling'].includes(
+      (value as { transport: unknown }).transport as string,
+    )
   );
 }

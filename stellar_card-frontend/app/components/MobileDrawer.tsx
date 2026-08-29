@@ -4,40 +4,34 @@
 
 'use client';
 
-import { useEffect, useRef, useCallback } from 'react';
+import { useRef, type ReactNode } from 'react';
+import { useFocusTrap } from '../dashboard/_lib/useFocusTrap';
 
 interface Props {
   open: boolean;
   onClose: () => void;
-  children: React.ReactNode;
+  children: ReactNode;
 }
 
 export function MobileDrawer({ open, onClose, children }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
 
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    },
-    [onClose]
-  );
-
-  useEffect(() => {
-    if (!open) return;
-    document.addEventListener('keydown', handleKeyDown);
-    document.documentElement.style.overflow = 'hidden';
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown);
-      document.documentElement.style.overflow = '';
-      document.body.style.overflow = '';
-    };
-  }, [open, handleKeyDown]);
+  useFocusTrap({
+    active: open,
+    containerRef: panelRef,
+    initialFocusRef: closeRef,
+    onEscape: onClose,
+    restoreFocus: true,
+    lockScroll: true,
+  });
 
   return (
     <>
       {open && (
         <div
+          role="presentation"
+          aria-hidden="true"
           className="mobile-drawer-overlay"
           onClick={onClose}
           style={{
@@ -45,11 +39,16 @@ export function MobileDrawer({ open, onClose, children }: Props) {
             inset: 0,
             background: 'rgba(0, 0, 0, 0.6)',
             zIndex: 90,
+            backdropFilter: 'blur(2px)',
+            WebkitBackdropFilter: 'blur(2px)',
           }}
         />
       )}
       <div
         ref={panelRef}
+        role="dialog"
+        aria-modal={open ? 'true' : undefined}
+        aria-label="Navigation drawer"
         className={`mobile-drawer${open ? ' mobile-drawer--open' : ''}`}
         style={{
           position: 'fixed',
@@ -65,6 +64,7 @@ export function MobileDrawer({ open, onClose, children }: Props) {
           overflowY: 'auto',
           display: 'flex',
           flexDirection: 'column',
+          visibility: open ? 'visible' : 'hidden',
         }}
       >
         <div
@@ -89,6 +89,8 @@ export function MobileDrawer({ open, onClose, children }: Props) {
             Navigation
           </span>
           <button
+            ref={closeRef}
+            type="button"
             onClick={onClose}
             aria-label="Close navigation"
             style={{
@@ -98,18 +100,29 @@ export function MobileDrawer({ open, onClose, children }: Props) {
               alignItems: 'center',
               justifyContent: 'center',
               background: 'transparent',
-              border: '1px solid var(--border)',
+              border: 'none',
               borderRadius: 6,
-              color: 'var(--fg-muted)',
+              color: 'var(--fg-dim)',
               cursor: 'pointer',
             }}
           >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <path d="M3 3L13 13M13 3L3 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 14 14"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              aria-hidden="true"
+            >
+              <path d="M1 1l12 12M13 1L1 13" />
             </svg>
           </button>
         </div>
-        <div style={{ flex: 1, padding: '0.5rem' }}>{children}</div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0.5rem 0' }}>
+          {children}
+        </div>
       </div>
     </>
   );

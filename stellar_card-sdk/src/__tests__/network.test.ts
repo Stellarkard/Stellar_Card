@@ -66,6 +66,20 @@ describe('resolveNetworkConfig', () => {
     // Untouched endpoint keeps the default 30s timeout.
     expect(cfg.horizon.timeout).toBe(30000);
   });
+
+  it('ignores blank or whitespace-only configuration values', () => {
+    const cfg = resolveNetworkConfig({
+      networkPassphrase: '   ',
+      networkName: '   ',
+      sorobanRpcUrl: '   ',
+      horizonUrl: { url: '   ' },
+    });
+
+    expect(cfg.networkPassphrase).toBe(Networks.PUBLIC);
+    expect(cfg.networkName).toBe('Mainnet');
+    expect(cfg.sorobanRpc.url).toBe('https://mainnet.sorobanrpc.com');
+    expect(cfg.horizon.url).toBe('https://horizon.stellar.org');
+  });
 });
 
 describe('getDefaultSorobanRpcUrl', () => {
@@ -149,6 +163,21 @@ describe('resolveNetworkConfigFromEnv', () => {
   it('rejects a non-positive-integer timeout', () => {
     setEnv(NETWORK_ENV_VARS.timeout, 'not-a-number');
     expect(() => resolveNetworkConfigFromEnv()).toThrow(/positive integer/);
+  });
+
+  it('ignores blank or whitespace-only environment values', () => {
+    setEnv(NETWORK_ENV_VARS.networkPassphrase, '   ');
+    setEnv(NETWORK_ENV_VARS.sorobanRpcUrl, '   ');
+    setEnv(NETWORK_ENV_VARS.horizonUrl, '   ');
+    setEnv(NETWORK_ENV_VARS.apiKey, '   ');
+    setEnv(NETWORK_ENV_VARS.timeout, '   ');
+    setEnv(NETWORK_ENV_VARS.networkName, '   ');
+
+    const cfg = resolveNetworkConfigFromEnv();
+    expect(cfg.networkPassphrase).toBe(Networks.PUBLIC);
+    expect(cfg.sorobanRpc.url).toBe('https://mainnet.sorobanrpc.com');
+    expect(cfg.horizon.url).toBe('https://horizon.stellar.org');
+    expect(cfg.networkName).toBe('Mainnet');
   });
 });
 

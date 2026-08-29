@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
+import { encrypt, decrypt, type EncryptedPayload } from './encryption';
 
 // Adversarial audit F5-config: config files should be tiny. A 16 KB
 // cap leaves plenty of room for a fat api_key + url + wallet_name
@@ -322,4 +323,32 @@ export function resolveCredentials(
   }
 
   return { apiKey, baseUrl };
+}
+
+/**
+ * Encrypt a configuration key or sensitive value before storing it.
+ *
+ * @param plaintext - The sensitive string to encrypt
+ * @param passphrase - The passphrase to derive the encryption key from
+ * @returns A JSON-serializable encrypted payload
+ */
+export async function saveEncryptedConfigKey(
+  plaintext: string,
+  passphrase: string,
+): Promise<EncryptedPayload> {
+  return encrypt(plaintext, { passphrase, context: 'config-secret' });
+}
+
+/**
+ * Decrypt a configuration key or sensitive value.
+ *
+ * @param payload - The encrypted payload returned by saveEncryptedConfigKey
+ * @param passphrase - The passphrase used to encrypt the data
+ * @returns The original plaintext string
+ */
+export async function loadEncryptedConfigKey(
+  payload: EncryptedPayload,
+  passphrase: string,
+): Promise<string> {
+  return decrypt({ payload, passphrase, context: 'config-secret' });
 }

@@ -60,12 +60,11 @@ export const WithTone: Story = {
         {tones.map((tone) => (
           <FilterChip
             key={tone}
-            active={active[tone]!}
+            active={Boolean(active[tone])}
             onClick={() => setActive({ ...active, [tone]: !active[tone] })}
             tone={tone}
             count={Math.floor(Math.random() * 100)}
             aria-label={`Filter by ${tone} status`}
-            aria-pressed={active[tone]}
           >
             {tone.charAt(0).toUpperCase() + tone.slice(1)}
           </FilterChip>
@@ -91,40 +90,36 @@ export const FilterGroup: Story = {
         </legend>
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
           <FilterChip
-            active={active.all!}
+            active={Boolean(active.all)}
             onClick={() => setActive({ all: true, pending: false, completed: false, failed: false })}
             aria-label="Show all statuses"
-            aria-pressed={active.all}
           >
             All
           </FilterChip>
           <FilterChip
-            active={active.pending!}
+            active={Boolean(active.pending)}
             onClick={() => setActive({ all: false, pending: true, completed: false, failed: false })}
             tone="yellow"
             count={5}
             aria-label="Show pending items"
-            aria-pressed={active.pending}
           >
             Pending
           </FilterChip>
           <FilterChip
-            active={active.completed!}
+            active={Boolean(active.completed)}
             onClick={() => setActive({ all: false, pending: false, completed: true, failed: false })}
             tone="green"
             count={23}
             aria-label="Show completed items"
-            aria-pressed={active.completed}
           >
             Completed
           </FilterChip>
           <FilterChip
-            active={active.failed!}
+            active={Boolean(active.failed)}
             onClick={() => setActive({ all: false, pending: false, completed: false, failed: true })}
             tone="red"
             count={2}
             aria-label="Show failed items"
-            aria-pressed={active.failed}
           >
             Failed
           </FilterChip>

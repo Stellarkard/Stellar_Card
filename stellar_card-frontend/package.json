@@ -18,6 +18,7 @@
     "test:e2e:dominos": "playwright test --config=playwright.manual.config.ts",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
+    "test:storybook": "test-storybook",
     "analyze": "next build && node scripts/analyze-bundle.mjs"
   },
   "dependencies": {

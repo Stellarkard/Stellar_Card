@@ -1,6 +1,22 @@
 import type { Preview } from '@storybook/react';
 import '../app/globals.css';
 
+import { ThemeProvider } from '../app/dashboard/_lib/ThemeProvider';
+import { useWalletConnection, MockWalletContext } from '../app/dashboard/_lib/useWalletConnection';
+
+// Helper component to manage mock wallet state inside Storybook
+const StorybookMockWalletProvider = ({ children }: { children: React.ReactNode }) => {
+  // Since this is outside the MockWalletContext.Provider, it will call the real implementation
+  // and manage its own state internally, which we then provide to the stories.
+  const wallet = useWalletConnection();
+  
+  return (
+    <MockWalletContext.Provider value={wallet}>
+      {children}
+    </MockWalletContext.Provider>
+  );
+};
+
 const preview: Preview = {
   parameters: {
     backgrounds: {
@@ -40,17 +56,21 @@ const preview: Preview = {
   },
   decorators: [
     (Story) => (
-      <div
-        style={{
-          padding: '2rem',
-          background: 'var(--bg)',
-          color: 'var(--fg)',
-          minHeight: '100vh',
-          fontFamily: 'var(--font-body)',
-        }}
-      >
-        <Story />
-      </div>
+      <ThemeProvider>
+        <StorybookMockWalletProvider>
+          <div
+            style={{
+              padding: '2rem',
+              background: 'var(--bg)',
+              color: 'var(--fg)',
+              minHeight: '100vh',
+              fontFamily: 'var(--font-body)',
+            }}
+          >
+            <Story />
+          </div>
+        </StorybookMockWalletProvider>
+      </ThemeProvider>
     ),
   ],
 };

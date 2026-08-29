@@ -25,26 +25,28 @@ export function ResponsiveNav({
   onNavigate,
   variant = 'horizontal',
 }: ResponsiveNavProps) {
-  const pathname = usePathname();
+  const pathname = usePathname() || '';
   const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
     if (variant === 'horizontal' && mobileOpen) {
+      const origHtml = document.documentElement.style.overflow;
+      const origBody = document.body.style.overflow;
       document.documentElement.style.overflow = 'hidden';
       document.body.style.overflow = 'hidden';
       return () => {
-        document.documentElement.style.overflow = '';
-        document.body.style.overflow = '';
+        document.documentElement.style.overflow = origHtml;
+        document.body.style.overflow = origBody;
       };
     }
-    return;
+    return undefined;
   }, [mobileOpen, variant]);
 
-  useEffect(() => {
-    /* eslint-disable react-hooks/set-state-in-effect -- intentional route change reset */
+  const [prevPathname, setPrevPathname] = useState(pathname);
+  if (pathname !== prevPathname) {
+    setPrevPathname(pathname);
     setMobileOpen(false);
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, [pathname]);
+  }
 
 
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/');
@@ -127,6 +129,7 @@ export function ResponsiveNav({
 
   return (
     <nav className={`responsive-nav responsive-nav-${variant} ${className || ''}`}>
+      {variant === 'vertical' && navContent}
       {variant === 'horizontal' && (
         <>
           {navContent}

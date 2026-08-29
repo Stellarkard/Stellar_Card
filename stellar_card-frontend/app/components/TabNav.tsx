@@ -20,7 +20,7 @@ interface Props {
 }
 
 export function TabNav({ tabs, className }: Props) {
-  const pathname = usePathname();
+  const pathname = usePathname() || '';
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showLeftFade, setShowLeftFade] = useState(false);
   const [showRightFade, setShowRightFade] = useState(false);

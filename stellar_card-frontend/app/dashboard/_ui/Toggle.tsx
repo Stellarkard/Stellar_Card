@@ -17,12 +17,21 @@ interface Props {
   description?: ReactNode;
   children?: ReactNode; // inline value, e.g. an Input
   id?: string;
-  'aria-label'?: string;
-  'aria-describedby'?: string;
 }
 
-export function Toggle({ checked, onChange, label, description, children, id, ...rest }: Props) {
+export function Toggle({
+  checked,
+  onChange,
+  label,
+  description,
+  children,
+  id,
+  'aria-label': ariaLabelProp,
+  'aria-describedby': ariaDescribedBy,
+  ...rest
+}: Props & { 'aria-label'?: string; 'aria-describedby'?: string }) {
   const labelId = id ? `${id}-label` : undefined;
+  const ariaLabel = ariaLabelProp || (typeof label === 'string' ? label : 'Toggle switch');
 
   return (
     <div
@@ -35,6 +44,7 @@ export function Toggle({ checked, onChange, label, description, children, id, ..
       }}
     >
       <button
+        {...rest}
         id={id}
         type="button"
         role="switch"

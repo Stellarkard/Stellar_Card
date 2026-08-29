@@ -99,33 +99,62 @@ export {
 
 export { InsufficientFeeError } from './soroban';
 
+export {
+  encrypt,
+  decrypt,
+  encryptStellarKey,
+  decryptStellarKey,
+  reEncrypt,
+  verifyPassphrase,
+} from './encryption';
+export type { EncryptedPayload, EncryptOptions, DecryptOptions } from './encryption';
+
 export { mppCharge } from './mpp';
 export type { MppChargeOpts, MppChargeResult } from './mpp';
 
-export { loadStellar_CardConfig, saveStellar_CardConfig, resolveCredentials } from './config';
+export {
+  loadStellar_CardConfig,
+  saveStellar_CardConfig,
+  resolveCredentials,
+  saveEncryptedConfigKey,
+  loadEncryptedConfigKey,
+} from './config';
 export type { Stellar_CardConfig } from './config';
 
-export { paginate, iteratePages, collectAllPages, mapPaginated } from './pagination';
+export {
+  paginate,
+  iteratePages,
+  collectAllPages,
+  mapPaginated,
+  createOrderPaginator,
+} from './pagination';
 export type {
   PaginationCursor,
   PaginatedResult,
   PaginateOptions,
   IteratePagesOptions,
   MapPaginatedOptions,
+  OrderPaginatorOptions,
+  OrderPaginator,
 } from './pagination';
 
 export {
   resolveNetworkConfig,
   resolveNetworkConfigFromEnv,
+  resolveNetworkConfigWithRetry,
   getDefaultSorobanRpcUrl,
   getDefaultHorizonUrl,
   createCustomNetworkConfig,
+  createExtendedNetworkConfig,
   validateRpcEndpoint,
+  validateNetworkConfig,
   NETWORK_ENV_VARS,
 } from './network';
 export type {
   NetworkConfig,
   RpcEndpointConfig,
+  RpcProxyConfig,
+  ExtendedRpcEndpointConfig,
   ResolvedRpcEndpoint,
   ResolvedNetworkConfig,
 } from './network';
@@ -149,6 +178,8 @@ export type {
   ExtendedPaymentInstructions,
   DetailedOrderPhase,
   OrderStatusHistory,
+  OrderHistoryEventType,
+  OrderHistoryEvent,
   ExtendedOrderStatus,
   DetailedBudget,
   OrderStatistics,
@@ -172,6 +203,16 @@ export type {
   CardIssuanceResult,
   BudgetGuard,
   StellarCardSDKVersion,
+  // Order event typings (#486)
+  OrderEventType,
+  OrderEventSource,
+  OrderEvent,
+  WebhookDeliveryStatus,
+  OrderWebhookConfig,
+  WebhookDelivery,
+  OrderEventSubscription,
+  OrderHistoryEntry,
+  OrderHistoryResponse,
 } from './types';
 
 export {
@@ -182,4 +223,9 @@ export {
   isRetryableError,
   isOrderSummary,
   isCardIssuanceResult,
+  // Order event type guards (#486)
+  isOrderEventType,
+  isOrderEvent,
+  isWebhookDelivery,
+  isOrderEventSubscription,
 } from './types';

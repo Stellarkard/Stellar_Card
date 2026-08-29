@@ -12,6 +12,7 @@ const {
   sentryErrorHandler,
   setRequestId: setSentryRequestId,
 } = require('./lib/sentry-config');
+const { captureException } = require('./lib/sentry-config');
 const auth = require('./middleware/auth');
 const ordersRouter = require('./api/orders');
 const { buildBudget, policyCheck, orderPollLimiter, openSSEStreamCount } = require('./api/orders');
@@ -688,6 +689,71 @@ app.use((err, req, res, next) => {
     return res.status(403).json({ error: 'forbidden', message: 'Origin not allowed' });
   }
   next(err);
+// JSON 404 — mounted after every route so it only catches genuinely
+// unmatched paths. Without this Express falls back to its default HTML
+// error page, which is inconsistent with every other response this API
+// returns and unparsable by an SDK expecting JSON.
+app.use((req, res) => {
+  res.status(404).json({ error: 'not_found', message: `No route for ${req.method} ${req.path}` });
+});
+
+// Centralized error handler.
+//
+// F1-app-error (Part 2 of the error-handling refactor): the previous
+// version had three real gaps:
+//
+//   1. No res.headersSent guard. SSE routes (GET /v1/orders/:id/stream)
+//      write headers immediately and stream over time; an error thrown
+//      after that point hit res.status().json() below, which throws
+//      ERR_HTTP_HEADERS_SENT instead of just closing the response.
+//      Express's documented contract for the final error handler is to
+//      delegate to the built-in default handler via next(err) once
+//      headers are already sent.
+//
+//   2. Every error collapsed to 500. express.json()'s body parser
+//      throws a SyntaxError with `.status = 400` for malformed JSON and
+//      a PayloadTooLargeError with `.status = 413` for bodies over the
+//      64kb cap (see the express.json() call above) — both were
+//      reported to the client as a generic 500 internal_error, which
+//      misrepresents a client mistake as a server failure.
+//
+//   3. No correlation with req.id and no Sentry reporting. Every other
+//      log line in this file goes through lib/logger so it carries
+//      req_id and (in production) reaches Sentry — this handler was the
+//      one place that only wrote to console.error, so unhandled 500s
+//      never reached Sentry and couldn't be joined to the rest of a
+//      request's log trail via req_id.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+
+  if (err.message && err.message.startsWith('CORS:')) {
+    return res.status(403).json({ error: 'forbidden', message: 'Origin not allowed' });
+  }
+
+  // Only trust an explicit 4xx as a genuine client error — that's the
+  // range well-understood upstream middleware (body-parser) uses.
+  // Anything outside it still falls through to the generic 500 below.
+  const status = Number(err.status || err.statusCode);
+  if (status >= 400 && status < 500) {
+    return res.status(status).json({
+      error: err.type || 'bad_request',
+      message: err.message || 'The request could not be processed.',
+    });
+  }
+
+  console.error('[app] unhandled error:', err.message);
+  log('error', 'unhandled_error', {
+    req_id: req.id,
+    method: req.method,
+    path: req.path,
+    error: err instanceof Error ? err.message : String(err),
+  });
+  captureException(err, {
+    tags: { req_id: req.id },
+    extra: { path: req.path, method: req.method },
+  });
+
+  res.status(500).json({ error: 'internal_error' });
 });
 // Every route lives in its own module under api/, and routes/index.js owns
 // the mount table. Three of those mounts are order-sensitive (the

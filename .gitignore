@@ -1,7 +1,45 @@
+# Rust / Soroban
 /target
 /stellar_card-contract/target
 **/*.rs.bk
 *.wasm
+.soroban/
+
+# Node.js
+node_modules/
+dist/
+build/
+coverage/
+.npm/
+
+# Next.js
+.next/
+out/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+
+# OS generated files
 .DS_Store
+<<<<<<< HEAD
 /node_modules
 fix.md
+=======
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+>>>>>>> 4d0a50519a8359418773cf40e8dcd15587e17f92

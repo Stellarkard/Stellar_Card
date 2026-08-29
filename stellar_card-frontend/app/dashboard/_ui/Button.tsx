@@ -39,7 +39,7 @@ export function Button({
   style,
   type = 'button',
   disabled,
-  'aria-label': ariaLabel,
+  'aria-label': ariaLabelProp,
   ...rest
 }: Props) {
   const base: CSSProperties = {
@@ -81,24 +81,18 @@ export function Button({
       border: '1px solid var(--red-border)',
     },
   };
-  const resolvedAriaLabel = ariaLabel || (typeof children === 'string' ? children : undefined);
+  const ariaLabel = ariaLabelProp || (typeof children === 'string' ? children : undefined);
 
   return (
     <button
       {...rest}
-      // Explicit type prevents accidental form submission.
       type={type}
       disabled={disabled}
       aria-disabled={disabled}
-      // Allow callers to annotate icon-only buttons.
-      aria-label={resolvedAriaLabel}
+      aria-label={ariaLabel}
       style={{ ...base, ...variants[variant], ...style }}
     >
-      {icon ? (
-        <span aria-hidden="true" style={{ display: 'inline-flex', alignItems: 'center' }}>
-          {icon}
-        </span>
-      ) : null}
+      {icon ? <span aria-hidden="true" style={{ display: 'inline-flex', alignItems: 'center' }}>{icon}</span> : null}
       {children}
     </button>
   );

@@ -1,11 +1,3 @@
-// Pill-shaped filter chip used in headers of list/table pages. Optional
-// tone shows a colored dot on the left; `count` lives on the right in
-// mono so totals line up.
-//
-// A11y (#136):
-//   - type="button" prevents form submission.
-//   - aria-pressed reflects the active/inactive toggle state.
-
 import type { ReactNode } from 'react';
 import type { Tone } from './tokens';
 import { TONE_VARS, typography } from './tokens';

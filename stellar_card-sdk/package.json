@@ -5,7 +5,10 @@
   "main": "dist/index.js",
   "module": "dist/esm/index.js",
   "types": "dist/index.d.ts",
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/cli.js",
+    "./dist/commands/**/*.js"
+  ],
   "exports": {
     ".": {
       "browser": {
@@ -35,10 +38,15 @@
     "./dist/commands/onboard.js": false,
     "./dist/commands/purchase.js": false,
     "./dist/commands/wallet.js": false,
+    "./dist/version-check.js": false,
+    "./dist/index.js": "./dist/browser.js",
     "fs": false,
     "path": false,
     "os": false,
-    "crypto": false
+    "crypto": false,
+    "child_process": false,
+    "worker_threads": false,
+    "perf_hooks": false
   },
   "bin": {
     "stellar_card": "./dist/cli.js"
@@ -87,6 +95,26 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "typesVersions": {
+    "*": {
+      "browser": ["./dist/browser.d.ts"],
+      "mcp": ["./dist/mcp.d.ts"]
+    }
+  },
+  "react-native": {
+    "./dist/config.js": false,
+    "./dist/ows.js": false,
+    "./dist/cli.js": false,
+    "./dist/commands/onboard.js": false,
+    "./dist/commands/purchase.js": false,
+    "./dist/commands/wallet.js": false,
+    "./dist/version-check.js": false,
+    "fs": false,
+    "path": false,
+    "os": false,
+    "crypto": false,
+    "child_process": false
   },
   "overrides": {
     "axios": "^1.15.0"

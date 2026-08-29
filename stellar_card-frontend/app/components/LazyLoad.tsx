@@ -26,7 +26,9 @@ export function LazyLoad({
         if (entry?.isIntersecting) {
           setIsVisible(true);
           onVisible?.();
-          observer.unobserve(entry?.target);
+          if (entry.target) {
+            observer.unobserve(entry.target);
+          }
         }
       },
       { threshold }
