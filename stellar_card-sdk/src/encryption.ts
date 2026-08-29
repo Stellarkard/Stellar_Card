@@ -1,5 +1,6 @@
 /**
- * Secure client-side encryption for key storage (Issue #532 — Part 5).
+ * Secure client-side encryption for key storage (Issue #532 — Part 5; also
+ * closes #492, a duplicate "Part 1" issue filed for the same feature).
  *
  * Provides AES-256-GCM encryption/decryption using the Web Crypto API
  * for encrypting Stellar secret keys and other sensitive data at rest.
