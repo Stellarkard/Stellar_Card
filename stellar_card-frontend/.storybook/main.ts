@@ -6,8 +6,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const config: StorybookConfig = {
   stories: ['../app/**/*.stories.@(ts|tsx)'],
+  // Storybook 9+ folds essentials (controls, actions, backgrounds, viewport,
+  // toolbars, measure, outline) into core, so only non-core addons are listed
+  // here. Do not re-add "@storybook/addon-essentials" — it only ships up to
+  // v8.6.x and its peer dependency on that range breaks install (npm ERESOLVE)
+  // against storybook@10.
   addons: [
-    '@storybook/addon-essentials',
     '@storybook/addon-links',
     '@storybook/addon-a11y',
     '@storybook/addon-docs',
