@@ -54,12 +54,37 @@ export function saveStellar_CardConfig(
   );
 }
 
+/**
+ * Resolve API credentials in a browser context.
+ *
+ * Unlike the Node entry point (which falls back to the on-disk config file
+ * and environment variables), the browser build has neither, so this simply
+ * passes the explicitly supplied options through unchanged.
+ *
+ * @param opts - Explicit credentials supplied by the caller.
+ * @param opts.apiKey - API key, if provided.
+ * @param opts.baseUrl - API base URL, if provided.
+ * @returns The same `apiKey`/`baseUrl` pair, unresolved further.
+ */
 export function resolveCredentials(
   opts: { apiKey?: string; baseUrl?: string } = {},
 ): { apiKey: string | undefined; baseUrl: string | undefined } {
   return { apiKey: opts.apiKey, baseUrl: opts.baseUrl };
 }
 
+/**
+ * Validate that a base URL is safe to use for API requests.
+ *
+ * Rejects URLs carrying embedded `user:pass@` credentials (the API key is
+ * sent via the `X-Api-Key` header, never in the URL) and anything that
+ * isn't `https:`, so a misconfigured or malicious base URL can't
+ * accidentally leak the API key over plaintext HTTP.
+ *
+ * @param url - Candidate base URL.
+ * @param opts.context - Optional label included in the thrown error message (e.g. "webhook URL").
+ * @returns The normalized URL string.
+ * @throws {Error} If `url` fails to parse, embeds credentials, or is not HTTPS.
+ */
 export function assertSafeBaseUrl(url: string, opts: { context?: string } = {}): string {
   let parsed: URL;
   try {
