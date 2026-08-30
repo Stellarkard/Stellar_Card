@@ -103,7 +103,7 @@ export const LegalBodyStory: StoryObj = {
           heading: '3. Disclaimer',
           body: (
             <p>
-              The service is provided "as is" without warranties of any kind. We make no guarantees about uptime,
+              The service is provided &quot;as is&quot; without warranties of any kind. We make no guarantees about uptime,
               availability, or performance...
             </p>
           ),

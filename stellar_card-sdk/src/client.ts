@@ -242,11 +242,7 @@ export class Stellar_CardClient {
    * @param opts.retry - Retry policy applied to transient (429/502/503/504) errors.
    * @throws {AuthError} When no API key can be resolved.
    */
-  constructor({
-    baseUrl,
-    apiKey,
-    retry = {},
-  }: StellarCardClientOptions = {}) {
+  constructor({ baseUrl, apiKey, retry = {} }: StellarCardClientOptions = {}) {
     // Resolve api key + base URL in priority order:
     //   1. Explicit constructor args
     //   2. CARDS402_API_KEY / CARDS402_BASE_URL env vars
@@ -430,6 +426,11 @@ export class Stellar_CardClient {
    *
    * Uses SSE first and falls back to HTTP polling if the stream cannot
    * be established or is interrupted by the network path.
+   *
+   * @param orderId - Order UUID to wait for.
+   * @param opts - Options for waiting including timeout and poll interval.
+   * @returns A promise resolving to the card details once ready.
+   * @throws {WaitTimeoutError} When the timeout is reached before the order is ready.
    */
   async waitForCard(
     orderId: string,
@@ -674,12 +675,16 @@ export class Stellar_CardClient {
     ...filters
   }: IterateOrdersOptions = {}): AsyncGenerator<OrderListItem, void, void> {
     let remaining =
-      maxItems === undefined ? Number.POSITIVE_INFINITY : normalizeIntegerOption('maxItems', maxItems, 0);
+      maxItems === undefined
+        ? Number.POSITIVE_INFINITY
+        : normalizeIntegerOption('maxItems', maxItems, 0);
     let nextOffset = normalizeIntegerOption('offset', offset, 0);
     const pageSize = normalizeIntegerOption('limit', limit, 20);
 
     while (remaining > 0) {
-      const requestLimit = Number.isFinite(remaining) ? Math.max(1, Math.min(pageSize, remaining)) : pageSize;
+      const requestLimit = Number.isFinite(remaining)
+        ? Math.max(1, Math.min(pageSize, remaining))
+        : pageSize;
       const page = await this.listOrdersPage({
         ...filters,
         limit: requestLimit,

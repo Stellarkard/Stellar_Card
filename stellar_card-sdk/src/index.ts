@@ -19,8 +19,18 @@ export type {
   StellarCardClientOptions,
 } from './client';
 
-export { calculateExponentialBackoffDelay, parseRetryAfterMs, sleep, withRetry, withAdvancedRetry } from './retry';
-export type { ExponentialBackoffDelayOptions, WithRetryOptions, AdvancedRetryStrategy } from './retry';
+export {
+  calculateExponentialBackoffDelay,
+  parseRetryAfterMs,
+  sleep,
+  withRetry,
+  withAdvancedRetry,
+} from './retry';
+export type {
+  ExponentialBackoffDelayOptions,
+  WithRetryOptions,
+  AdvancedRetryStrategy,
+} from './retry';
 
 export {
   createWallet,
@@ -102,7 +112,13 @@ export type { EncryptedPayload, EncryptOptions, DecryptOptions } from './encrypt
 export { mppCharge } from './mpp';
 export type { MppChargeOpts, MppChargeResult } from './mpp';
 
-export { loadStellar_CardConfig, saveStellar_CardConfig, resolveCredentials } from './config';
+export {
+  loadStellar_CardConfig,
+  saveStellar_CardConfig,
+  resolveCredentials,
+  saveEncryptedConfigKey,
+  loadEncryptedConfigKey,
+} from './config';
 export type { Stellar_CardConfig } from './config';
 
 export {

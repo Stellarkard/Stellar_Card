@@ -29,7 +29,7 @@ export function Input({ prefix, suffix, wrapperStyle, style, ...rest }: Props) {
   const ariaLabel = rest['aria-label'];
   const ariaInvalid = rest['aria-invalid'];
   const ariaRequired = rest['aria-required'];
-  
+
   return (
     <div
       style={{
@@ -46,7 +46,11 @@ export function Input({ prefix, suffix, wrapperStyle, style, ...rest }: Props) {
         ...wrapperStyle,
       }}
     >
-      {prefix && <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>{prefix}</span>}
+      {prefix && (
+        <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>
+          {prefix}
+        </span>
+      )}
       <input
         {...rest}
         aria-label={ariaLabel}
@@ -63,7 +67,11 @@ export function Input({ prefix, suffix, wrapperStyle, style, ...rest }: Props) {
           ...style,
         }}
       />
-      {suffix && <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>{suffix}</span>}
+      {suffix && (
+        <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>
+          {suffix}
+        </span>
+      )}
     </div>
   );
 }

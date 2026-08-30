@@ -25,7 +25,10 @@ function mockFetch(status: number, body: unknown) {
 }
 
 function client() {
-  return new Stellar_CardClient({ baseUrl: 'http://localhost:3000/v1', apiKey: 'stellar_card_test_key' });
+  return new Stellar_CardClient({
+    baseUrl: 'http://localhost:3000/v1',
+    apiKey: 'stellar_card_test_key',
+  });
 }
 
 const ORDER_RESPONSE = {
