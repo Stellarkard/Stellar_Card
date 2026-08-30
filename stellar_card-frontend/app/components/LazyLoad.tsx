@@ -48,23 +48,23 @@ export function LazyLoad({
   );
 }
 
-interface VirtualScrollProps {
-  items: any[];
-  renderItem: (item: any, index: number) => ReactNode;
+interface VirtualScrollProps<T> {
+  items: T[];
+  renderItem: (item: T, index: number) => ReactNode;
   itemHeight: number;
   containerHeight: number;
   overscan?: number;
   className?: string;
 }
 
-export function VirtualScroll({
+export function VirtualScroll<T>({
   items,
   renderItem,
   itemHeight,
   containerHeight,
   overscan = 3,
   className,
-}: VirtualScrollProps) {
+}: VirtualScrollProps<T>) {
   const [scrollTop, setScrollTop] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
 

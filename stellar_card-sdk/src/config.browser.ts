@@ -34,41 +34,17 @@ export function loadStellar_CardConfig(_configPath?: string): null {
   return null;
 }
 
-/**
- * Browser stub for {@link saveStellar_CardConfig} (config.ts).
- *
- * Persisting a config file isn't meaningful in a browser context, so this
- * always throws rather than silently no-op-ing.
- *
- * @param _config - Ignored.
- * @param _configPath - Ignored.
- * @throws {Error} Always — config persistence is not available in browsers.
- */
-export function saveStellar_CardConfig(
-  _config: Stellar_CardConfig,
-  _configPath?: string,
-): never {
+export function saveStellar_CardConfig(_config: Stellar_CardConfig, _configPath?: string): never {
   throw new Error(
     'saveStellar_CardConfig is not available in browser environments. ' +
       'Manage API keys via the Stellar_Card dashboard.',
   );
 }
 
-/**
- * Resolve API credentials in a browser context.
- *
- * Unlike the Node entry point (which falls back to the on-disk config file
- * and environment variables), the browser build has neither, so this simply
- * passes the explicitly supplied options through unchanged.
- *
- * @param opts - Explicit credentials supplied by the caller.
- * @param opts.apiKey - API key, if provided.
- * @param opts.baseUrl - API base URL, if provided.
- * @returns The same `apiKey`/`baseUrl` pair, unresolved further.
- */
-export function resolveCredentials(
-  opts: { apiKey?: string; baseUrl?: string } = {},
-): { apiKey: string | undefined; baseUrl: string | undefined } {
+export function resolveCredentials(opts: { apiKey?: string; baseUrl?: string } = {}): {
+  apiKey: string | undefined;
+  baseUrl: string | undefined;
+} {
   return { apiKey: opts.apiKey, baseUrl: opts.baseUrl };
 }
 

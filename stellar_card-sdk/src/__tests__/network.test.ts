@@ -88,9 +88,7 @@ describe('getDefaultSorobanRpcUrl', () => {
   });
 
   it('returns testnet RPC for TESTNET passphrase', () => {
-    expect(getDefaultSorobanRpcUrl(Networks.TESTNET)).toBe(
-      'https://soroban-testnet.stellar.org',
-    );
+    expect(getDefaultSorobanRpcUrl(Networks.TESTNET)).toBe('https://soroban-testnet.stellar.org');
   });
 
   it('defaults to mainnet when no passphrase given', () => {

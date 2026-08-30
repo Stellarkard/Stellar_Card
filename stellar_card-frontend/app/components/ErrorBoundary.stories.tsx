@@ -20,7 +20,7 @@ function ErrorDemo() {
   const [shouldError, setShouldError] = useState(false);
 
   if (shouldError) {
-    return <ThrowError />;
+    return <ThrowErrorComponent />;
   }
 
   return (
@@ -57,7 +57,7 @@ export const Working: Story = {
 export const WithError: Story = {
   render: () => (
     <ErrorBoundary>
-      <ThrowError />
+      <ThrowErrorComponent />
     </ErrorBoundary>
   ),
 };
@@ -80,7 +80,7 @@ export const WithCustomFallback: Story = {
         </div>
       }
     >
-      <ThrowError />
+      <ThrowErrorComponent />
     </ErrorBoundary>
   ),
 };

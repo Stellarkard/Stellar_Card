@@ -1,4 +1,5 @@
-// Soroban client integration test suite (Issue #531 — Part 5).
+// Soroban client integration test suite (Issue #531 — Part 5; also closes
+// #491, a duplicate "Part 1" issue filed for the same feature).
 //
 // Tests the full Soroban contract payment lifecycle with mocked RPC
 // and Horizon backends, covering:

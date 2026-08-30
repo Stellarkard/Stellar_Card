@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
-import { type Tone, TONE_VARS, typography } from './tokens';
-
-export type PillTone = Tone;
+import type { Tone } from './tokens';
+import { TONE_VARS, typography } from './tokens';
 
 interface Props {
   active: boolean;

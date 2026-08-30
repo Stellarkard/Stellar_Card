@@ -9,7 +9,7 @@ export function createOptimizedComponent<P extends object>(
   return MemoizedComponent;
 }
 
-export function shallowEqual(obj1: any, obj2: any): boolean {
+export function shallowEqual(obj1: Record<string, unknown>, obj2: Record<string, unknown>): boolean {
   if (obj1 === obj2) return true;
   if (!obj1 || !obj2) return false;
   if (typeof obj1 !== 'object' || typeof obj2 !== 'object') return false;
@@ -22,7 +22,7 @@ export function shallowEqual(obj1: any, obj2: any): boolean {
   return keys1.every((key) => obj1[key] === obj2[key]);
 }
 
-export function debounce<T extends (...args: any[]) => any>(
+export function debounce<T extends (...args: unknown[]) => unknown>(
   func: T,
   wait: number
 ): (...args: Parameters<T>) => void {
@@ -39,7 +39,7 @@ export function debounce<T extends (...args: any[]) => any>(
   };
 }
 
-export function throttle<T extends (...args: any[]) => any>(
+export function throttle<T extends (...args: unknown[]) => unknown>(
   func: T,
   limit: number
 ): (...args: Parameters<T>) => void {
