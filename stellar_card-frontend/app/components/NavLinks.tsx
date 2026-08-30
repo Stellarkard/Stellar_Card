@@ -8,21 +8,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-
-const PRIMARY: { href: string; label: string }[] = [
-  { href: '/pricing', label: 'Pricing' },
-  { href: '/docs', label: 'Docs' },
-  { href: '/changelog', label: 'Changelog' },
-  { href: '/company', label: 'Company' },
-];
-
-const MORE: { href: string; label: string; body: string }[] = [
-  { href: '/compare', label: 'Compare', body: 'vs corporate + shared cards' },
-  { href: '/security', label: 'Security', body: 'Architecture + disclosure' },
-  { href: '/careers', label: 'Careers', body: 'Open roles + benefits' },
-  { href: '/press', label: 'Press', body: 'Media kit + contact' },
-  { href: '/affiliate', label: 'Affiliate', body: 'Earn on every card · soon' },
-];
+import { PRIMARY_NAV_ITEMS, MORE_NAV_ITEMS, isActivePath } from './navigationConfig';
 
 export function NavLinks() {
   const pathname = usePathname() || '';
@@ -55,9 +41,12 @@ export function NavLinks() {
 
   // Route change closes everything.
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- intentional route change reset */
     setMoreOpen(false);
     setMenuOpen(false);
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [pathname]);
+
 
   // Lock page scroll while the mobile menu is open. Both html and body
   // need overflow:hidden — iOS Safari ignores it on body alone.
@@ -71,7 +60,7 @@ export function NavLinks() {
     };
   }, [menuOpen]);
 
-  const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/');
+  const isActive = (href: string) => isActivePath(pathname, href);
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '0.1rem' }}>
@@ -80,7 +69,7 @@ export function NavLinks() {
         className={`nav-menu${menuOpen ? ' nav-menu--open' : ''}`}
         onClick={() => setMenuOpen(false)}
       >
-        {PRIMARY.map((l) => (
+        {PRIMARY_NAV_ITEMS.map((l) => (
           <Link
             key={l.href}
             href={l.href}
@@ -128,7 +117,7 @@ export function NavLinks() {
           </button>
           <div className={`nav-more-dropdown${moreOpen ? ' nav-more-dropdown--open' : ''}`}>
             <div className="nav-more-dropdown-card">
-              {MORE.map((item) => (
+              {MORE_NAV_ITEMS.map((item) => (
                 <Link
                   key={item.href}
                   href={item.href}

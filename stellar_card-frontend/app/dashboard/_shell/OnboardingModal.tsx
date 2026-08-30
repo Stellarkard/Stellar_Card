@@ -152,11 +152,14 @@ export function OnboardingModal() {
 
   useEffect(() => {
     try {
-      if (!localStorage.getItem(STORAGE_KEY)) setVisible(true);
+      if (typeof window !== 'undefined' && !localStorage.getItem(STORAGE_KEY)) return true;
     } catch {
       /* localStorage blocked (incognito strict mode) — don't show */
     }
-  }, []);
+    return false;
+  });
+  const [step, setStep] = useState(1);
+  const [isAnimating, setIsAnimating] = useState(false);
 
   const dismiss = useCallback(() => {
     try {

@@ -1,6 +1,6 @@
 /**
  * Comprehensive TypeScript type definitions for the stellar_card SDK.
- * 
+ *
  * This module provides all the core types, interfaces, and type guards
  * used across the SDK for type-safe interactions with the stellar_card API.
  */
@@ -433,12 +433,7 @@ export function isOrderPhase(value: unknown): value is DetailedOrderPhase {
 
 /** Type guard for NetworkType */
 export function isNetworkType(value: unknown): value is NetworkType {
-  return (
-    value === 'mainnet' ||
-    value === 'testnet' ||
-    value === 'futurenet' ||
-    value === 'custom'
-  );
+  return value === 'mainnet' || value === 'testnet' || value === 'futurenet' || value === 'custom';
 }
 
 /** Type guard to check if error has a specific code */
@@ -686,7 +681,10 @@ export interface ComprehensiveSDKConfig {
 // ============================================================================
 
 /** Enhanced type guard for API responses */
-export function isValidApiResponse<T>(response: unknown, validator: (data: unknown) => data is T): response is { data: T; status: number } {
+export function isValidApiResponse<T>(
+  response: unknown,
+  validator: (data: unknown) => data is T,
+): response is { data: T; status: number } {
   return (
     typeof response === 'object' &&
     response !== null &&
@@ -702,7 +700,8 @@ export function isValidNetworkConfig(config: unknown): config is ExtendedNetwork
   return (
     typeof config === 'object' &&
     config !== null &&
-    (!('networkPassphrase' in config) || typeof (config as { networkPassphrase: unknown }).networkPassphrase === 'string')
+    (!('networkPassphrase' in config) ||
+      typeof (config as { networkPassphrase: unknown }).networkPassphrase === 'string')
   );
 }
 
@@ -761,8 +760,9 @@ export type Mutable<T> = {
 };
 
 /** Function that returns a promise */
-export type AsyncFn<TArgs extends readonly unknown[] = readonly unknown[], TReturn = unknown> = 
-  (...args: TArgs) => Promise<TReturn>;
+export type AsyncFn<TArgs extends readonly unknown[] = readonly unknown[], TReturn = unknown> = (
+  ...args: TArgs
+) => Promise<TReturn>;
 
 /** Non-nullable version of type */
 export type StrictNonNullable<T> = T extends null | undefined ? never : T;
@@ -771,10 +771,10 @@ export type StrictNonNullable<T> = T extends null | undefined ? never : T;
 export type JSONSerializable<T> = T extends string | number | boolean | null
   ? T
   : T extends readonly (infer U)[]
-  ? readonly JSONSerializable<U>[]
-  : T extends { [key: string]: unknown }
-  ? { [K in keyof T]: JSONSerializable<T[K]> }
-  : never;
+    ? readonly JSONSerializable<U>[]
+    : T extends { [key: string]: unknown }
+      ? { [K in keyof T]: JSONSerializable<T[K]> }
+      : never;
 
 // ============================================================================
 // ADDITIONAL TYPINGS (#150)

@@ -1,293 +1,107 @@
-# Storybook Documentation
+# Storybook Guide
 
-Complete documentation for Storybook setup, testing, and component development in the Stellar_Card frontend.
+This guide covers how Storybook is configured for the Stellar Card frontend, how to
+write stories for reusable UI components, and how the Storybook suite is tested and
+verified in CI.
 
 ## Overview
 
-Storybook is configured with:
-- **Next.js integration** via `@storybook/nextjs-vite`
-- **Automatic documentation** with `@storybook/addon-docs`
-- **Accessibility testing** via `@storybook/addon-a11y`
-- **Visual testing** integration ready for Chromatic
-- **Vitest integration** for component testing within stories
+Storybook lets us develop, document, and visually test components in
+`app/components/` and `app/dashboard/_ui/` in isolation, without needing to wire them
+into a full page or spin up the backend.
 
-## Quick Start
+- Config lives in `.storybook/` (`main.ts` for build config, `preview.tsx` for global
+  decorators and parameters).
+- Stories live next to the component they document, as `ComponentName.stories.tsx`.
+- Story-driven interaction tests run through Vitest via `@storybook/addon-vitest`
+  rather than the standalone `@storybook/test-runner` CLI.
+
+## Running Storybook locally
 
 ```bash
-# Start Storybook dev server
-npm run storybook
-
-# Build Storybook for production
-npm run build-storybook
-
-# Run Storybook tests
-npm run test:storybook
+npm run storybook          # start the dev server on :6006
+npm run build-storybook    # produce a static build in storybook-static/
 ```
 
-## Configuration
+## Writing a story
 
-### Main Configuration (`.storybook/main.ts`)
-
-Storybook is configured to:
-- Find all `*.stories.tsx` files in the `app/` directory
-- Use Vite as the build tool for fast HMR
-- Load essential addons (essentials, a11y, docs, vitest)
-- Resolve `@/` alias to the project root
-
-### Preview Configuration (`.storybook/preview.tsx`)
-
-Global decorators apply:
-- **Theme wrapper** for dark/light theme testing
-- **Global CSS** from `app/globals.css`
-- **Mock wallet provider** for dashboard components
-- **Default backgrounds** (dark/light theme)
-
-### Test Configuration (`.storybook/test-runner.ts`)
-
-Automated test runner:
-- Runs accessibility checks on all stories
-- Detects console errors during rendering
-- Supports story-level test assertions
-- Integrates with CI/CD pipelines
-
-## Writing Stories
-
-### Basic Story Structure
+Follow the existing stories in `app/dashboard/_ui/` or `app/components/` as a
+template. A minimal story looks like:
 
 ```tsx
 import type { Meta, StoryObj } from '@storybook/react';
-import { Button } from './Button';
+import { Pill } from './Pill';
 
-const meta = {
-  title: 'Dashboard/Button',
-  component: Button,
+const meta: Meta<typeof Pill> = {
+  title: 'Dashboard/Pill',
+  component: Pill,
   tags: ['autodocs'],
-  parameters: {
-    docs: {
-      description: {
-        component: 'Primary button component with multiple variants.',
-      },
-    },
-  },
-} satisfies Meta<typeof Button>;
+};
 
 export default meta;
-type Story = StoryObj<typeof meta>;
+type Story = StoryObj<typeof Pill>;
 
-export const Primary: Story = {
-  args: {
-    children: 'Click me',
-    variant: 'primary',
-  },
-};
-
-export const Secondary: Story = {
-  args: {
-    children: 'Secondary',
-    variant: 'secondary',
-  },
+export const Default: Story = {
+  args: { children: 'Active' },
 };
 ```
 
-### Interactive Stories
+Guidelines:
 
-Use `play` functions for interaction testing:
+- Group stories under a `title` that mirrors the component's location (e.g.
+  `Dashboard/Button`, `Marketing/HeroCard`) so the sidebar stays organized.
+- Add the `autodocs` tag so the component gets a generated docs page (see
+  `.storybook/main.ts`, `docs.autodocs: 'tag'`).
+- Cover the meaningful states of a component (default, loading, error, empty,
+  disabled) as separate named exports — not just the happy path.
+- Components that consume wallet state can rely on the `MockWalletContext`
+  decorator wired up in `.storybook/preview.tsx`; no extra provider setup is
+  needed in the story itself.
 
-```tsx
-import { userEvent, within } from '@storybook/testing-library';
-import { expect } from '@storybook/test';
+## Global decorators and providers
 
-export const WithInteraction: Story = {
-  args: {
-    onClick: () => console.log('Clicked'),
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const button = canvas.getByRole('button');
-    
-    await userEvent.click(button);
-    await expect(button).toHaveFocus();
-  },
-};
-```
+`.storybook/preview.tsx` wraps every story in the app's `ThemeProvider` and a mock
+wallet connection provider, and sets shared parameters (backgrounds, a11y rules,
+controls matchers). If a component depends on additional app-level context, extend
+the `decorators` array there rather than duplicating provider setup per-story.
 
-### Accessibility Testing
+## Testing
 
-Stories automatically run a11y checks. For custom validation:
-
-```tsx
-import { testAccessibility } from '@/.storybook/test-utils';
-
-export const WithA11y: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await testAccessibility(canvas);
-  },
-};
-```
-
-## Testing Utilities
-
-### Available Helpers (`.storybook/test-utils.tsx`)
-
-- `testAccessibility(canvas)` - Validates basic a11y requirements
-- `testKeyboardNavigation(canvas, element)` - Tests keyboard focus
-- `testResponsive(page, viewports)` - Tests responsive behavior
-- `testThemeToggle(canvas)` - Validates dark/light theme switching
-- `mockData.order()` - Generates mock order data
-- `mockData.agent()` - Generates mock agent data
-
-### Example Usage
-
-```tsx
-import { testThemeToggle, mockData } from '@/.storybook/test-utils';
-
-export const ThemeAware: Story = {
-  args: {
-    order: mockData.order({ status: 'delivered' }),
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await testThemeToggle(canvas);
-  },
-};
-```
-
-## Testing Hooks Integration
-
-Storybook integrates with Vitest via `@storybook/addon-vitest`:
+Storybook stories are exercised as part of the Vitest suite through the Vitest
+project named `storybook`, defined in `vitest.config.ts`. This runs every story in a
+real headless Chromium browser via Playwright and fails the run on render errors,
+a11y violations, or failed play functions.
 
 ```bash
-# Run all tests including story tests
-npm test
-
-# Run only Storybook tests
-npm run test:storybook
+npm run test              # runs both the unit-test project and the storybook project
+npm run test:storybook    # runs only the storybook project
 ```
 
-Stories with `play` functions automatically become test cases. The test runner:
-1. Renders each story
-2. Executes the `play` function
-3. Captures console errors
-4. Runs accessibility audits
-5. Reports results
+> The `test:storybook` script previously invoked the standalone
+> `@storybook/test-runner` CLI (`test-storybook`), which is not installed in this
+> project — that binary always failed with "could not determine executable to run".
+> Story testing here is handled by `@storybook/addon-vitest` instead, so the script
+> now delegates to `vitest run --project=storybook`.
 
-## Best Practices
+The first run needs Playwright's browser binaries installed locally:
 
-### Component Organization
-
-```
-app/
-  dashboard/
-    _ui/
-      Button.tsx
-      Button.stories.tsx       # Co-located with component
-      Button.test.tsx          # Unit tests
-  components/
-    Modal.tsx
-    Modal.stories.tsx
+```bash
+npx playwright install --with-deps chromium
 ```
 
-### Story Naming
+## CI
 
-Use descriptive names that reflect the component state:
+The `Frontend Storybook` workflow (`.github/workflows/frontend-storybook.yml`) runs
+on every push and pull request that touches `stellar_card-frontend/`. It type-checks
+and lints the project, runs the unit and Storybook test projects, builds the static
+Storybook site, and uploads the build as a workflow artifact so it can be reviewed
+without running Storybook locally.
 
-```tsx
-export const Default: Story = {};
-export const WithLongText: Story = {};
-export const Disabled: Story = {};
-export const Loading: Story = {};
-export const Error: Story = {};
-```
+## Dependency versions
 
-### Documentation
-
-Add descriptions at component and story level:
-
-```tsx
-const meta = {
-  title: 'Dashboard/Button',
-  component: Button,
-  parameters: {
-    docs: {
-      description: {
-        component: 'Detailed component description.',
-      },
-    },
-  },
-} satisfies Meta<typeof Button>;
-
-export const WithTooltip: Story = {
-  parameters: {
-    docs: {
-      description: {
-        story: 'Shows button with tooltip on hover.',
-      },
-    },
-  },
-};
-```
-
-### Performance Testing
-
-For components with performance concerns:
-
-```tsx
-export const LargeDataset: Story = {
-  args: {
-    data: generateItems(1000),
-  },
-  parameters: {
-    docs: {
-      description: {
-        story: 'Renders 1000 items with virtualization. Should maintain 60fps.',
-      },
-    },
-  },
-};
-```
-
-## CI/CD Integration
-
-### GitHub Actions Example
-
-```yaml
-- name: Install dependencies
-  run: npm ci
-
-- name: Build Storybook
-  run: npm run build-storybook
-
-- name: Run Storybook tests
-  run: npm run test:storybook
-```
-
-## Troubleshooting
-
-### Stories Not Appearing
-
-- Check file matches `*.stories.tsx` pattern
-- Ensure story is in `app/` directory
-- Verify meta export exists
-
-### CSS Not Loading
-
-- Check `globals.css` import in `.storybook/preview.tsx`
-- Verify Vite configuration resolves paths correctly
-
-### Mock Data Issues
-
-- Use mock providers from `.storybook/preview.tsx`
-- Import test utilities from `.storybook/test-utils.tsx`
-
-### Theme Not Switching
-
-- Ensure `ThemeProvider` decorator is active
-- Check `data-theme` attribute on root element
-
-## Resources
-
-- [Storybook Documentation](https://storybook.js.org/docs)
-- [Vitest Integration](https://storybook.js.org/docs/writing-tests/test-runner)
-- [Accessibility Testing](https://storybook.js.org/docs/writing-tests/accessibility-testing)
-- [Visual Testing](https://storybook.js.org/docs/writing-tests/visual-testing)
+All `@storybook/*` packages and the `storybook` package itself must stay on the same
+major version. Storybook 9+ folds the old `addon-essentials` bundle (controls,
+actions, backgrounds, viewport, toolbars, measure, outline) into core, so it should
+not be added back as a dependency or to the `addons` array in `.storybook/main.ts` —
+that package only publishes up to `v8.6.x`, and pairing it with `storybook@10.x`
+reintroduces an `npm ERESOLVE` conflict that breaks `npm ci`.

@@ -12,19 +12,63 @@
 // Codes expire after 15 minutes. Sessions last 7 days.
 
 const { Router } = require('express');
+const { z } = require('zod');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
+const { z } = require('zod');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const db = require('../db');
 const { sendLoginCode } = require('../lib/email');
 const { isPlatformOwner } = require('../lib/platform');
 const { recordAudit } = require('../lib/audit');
+const { validate, patternString } = require('../lib/validate');
+const { validateBody } = require('../middleware/validate');
 
 const router = Router();
 
 const CODE_TTL_MINUTES = 15;
 const CODE_MAX_PER_WINDOW = 3;
 const SESSION_TTL_DAYS = 7;
+
+// ── Request schemas ────────────────────────────────────────────────────────
+//
+// Both endpoints previously carried their own body guards, and they
+// drifted: /auth/verify was missing the non-object-body check that
+// /auth/login had until an adversarial audit added it, and its field
+// checks tested truthiness before type — so an array `email` reached
+// `normalizeEmail(email).trim()` and 500'd. Declaring the shape once
+// removes the class of bug rather than the instance.
+
+// Deliberately loose — a strict RFC 5322 matcher rejects addresses that
+// real mail servers accept, and the code is delivered by email anyway, so
+// an address we cannot reach fails harmlessly at the send step. This
+// catches the typo class (missing @, missing dot, embedded whitespace).
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const LoginBody = z
+  .object({
+    email: patternString(EMAIL_SHAPE, 'A valid email address is required.', { trim: true }),
+  })
+  .passthrough();
+
+const VerifyBody = z
+  .object({
+    // One shared message for both fields, matching the single
+    // `missing_fields` error the endpoint has always returned. Verify
+    // must not tell an attacker which half of the pair was wrong.
+    email: patternString(/^.+$/, 'email and code are required strings.'),
+    code: patternString(/^.+$/, 'email and code are required strings.'),
+  })
+  .passthrough();
+
+const validateLogin = validate({
+  body: LoginBody,
+  errorCodes: { email: 'invalid_email' },
+});
+const validateVerify = validate({
+  body: VerifyBody,
+  defaultErrorCode: 'missing_fields',
+});
 
 // ── Rate limiters ──────────────────────────────────────────────────────────
 //
@@ -85,6 +129,14 @@ function normalizeEmail(email) {
   return email.trim().toLowerCase();
 }
 
+// Issue #27: same shape/regex the manual check enforced (see the F1-auth
+// comment on the route below) — a string matching a plain
+// local-part@domain.tld pattern. Not RFC 5322 exhaustive by design; this is
+// a login-code destination, not a mailbox existence check.
+const loginBodySchema = z.object({
+  email: z.string().regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'A valid email address is required.'),
+});
+
 // Adversarial audit F2-auth (2026-04-15): coerce client IP to a
 // single string. `req.headers['x-forwarded-for']` is typed
 // `string | string[] | undefined` in Express — when a proxy sets
@@ -137,28 +189,26 @@ function extractBearerToken(req) {
 
 // ── POST /auth/login ─────────────────────────────────────────────────────────
 
-router.post('/login', loginLimiter, async (req, res) => {
-  // Adversarial audit F1-auth (2026-04-15): reject requests whose
-  // body isn't a plain JSON object upfront. Without this guard a
-  // request with no Content-Type, an array body, or a null body
-  // crashed the destructure `const { email } = req.body` with
-  // `Cannot destructure property 'email' of 'undefined'` — Express
-  // returned 500 instead of a clear 400. Same shape guard as the
-  // one added to POST /v1/orders in an earlier cycle.
-  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'Request body must be a JSON object (set Content-Type: application/json).',
-    });
-  }
-
+// validateLogin covers adversarial audit F1-auth (a body with no
+// Content-Type, an array body, or a null body used to crash the
+// destructure with "Cannot destructure property 'email' of 'undefined'"
+// and return 500 instead of a clear 400) as well as the address shape.
+router.post('/login', loginLimiter, validateLogin, async (req, res) => {
+router.post(
+  '/login',
+  loginLimiter,
+  // Adversarial audit F1-auth (2026-04-15) / Issue #27: reject requests
+  // whose body isn't a plain JSON object upfront, and require `email` to
+  // match a valid-address shape. Without the body-shape guard, a request
+  // with no Content-Type, an array body, or a null body crashed the
+  // destructure `const { email } = req.body` with `Cannot destructure
+  // property 'email' of 'undefined'` — Express returned 500 instead of a
+  // clear 400. Same shape guard as the one added to POST /v1/orders in an
+  // earlier cycle, now expressed as a reusable Zod schema (see
+  // src/middleware/validate.js).
+  validateBody(loginBodySchema, { fieldErrorCode: 'invalid_email' }),
+  async (req, res) => {
   const { email } = req.body;
-  if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
-    return res
-      .status(400)
-      .json({ error: 'invalid_email', message: 'A valid email address is required.' });
-  }
-
   const addr = normalizeEmail(email);
 
   // Bootstrap guard: if OWNER_EMAIL is set and no users exist yet, reject non-matching emails.
@@ -228,25 +278,13 @@ router.post('/login', loginLimiter, async (req, res) => {
 
 // ── POST /auth/verify ────────────────────────────────────────────────────────
 
-router.post('/verify', verifyLimiter, (req, res) => {
-  // F1-auth: same shape guard as /auth/login. Additionally check
-  // that email and code are strings — the previous code only checked
-  // truthiness, so an array email like `["a@b.com"]` would reach
-  // `normalizeEmail(email).trim()`, which doesn't exist on arrays
-  // and crashes with 500.
-  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'Request body must be a JSON object (set Content-Type: application/json).',
-    });
-  }
+// validateVerify enforces the same body-shape guard as /auth/login (F1-auth)
+// and, additionally, that email and code are non-empty strings. The
+// previous check tested truthiness before type, so an array email like
+// `["a@b.com"]` reached `normalizeEmail(email).trim()` — which arrays do
+// not have — and crashed with a 500.
+router.post('/verify', verifyLimiter, validateVerify, (req, res) => {
   const { email, code } = req.body;
-  if (!email || !code || typeof email !== 'string' || typeof code !== 'string') {
-    return res
-      .status(400)
-      .json({ error: 'missing_fields', message: 'email and code are required strings.' });
-  }
-
   const addr = normalizeEmail(email);
   const codeHash = hashToken(code.trim());
 

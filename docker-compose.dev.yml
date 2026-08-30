@@ -1,0 +1,61 @@
+# Stellar_Card — development overlay.
+#
+# Layer this on top of the base stack to get a real development loop:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# What it changes, relative to docker-compose.yml:
+#
+#   * Builds the `dev` stage of each Dockerfile instead of the production one,
+#     so the containers run `node --watch` and `next dev` rather than a
+#     pre-built bundle.
+#   * Bind-mounts the host source into the container, so an edit on the host is
+#     picked up without a rebuild.
+#   * Drops `restart: unless-stopped`. A crash loop during development should
+#     stop and show you the error, not silently restart forever.
+#
+# The `node_modules` named volumes are the important detail: without them the
+# bind mount would shadow the container's installed dependencies with the
+# host's directory, which is either absent or built for a different platform.
+
+services:
+  backend:
+    build:
+      target: dev
+    image: stellar_card-backend:dev
+    environment:
+      - NODE_ENV=development
+    volumes:
+      - ./stellar_card-backend/src:/app/src
+      - ./stellar_card-backend/jsconfig.json:/app/jsconfig.json:ro
+      - backend-data:/app/data
+      - backend-node-modules:/app/node_modules
+    restart: "no"
+
+  frontend:
+    build:
+      target: dev
+    image: stellar_card-frontend:dev
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_BASE_URL=http://localhost:4000
+      # Container filesystems often miss inotify events across a bind mount;
+      # polling is slower but is the difference between hot reload working and
+      # silently not working.
+      - WATCHPACK_POLLING=true
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      - ./stellar_card-frontend:/app
+      - frontend-node-modules:/app/node_modules
+      # `.next` must stay container-side: it holds build output compiled for
+      # the container's platform, and sharing it with the host corrupts both.
+      - frontend-next-cache:/app/.next
+    restart: "no"
+
+volumes:
+  backend-node-modules:
+    driver: local
+  frontend-node-modules:
+    driver: local
+  frontend-next-cache:
+    driver: local
