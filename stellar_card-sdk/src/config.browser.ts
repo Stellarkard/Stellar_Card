@@ -20,6 +20,16 @@ export interface Stellar_CardConfig {
   created_at: string;
 }
 
+/**
+ * Browser stub for {@link loadStellar_CardConfig} (config.ts).
+ *
+ * There is no `~/.stellar_card/config.json` in a browser — credentials must
+ * be passed explicitly to `Stellar_CardClient`. Always returns `null` so
+ * callers fall through to explicit-credential resolution.
+ *
+ * @param _configPath - Ignored; accepted only to match the Node entry point's signature.
+ * @returns Always `null`.
+ */
 export function loadStellar_CardConfig(_configPath?: string): null {
   return null;
 }
@@ -38,6 +48,19 @@ export function resolveCredentials(opts: { apiKey?: string; baseUrl?: string } =
   return { apiKey: opts.apiKey, baseUrl: opts.baseUrl };
 }
 
+/**
+ * Validate that a base URL is safe to use for API requests.
+ *
+ * Rejects URLs carrying embedded `user:pass@` credentials (the API key is
+ * sent via the `X-Api-Key` header, never in the URL) and anything that
+ * isn't `https:`, so a misconfigured or malicious base URL can't
+ * accidentally leak the API key over plaintext HTTP.
+ *
+ * @param url - Candidate base URL.
+ * @param opts.context - Optional label included in the thrown error message (e.g. "webhook URL").
+ * @returns The normalized URL string.
+ * @throws {Error} If `url` fails to parse, embeds credentials, or is not HTTPS.
+ */
 export function assertSafeBaseUrl(url: string, opts: { context?: string } = {}): string {
   let parsed: URL;
   try {
