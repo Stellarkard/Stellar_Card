@@ -17,6 +17,13 @@
 //! * **Role-based access control (RBAC)** — a hierarchical role model
 //!   (`Admin > Operator > Viewer`) gates privileged operations.
 //! * **Upgradeability** — the admin can swap the contract WASM in place.
+//! * **No admin withdraw path (issue #431)** — `pay_usdc`/`pay_xlm` forward
+//!   funds directly from payer to `DataKey::Treasury` in the same call; the
+//!   contract never holds custody of funds itself. An admin withdrawal
+//!   limit therefore has no function to attach to today — there is nothing
+//!   for an admin to withdraw. If a future change introduces fund custody
+//!   (e.g. an escrow/hold period), a withdrawal limit should be added at
+//!   that point, not before there's a withdrawal path to protect.
 //!
 //! ## Authorization model
 //! `init` and every state-mutating administrative entrypoint require the caller
