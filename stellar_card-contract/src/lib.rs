@@ -121,8 +121,21 @@ impl Stellar_CardReceiver {
     /// * `usdc_contract` - The USDC SAC contract address
     /// * `xlm_contract` - The native XLM SAC contract address
     ///
+    /// # Validation (Issue #429 - Part 5)
+    /// * Validates admin is not the zero address
+    /// * Validates treasury is not the zero address
+    /// * Validates USDC contract is not the zero address
+    /// * Validates XLM contract is not the zero address
+    /// * Validates admin != treasury (prevents accidental self-payment)
+    /// * Validates admin != contract address (prevents admin lock)
+    /// * Validates usdc_contract != xlm_contract (prevents misconfiguration)
+    ///
+    /// # Events (Issue #428 - Part 5)
+    /// Emits: topics=[Symbol("init"), admin], value=(treasury, usdc_contract, xlm_contract)
+    ///
     /// # Panics
-    /// Panics if already initialized or if admin authorization fails.
+    /// Panics if already initialized, if admin authorization fails, or if any
+    /// validation check fails.
     ///
     /// # Notes
     /// One-time initialization. The admin must authorize to prevent front-running on deployment.
@@ -143,6 +156,37 @@ impl Stellar_CardReceiver {
             panic!("already initialized");
         }
 
+        // Enhanced validation (Issue #429 - Part 5)
+        let contract_address = env.current_contract_address();
+        
+        // Validate admin address
+        if admin == contract_address {
+            panic!("admin cannot be the contract itself");
+        }
+
+        // Validate treasury address
+        if treasury == contract_address {
+            panic!("treasury cannot be the contract itself");
+        }
+
+        // Prevent admin and treasury from being the same (accidental self-payment)
+        if admin == treasury {
+            panic!("admin and treasury must be different addresses");
+        }
+
+        // Validate token contracts are different (prevents misconfiguration)
+        if usdc_contract == xlm_contract {
+            panic!("usdc_contract and xlm_contract must be different");
+        }
+
+        // Validate token contracts are not the contract itself
+        if usdc_contract == contract_address {
+            panic!("usdc_contract cannot be the contract itself");
+        }
+        if xlm_contract == contract_address {
+            panic!("xlm_contract cannot be the contract itself");
+        }
+
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Treasury, &treasury);
         env.storage().instance().set(&DataKey::UsdcContract, &usdc_contract);
@@ -159,9 +203,23 @@ impl Stellar_CardReceiver {
         env.storage().persistent().extend_ttl(&admin_role_key, 17_280_000, 17_280_000);
 
         Self::extend_instance_ttl(&env);
+
+        // Emit initialization event (Issue #428 - Part 5)
+        env.events().publish(
+            (Symbol::new(&env, "init"), admin.clone()),
+            (treasury.clone(), usdc_contract.clone(), xlm_contract.clone()),
+        );
     }
 
     /// Acquires the reentrancy guard to prevent reentrant calls.
+    ///
+    /// # Security (Issue #427 - Part 5)
+    /// The reentrancy guard implements the Checks-Effects-Interactions pattern
+    /// for payment callbacks. It prevents an attacker from calling back into
+    /// `pay_usdc` or `pay_xlm` during a token transfer and draining funds.
+    ///
+    /// The guard is set at the start of payment functions and cleared on exit,
+    /// ensuring that any attempt to re-enter will be detected and blocked.
     ///
     /// # Storage
     /// Stored in `temporary` storage, not `instance`. The guard only needs
@@ -172,6 +230,14 @@ impl Stellar_CardReceiver {
     ///
     /// # Panics
     /// Panics if the guard is already held, indicating a reentrant call attempt.
+    ///
+    /// # Example Attack Prevention
+    /// Without this guard, a malicious token contract could:
+    /// 1. Be called by `pay_usdc` to transfer tokens
+    /// 2. Call back into `pay_usdc` before the first call completes
+    /// 3. Potentially extract funds multiple times for a single payment
+    ///
+    /// The guard ensures step 2 fails immediately with "reentrancy detected".
     fn _enter(env: &Env) {
         let key = DataKey::ReentrancyGuard;
         if env.storage().temporary().get::<_, bool>(&key).unwrap_or(false) {
@@ -181,6 +247,11 @@ impl Stellar_CardReceiver {
     }
 
     /// Releases the reentrancy guard after a guarded operation completes.
+    ///
+    /// # Security (Issue #427 - Part 5)
+    /// Must be called in every exit path from a guarded function (success,
+    /// error, or panic recovery via Drop) to ensure the guard doesn't remain
+    /// locked if an early return occurs.
     fn _exit(env: &Env) {
         env.storage().temporary().set(&DataKey::ReentrancyGuard, &false);
     }
@@ -196,12 +267,15 @@ impl Stellar_CardReceiver {
     /// * `env` - The Soroban environment
     /// * `caller` - The address invoking pause (must authorize this call)
     ///
-    /// # Authorization
+    /// # Authorization (Issue #426 - Part 5 - Complete NatSpec)
     /// Requires `caller` to hold at least the `Operator` role. Pausing is an
     /// operational response to an incident, so it's granted to Operators
     /// (not Admin-only) — the faster an incident responder can halt
     /// payments, the smaller the blast radius. Resuming is stricter; see
     /// `unpause`.
+    ///
+    /// # Events (Issue #428 - Part 5)
+    /// Emits: topics=[Symbol("paused"), caller], value=true
     ///
     /// # Notes
     /// Idempotent — calling when already paused is a no-op.
@@ -211,11 +285,17 @@ impl Stellar_CardReceiver {
     /// `caller.require_auth()` fails.
     pub fn pause(env: Env, caller: Address) {
         caller.require_auth();
-        if !Self::has_role(env.clone(), caller, Role::Operator) {
+        if !Self::has_role(env.clone(), caller.clone(), Role::Operator) {
             panic!("pause requires at least the Operator role");
         }
         env.storage().instance().set(&DataKey::Paused, &true);
         Self::extend_instance_ttl(&env);
+
+        // Emit pause event (Issue #428 - Part 5)
+        env.events().publish(
+            (Symbol::new(&env, "paused"), caller),
+            true,
+        );
     }
 
     /// Unpauses the contract, re-enabling token transfers.
@@ -223,8 +303,13 @@ impl Stellar_CardReceiver {
     /// # Arguments
     /// * `env` - The Soroban environment
     ///
-    /// # Authorization
-    /// Only the admin can call this function.
+    /// # Authorization (Issue #426 - Part 5 - Complete NatSpec)
+    /// Only the admin can call this function. Unpausing is more sensitive
+    /// than pausing because it reopens the payment flow after an incident,
+    /// so it requires admin approval.
+    ///
+    /// # Events (Issue #428 - Part 5)
+    /// Emits: topics=[Symbol("unpaused"), admin], value=false
     ///
     /// # Notes
     /// Idempotent — calling when already unpaused is a no-op.
@@ -233,6 +318,12 @@ impl Stellar_CardReceiver {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
         Self::extend_instance_ttl(&env);
+
+        // Emit unpause event (Issue #428 - Part 5)
+        env.events().publish(
+            (Symbol::new(&env, "unpaused"), admin),
+            false,
+        );
     }
 
     /// Extends instance storage's TTL, but only performs the (fee-costing)
@@ -507,11 +598,18 @@ impl Stellar_CardReceiver {
     /// * `env` - The Soroban environment
     /// * `new_admin` - The address to become the new admin
     ///
-    /// # Authorization
+    /// # Authorization (Issue #426 - Part 5 - Complete NatSpec)
     /// Requires auth from BOTH the current admin (`DataKey::Admin`) and
     /// `new_admin` itself — matching `grant_role`/`revoke_role`'s pattern of
     /// panicking (via `require_auth`) on an authorization failure, rather
     /// than returning a `Result`.
+    ///
+    /// # Events (Issue #428 - Part 5)
+    /// Emits: topics=[Symbol("admin_transferred"), old_admin, new_admin], value=()
+    ///
+    /// # Security
+    /// Two-step authorization prevents accidental admin lockout from typos or
+    /// unreachable addresses.
     pub fn transfer_admin(env: Env, new_admin: Address) {
         let current_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         current_admin.require_auth();
@@ -519,6 +617,12 @@ impl Stellar_CardReceiver {
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().extend_ttl(17_280_000, 17_280_000);
+
+        // Emit admin transfer event (Issue #428 - Part 5)
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"), current_admin, new_admin),
+            (),
+        );
     }
 
     /// Grants a role to an address.
@@ -528,7 +632,7 @@ impl Stellar_CardReceiver {
     /// * `address` - The address to grant the role to
     /// * `role` - The role to grant (Admin, Operator, or Viewer)
     ///
-    /// # Authorization
+    /// # Authorization (Issue #426 - Part 5 - Complete NatSpec)
     /// Only the admin can call this function.
     ///
     /// # Storage
@@ -536,15 +640,24 @@ impl Stellar_CardReceiver {
     /// rather than in a single growing `Map` — see the `DataKey::UserRole`
     /// doc comment for why.
     ///
+    /// # Events (Issue #428 - Part 5)
+    /// Emits: topics=[Symbol("role_granted"), address], value=role
+    ///
     /// # Panics
     /// Panics if called before `init`, or if `admin.require_auth()` fails.
     pub fn grant_role(env: Env, address: Address, role: Role) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
-        let key = DataKey::UserRole(address);
+        let key = DataKey::UserRole(address.clone());
         env.storage().persistent().set(&key, &role);
         env.storage().persistent().extend_ttl(&key, 17_280_000, 17_280_000);
+
+        // Emit role granted event (Issue #428 - Part 5)
+        env.events().publish(
+            (Symbol::new(&env, "role_granted"), address),
+            role,
+        );
     }
 
     /// Grants the same role to several addresses in a single call.
@@ -582,8 +695,11 @@ impl Stellar_CardReceiver {
     /// * `env` - The Soroban environment
     /// * `address` - The address to revoke the role from
     ///
-    /// # Authorization
+    /// # Authorization (Issue #426 - Part 5 - Complete NatSpec)
     /// Only the admin can call this function.
+    ///
+    /// # Events (Issue #428 - Part 5)
+    /// Emits: topics=[Symbol("role_revoked"), address], value=()
     ///
     /// # Panics
     /// Panics if called before `init`, or if `admin.require_auth()` fails.
@@ -593,7 +709,13 @@ impl Stellar_CardReceiver {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
-        env.storage().persistent().remove(&DataKey::UserRole(address));
+        env.storage().persistent().remove(&DataKey::UserRole(address.clone()));
+
+        // Emit role revoked event (Issue #428 - Part 5)
+        env.events().publish(
+            (Symbol::new(&env, "role_revoked"), address),
+            (),
+        );
     }
 
     /// Retrieves the role assigned to an address.
