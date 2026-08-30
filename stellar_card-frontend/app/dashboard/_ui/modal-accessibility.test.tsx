@@ -80,6 +80,21 @@ describe('Modal accessibility', () => {
     expect(markup).toContain('aria-modal="true"');
   });
 
+  it('supports direct ariaLabel and ariaDescribedBy props', () => {
+    const markup = renderToStaticMarkup(
+      <Modal
+        open={true}
+        onClose={() => {}}
+        ariaLabel="Direct accessible label"
+        ariaDescribedBy="custom-desc-id"
+      >
+        Body content
+      </Modal>
+    );
+    expect(markup).toContain('aria-label="Direct accessible label"');
+    expect(markup).toContain('aria-describedby="custom-desc-id"');
+  });
+
   it('renders custom footer actions', () => {
     const markup = renderToStaticMarkup(
       <Modal

@@ -17,6 +17,8 @@ export interface ModalProps {
   closeOnEscape?: boolean;
   showCloseButton?: boolean;
   closeButtonAriaLabel?: string;
+  ariaLabel?: string;
+  ariaDescribedBy?: string;
   footer?: ReactNode;
   className?: string;
   children: ReactNode;
@@ -41,13 +43,18 @@ export function Modal({
   closeOnEscape = true,
   showCloseButton = true,
   closeButtonAriaLabel = 'Close dialog',
+  ariaLabel,
+  ariaDescribedBy,
   footer,
   className,
   children,
 }: ModalProps) {
-  const titleId = useId();
-  const descriptionId = useId();
+  const autoTitleId = useId();
+  const autoDescriptionId = useId();
   const modalRef = useRef<HTMLDivElement>(null);
+
+  const resolvedLabelledBy = ariaLabel ? undefined : (title ? autoTitleId : undefined);
+  const resolvedDescribedBy = ariaDescribedBy ?? (description ? autoDescriptionId : undefined);
 
   useFocusTrap({
     active: open,
@@ -95,8 +102,9 @@ export function Modal({
         ref={modalRef}
         role={role}
         aria-modal="true"
-        aria-labelledby={title ? titleId : undefined}
-        aria-describedby={description ? descriptionId : undefined}
+        aria-label={ariaLabel}
+        aria-labelledby={resolvedLabelledBy}
+        aria-describedby={resolvedDescribedBy}
         style={{
           position: 'relative',
           width: '100%',
@@ -128,7 +136,7 @@ export function Modal({
             <div style={{ flex: 1, minWidth: 0 }}>
               {title && (
                 <h2
-                  id={titleId}
+                  id={autoTitleId}
                   style={{
                     margin: 0,
                     fontSize: '0.95rem',
@@ -142,7 +150,7 @@ export function Modal({
               )}
               {description && (
                 <p
-                  id={descriptionId}
+                  id={autoDescriptionId}
                   style={{
                     margin: '0.25rem 0 0',
                     fontSize: '0.75rem',

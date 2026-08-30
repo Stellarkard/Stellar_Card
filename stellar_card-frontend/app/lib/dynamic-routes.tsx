@@ -1,5 +1,5 @@
-// Dynamic route-level lazy loading utilities (Part 2)
-// Advanced code splitting with preloading, priority hints, and loading fallbacks
+// Dynamic route-level lazy loading utilities (Part 4)
+// Advanced code splitting with preloading, priority hints, route prefetching, and loading fallbacks
 
 "use client";
 
@@ -70,11 +70,8 @@ function setupPreload<T>(
       setTimeout(preloadFn, 1000);
     }
   } else if (strategy === "visible") {
-    // Preload when viewport is visible (implemented via IntersectionObserver in consumer)
-    // Consumer should call preloadFn when element becomes visible
     return preloadFn;
   } else if (strategy === "hover") {
-    // Preload on link hover (implemented in consumer with onMouseEnter)
     return preloadFn;
   }
 }
@@ -155,6 +152,24 @@ export class RoutePreloadManager {
     });
   }
 
+  getQueue() {
+    return [...this.queue];
+  }
+
+  getLoadedRoutes() {
+    return Array.from(this.loaded);
+  }
+
+  hasRoute(path: string): boolean {
+    return this.loaded.has(path);
+  }
+
+  clear() {
+    this.queue = [];
+    this.loading.clear();
+    this.loaded.clear();
+  }
+
   async loadNext() {
     if (this.queue.length === 0) return;
 
@@ -200,7 +215,6 @@ export const routePreloadManager = new RoutePreloadManager();
  */
 export function preloadCriticalRoutes() {
   if (typeof window !== "undefined") {
-    // Wait for initial page load
     if (document.readyState === "complete") {
       routePreloadManager.loadCritical();
     } else {
