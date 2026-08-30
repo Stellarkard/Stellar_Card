@@ -1,4 +1,4 @@
-.PHONY: build
+.PHONY: build test integration-test
 
 # The [profile.release] section in Cargo.toml already sets opt-level=z,
 # strip=symbols, lto=true, codegen-units=1 (issue #432). wasm-opt -Oz is an
@@ -14,3 +14,11 @@ build:
 	else \
 		echo "wasm-opt not found — skipping extra size optimization pass. Install binaryen for a smaller binary."; \
 	fi
+
+# The upgrade test imports the compiled contract WASM.
+test:
+	cargo build --target wasm32v1-none --release
+	cargo test
+
+integration-test:
+	./scripts/test_local_network.sh
