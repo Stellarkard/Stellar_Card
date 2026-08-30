@@ -15,7 +15,9 @@
 //! * **Pause mechanism** — the admin can pause the contract to halt all transfers
 //!   during incidents or upgrades.
 //! * **Role-based access control (RBAC)** — a hierarchical role model
-//!   (`Admin > Operator > Viewer`) gates privileged operations.
+//!   (`Admin > Operator > Viewer`) gates privileged operations. Roles are
+//!   granted/revoked by the admin (`grant_role`/`grant_roles`/`revoke_role`)
+//!   or given up voluntarily by their holder (`renounce_role`).
 //! * **Upgradeability** — the admin can swap the contract WASM in place.
 //! * **No admin withdraw path (issue #431)** — `pay_usdc`/`pay_xlm` forward
 //!   funds directly from payer to `DataKey::Treasury` in the same call; the
@@ -200,7 +202,7 @@ impl Stellar_CardReceiver {
         // gap a fresh deployment could otherwise silently hit.
         let admin_role_key = DataKey::UserRole(admin.clone());
         env.storage().persistent().set(&admin_role_key, &Role::Admin);
-        env.storage().persistent().extend_ttl(&admin_role_key, 17_280_000, 17_280_000);
+        Self::extend_role_ttl(&env, &admin_role_key);
 
         Self::extend_instance_ttl(&env);
 
@@ -334,6 +336,24 @@ impl Stellar_CardReceiver {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_MAX);
+    }
+
+    /// Extends a single per-address role storage entry's TTL, but only
+    /// performs the (fee-costing) ledger write once its remaining TTL drops
+    /// below `INSTANCE_TTL_THRESHOLD` (Issue #415 - Part 4).
+    ///
+    /// # Storage footprint
+    /// `grant_role`/`grant_roles` previously called `extend_ttl` on every
+    /// single grant unconditionally, re-billing the entry's rent even when
+    /// its TTL was already close to the maximum. Gating the extension
+    /// behind a threshold — mirroring `extend_instance_ttl`'s existing
+    /// pattern for instance storage — turns most repeat grants to the same
+    /// address into a no-op write, cutting the average gas cost of RBAC
+    /// administration.
+    fn extend_role_ttl(env: &Env, key: &DataKey) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_MAX);
     }
 
     /// Transfers USDC tokens from a payer to the contract treasury.
@@ -635,10 +655,14 @@ impl Stellar_CardReceiver {
     /// # Authorization (Issue #426 - Part 5 - Complete NatSpec)
     /// Only the admin can call this function.
     ///
-    /// # Storage
+    /// # Storage (Issue #415 - Part 4)
     /// Stored under a per-address persistent key (`DataKey::UserRole`)
     /// rather than in a single growing `Map` — see the `DataKey::UserRole`
-    /// doc comment for why.
+    /// doc comment for why. The entry's TTL is extended via
+    /// `extend_role_ttl`, which only performs the write when the entry's
+    /// remaining TTL has actually dropped below the threshold, so
+    /// re-granting a role to the same address repeatedly doesn't re-bill
+    /// rent on every call.
     ///
     /// # Events (Issue #428 - Part 5)
     /// Emits: topics=[Symbol("role_granted"), address], value=role
@@ -651,7 +675,7 @@ impl Stellar_CardReceiver {
 
         let key = DataKey::UserRole(address.clone());
         env.storage().persistent().set(&key, &role);
-        env.storage().persistent().extend_ttl(&key, 17_280_000, 17_280_000);
+        Self::extend_role_ttl(&env, &key);
 
         // Emit role granted event (Issue #428 - Part 5)
         env.events().publish(
@@ -671,11 +695,11 @@ impl Stellar_CardReceiver {
     /// Only the admin can call this function.
     ///
     /// # Notes
-    /// Equivalent to calling `grant_role` once per address, but writes the
-    /// updated role map back to storage once instead of once per address —
-    /// onboarding N addresses at once costs one instance-storage write
-    /// instead of N. An empty `addresses` list is a no-op (still writes the
-    /// unchanged map back once, which is harmless).
+    /// Equivalent to calling `grant_role` once per address. Each address
+    /// still gets its own per-address persistent write (see
+    /// `DataKey::UserRole`), but instance storage's TTL is extended once
+    /// for the whole batch instead of once per address. An empty
+    /// `addresses` list is a no-op.
     pub fn grant_roles(env: Env, addresses: Vec<Address>, role: Role) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -683,7 +707,7 @@ impl Stellar_CardReceiver {
         for address in addresses.iter() {
             let key = DataKey::UserRole(address);
             env.storage().persistent().set(&key, &role);
-            env.storage().persistent().extend_ttl(&key, 17_280_000, 17_280_000);
+            Self::extend_role_ttl(&env, &key);
         }
 
         Self::extend_instance_ttl(&env);
@@ -714,6 +738,46 @@ impl Stellar_CardReceiver {
         // Emit role revoked event (Issue #428 - Part 5)
         env.events().publish(
             (Symbol::new(&env, "role_revoked"), address),
+            (),
+        );
+    }
+
+    /// Allows the caller to give up their own role, without requiring the
+    /// admin to call `revoke_role` on their behalf.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `caller` - The address renouncing its own role (must authorize this call)
+    ///
+    /// # Authorization (Issue #414 - Part 4)
+    /// Requires only `caller.require_auth()` — no admin approval, since an
+    /// account can always give up a privilege it already holds. This is
+    /// the standard access-control self-service primitive: it lets an
+    /// address that suspects its key is compromised, or that is
+    /// deliberately stepping down, drop its own role immediately instead
+    /// of waiting on the admin to call `revoke_role`.
+    ///
+    /// # Events
+    /// Emits: topics=[Symbol("role_renounced"), caller], value=()
+    ///
+    /// # Notes
+    /// Renouncing a role the caller doesn't hold is a no-op, matching
+    /// `revoke_role`'s behaviour for an address with no assigned role.
+    /// Because the contract's ultimate authority (`DataKey::Admin`) is a
+    /// separate, independent identity from the `Role` system (see
+    /// `rescue_tokens`'s doc comment), an address renouncing `Role::Admin`
+    /// can never lock the contract out of RBAC administration — the
+    /// stored admin can always call `grant_role` again.
+    ///
+    /// # Panics
+    /// Panics if `caller.require_auth()` fails.
+    pub fn renounce_role(env: Env, caller: Address) {
+        caller.require_auth();
+
+        env.storage().persistent().remove(&DataKey::UserRole(caller.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, "role_renounced"), caller),
             (),
         );
     }
@@ -1891,10 +1955,117 @@ mod test {
     fn test_revoke_nonexistent_role_is_noop() {
         let f = Fixture::new();
         f.init();
-        
+
         let user = Address::generate(&f.env);
         f.client().revoke_role(&user);
         assert_eq!(f.client().get_role(&user), None);
+    }
+
+    // ── renounce_role (Issue #414 - Part 4) ──────────────────────────────────
+
+    #[test]
+    fn test_renounce_role_removes_own_role() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Operator);
+        assert_eq!(f.client().get_role(&user), Some(Role::Operator));
+
+        f.client().renounce_role(&user);
+
+        assert_eq!(f.client().get_role(&user), None);
+        assert_eq!(f.client().has_role(&user, &Role::Viewer), false);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_renounce_role_requires_self_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let usdc = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let xlm_sac = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let contract_id = env.register(Stellar_CardReceiver, ());
+        let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+
+        env.mock_all_auths();
+        client.init(&admin, &treasury, &usdc, &xlm_sac);
+
+        let user = Address::generate(&env);
+        client.grant_role(&user, &Role::Viewer);
+
+        // Neither the user nor anyone else has authorized this call.
+        env.mock_auths(&[]);
+        client.renounce_role(&user); // panics
+    }
+
+    #[test]
+    fn test_renounce_nonexistent_role_is_noop() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().renounce_role(&user);
+        assert_eq!(f.client().get_role(&user), None);
+    }
+
+    #[test]
+    fn test_renounce_role_does_not_affect_other_users() {
+        let f = Fixture::new();
+        f.init();
+
+        let user1 = Address::generate(&f.env);
+        let user2 = Address::generate(&f.env);
+        f.client().grant_role(&user1, &Role::Operator);
+        f.client().grant_role(&user2, &Role::Admin);
+
+        f.client().renounce_role(&user1);
+
+        assert_eq!(f.client().get_role(&user1), None);
+        assert_eq!(f.client().get_role(&user2), Some(Role::Admin));
+    }
+
+    #[test]
+    fn test_renounce_role_emits_correct_event() {
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Viewer);
+        f.client().renounce_role(&user);
+
+        let events = f.env.events().all();
+        let mut found = false;
+        for (contract_addr, topics, _data) in events.iter() {
+            if contract_addr != f.contract_id {
+                continue;
+            }
+            let sym: Symbol = topics.get(0).unwrap().try_into_val(&f.env).unwrap();
+            if sym != Symbol::new(&f.env, "role_renounced") {
+                continue;
+            }
+            let emitted_caller: Address = topics.get(1).unwrap().try_into_val(&f.env).unwrap();
+            assert_eq!(emitted_caller, user);
+            found = true;
+            break;
+        }
+        assert!(found, "role_renounced event not found");
+    }
+
+    #[test]
+    fn test_admin_can_still_grant_roles_after_admin_role_renounced() {
+        let f = Fixture::new();
+        f.init();
+
+        // The admin renouncing its Role::Admin doesn't affect DataKey::Admin,
+        // which is a separate identity — grant_role must keep working.
+        f.client().renounce_role(&f.admin);
+        assert_eq!(f.client().get_role(&f.admin), None);
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Viewer);
+        assert_eq!(f.client().get_role(&user), Some(Role::Viewer));
     }
 
     #[test]
@@ -2621,5 +2792,36 @@ mod test {
         // re-extend, since any decrease at all drops below the threshold.
         assert!(INSTANCE_TTL_THRESHOLD < INSTANCE_TTL_MAX);
         assert_eq!(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_MAX / 2);
+    }
+
+    #[test]
+    fn test_role_ttl_extension_is_skipped_once_already_healthy() {
+        use soroban_sdk::testutils::storage::Persistent;
+
+        let f = Fixture::new();
+        f.init();
+
+        let user = Address::generate(&f.env);
+        f.client().grant_role(&user, &Role::Viewer);
+
+        let key = DataKey::UserRole(user.clone());
+        let ttl_after_first_grant = f.env.as_contract(&f.contract_id, || {
+            f.env.storage().persistent().get_ttl(&key)
+        });
+        assert!(ttl_after_first_grant > 0, "TTL after grant should be positive");
+
+        // Re-granting a role to the same address while its entry's TTL is
+        // already above the threshold must be a genuine no-op on the TTL —
+        // proving extend_role_ttl's threshold check actually skips
+        // redundant extension work, not just that it compiles (Issue #415
+        // - Part 4).
+        f.client().grant_role(&user, &Role::Operator);
+        let ttl_after_second_grant = f.env.as_contract(&f.contract_id, || {
+            f.env.storage().persistent().get_ttl(&key)
+        });
+        assert_eq!(
+            ttl_after_second_grant, ttl_after_first_grant,
+            "re-granting a role while its TTL is already above the threshold should not re-extend it"
+        );
     }
 }
