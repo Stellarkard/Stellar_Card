@@ -1354,6 +1354,197 @@ mod test {
         assert!(result.is_err(), "should fail with insufficient balance");
     }
 
+    // ── failed-transfer error/balance semantics (Issue #413 - Part 4) ────────
+
+    #[test]
+    fn test_pay_usdc_insufficient_balance_returns_transfer_failed_error() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 10_000_000;
+        f.mint_usdc(&f.payer, amount / 2);
+
+        let oid = order_bytes(&f.env, "insufficient-usdc-variant");
+        let result = f.client().try_pay_usdc(&f.payer, &amount, &oid);
+        assert_eq!(result, Err(Ok(Error::TransferFailed)));
+    }
+
+    #[test]
+    fn test_pay_xlm_insufficient_balance_returns_transfer_failed_error() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 10_000_000;
+        f.mint_xlm(&f.payer, amount / 2);
+
+        let oid = order_bytes(&f.env, "insufficient-xlm-variant");
+        let result = f.client().try_pay_xlm(&f.payer, &amount, &oid);
+        assert_eq!(result, Err(Ok(Error::TransferFailed)));
+    }
+
+    #[test]
+    fn test_pay_usdc_insufficient_balance_leaves_balances_unchanged() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 10_000_000;
+        let available = amount / 2;
+        f.mint_usdc(&f.payer, available);
+
+        let oid = order_bytes(&f.env, "insufficient-usdc-no-partial");
+        let result = f.client().try_pay_usdc(&f.payer, &amount, &oid);
+        assert!(result.is_err());
+
+        // A rejected token::Client transfer must not move any funds --
+        // the payer keeps every unit they had, and the treasury sees none.
+        assert_eq!(f.usdc_balance(&f.payer), available);
+        assert_eq!(f.usdc_balance(&f.treasury), 0);
+    }
+
+    #[test]
+    fn test_pay_xlm_insufficient_balance_leaves_balances_unchanged() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 10_000_000;
+        let available = amount / 2;
+        f.mint_xlm(&f.payer, available);
+
+        let oid = order_bytes(&f.env, "insufficient-xlm-no-partial");
+        let result = f.client().try_pay_xlm(&f.payer, &amount, &oid);
+        assert!(result.is_err());
+
+        assert_eq!(f.xlm_balance(&f.payer), available);
+        assert_eq!(f.xlm_balance(&f.treasury), 0);
+    }
+
+    #[test]
+    fn test_pay_usdc_with_zero_balance_payer_fails_cleanly() {
+        let f = Fixture::new();
+        f.init();
+
+        // Payer never received any USDC at all -- not just "not enough".
+        let amount: i128 = 5_000_000;
+        let oid = order_bytes(&f.env, "zero-balance-usdc");
+        let result = f.client().try_pay_usdc(&f.payer, &amount, &oid);
+
+        assert_eq!(result, Err(Ok(Error::TransferFailed)));
+        assert_eq!(f.usdc_balance(&f.payer), 0);
+        assert_eq!(f.usdc_balance(&f.treasury), 0);
+    }
+
+    #[test]
+    fn test_pay_xlm_with_zero_balance_payer_fails_cleanly() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 5_000_000;
+        let oid = order_bytes(&f.env, "zero-balance-xlm");
+        let result = f.client().try_pay_xlm(&f.payer, &amount, &oid);
+
+        assert_eq!(result, Err(Ok(Error::TransferFailed)));
+        assert_eq!(f.xlm_balance(&f.payer), 0);
+        assert_eq!(f.xlm_balance(&f.treasury), 0);
+    }
+
+    // ── partial-spend and no-custody invariants (Issue #413 - Part 4) ────────
+
+    #[test]
+    fn test_pay_usdc_leaves_remainder_with_payer_when_paying_less_than_balance() {
+        let f = Fixture::new();
+        f.init();
+
+        let minted: i128 = 30_000_000;
+        let paid: i128 = 12_000_000;
+        f.mint_usdc(&f.payer, minted);
+
+        let oid = order_bytes(&f.env, "partial-spend-usdc");
+        f.client().pay_usdc(&f.payer, &paid, &oid);
+
+        assert_eq!(f.usdc_balance(&f.payer), minted - paid);
+        assert_eq!(f.usdc_balance(&f.treasury), paid);
+    }
+
+    #[test]
+    fn test_pay_xlm_leaves_remainder_with_payer_when_paying_less_than_balance() {
+        let f = Fixture::new();
+        f.init();
+
+        let minted: i128 = 30_000_000;
+        let paid: i128 = 12_000_000;
+        f.mint_xlm(&f.payer, minted);
+
+        let oid = order_bytes(&f.env, "partial-spend-xlm");
+        f.client().pay_xlm(&f.payer, &paid, &oid);
+
+        assert_eq!(f.xlm_balance(&f.payer), minted - paid);
+        assert_eq!(f.xlm_balance(&f.treasury), paid);
+    }
+
+    #[test]
+    fn test_contract_never_retains_usdc_balance_after_pay_usdc() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 8_000_000;
+        f.mint_usdc(&f.payer, amount);
+
+        let oid = order_bytes(&f.env, "no-custody-usdc");
+        f.client().pay_usdc(&f.payer, &amount, &oid);
+
+        // pay_usdc forwards straight from payer to treasury in the same
+        // call -- the contract itself must never end up holding a balance.
+        assert_eq!(f.usdc_balance(&f.contract_id), 0);
+    }
+
+    #[test]
+    fn test_contract_never_retains_xlm_balance_after_pay_xlm() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 8_000_000;
+        f.mint_xlm(&f.payer, amount);
+
+        let oid = order_bytes(&f.env, "no-custody-xlm");
+        f.client().pay_xlm(&f.payer, &amount, &oid);
+
+        assert_eq!(f.xlm_balance(&f.contract_id), 0);
+    }
+
+    #[test]
+    fn test_pay_usdc_does_not_affect_xlm_contract_balance() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 8_000_000;
+        f.mint_usdc(&f.payer, amount);
+        f.mint_xlm(&f.payer, amount);
+
+        f.client().pay_usdc(&f.payer, &amount, &order_bytes(&f.env, "usdc-only"));
+
+        // Only the USDC leg moved; the payer's XLM balance (minted from a
+        // separate SAC) must be completely untouched.
+        assert_eq!(f.usdc_balance(&f.payer), 0);
+        assert_eq!(f.xlm_balance(&f.payer), amount);
+        assert_eq!(f.xlm_balance(&f.treasury), 0);
+    }
+
+    #[test]
+    fn test_pay_xlm_does_not_affect_usdc_contract_balance() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 8_000_000;
+        f.mint_usdc(&f.payer, amount);
+        f.mint_xlm(&f.payer, amount);
+
+        f.client().pay_xlm(&f.payer, &amount, &order_bytes(&f.env, "xlm-only"));
+
+        assert_eq!(f.xlm_balance(&f.payer), 0);
+        assert_eq!(f.usdc_balance(&f.payer), amount);
+        assert_eq!(f.usdc_balance(&f.treasury), 0);
+    }
+
     #[test]
     fn test_multiple_payments_accumulate_in_treasury() {
         let f = Fixture::new();
