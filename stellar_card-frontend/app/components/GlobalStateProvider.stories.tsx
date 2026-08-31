@@ -41,19 +41,19 @@ export const Empty: Story = {
   },
 };
 
-export const Error: Story = {
+export const ErrorState: Story = {
   args: {
     status: 'error' as AsyncStatus,
-    error: new Error('Failed to load data from server'),
+    error: new globalThis.Error('Failed to load data from server'),
     onRetry: () => console.log('Retry clicked'),
     children: () => <div>This should not be visible</div>,
   },
 };
 
-export const ErrorWithoutRetry: Story = {
+export const ErrorStateWithoutRetry: Story = {
   args: {
     status: 'error' as AsyncStatus,
-    error: new Error('Network error'),
+    error: new globalThis.Error('Network error'),
     children: () => <div>This should not be visible</div>,
   },
 };

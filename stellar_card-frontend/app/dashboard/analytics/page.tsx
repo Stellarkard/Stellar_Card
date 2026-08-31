@@ -8,8 +8,7 @@ import { useMemo, useState } from 'react';
 import { useDashboard } from '../_lib/DashboardProvider';
 import { Card } from '../_ui/Card';
 import { KpiRow, KpiTile } from '../_ui/KpiTile';
-import { SpendChart } from '../_ui/SpendChart';
-import { HorizontalBar } from '../_ui/HorizontalBar';
+import { DynamicSpendChart, DynamicHorizontalBar } from '@/app/lib/dynamic-imports';
 import { FilterChip } from '../_ui/FilterChip';
 import { PageContainer } from '../_ui/PageContainer';
 import { PageHeader } from '../_ui/PageHeader';
@@ -28,11 +27,12 @@ export default function AnalyticsPage() {
   const isPlatformOwner = !!user?.is_platform_owner;
   const [windowKey, setWindowKey] = useState<'24h' | '7d' | '30d'>('7d');
   const windowDays = WINDOWS[windowKey]!.days;
+  const [now] = useState(() => Date.now());
   const windowMs = windowDays * 86_400_000;
 
   const windowOrders = useMemo(
-    () => orders.filter((o) => Date.now() - parseTimestamp(o.created_at) < windowMs),
-    [orders, windowMs],
+    () => orders.filter((o) => now - parseTimestamp(o.created_at) < windowMs),
+    [orders, now, windowMs],
   );
 
   const agentSpend = useMemo(
@@ -124,10 +124,10 @@ export default function AnalyticsPage() {
             }}
           >
             <Card title="Spend over time">
-              <SpendChart data={chartData} height={220} />
+              <DynamicSpendChart data={chartData} height={220} />
             </Card>
             <Card title="Latency distribution">
-              <HorizontalBar
+              <DynamicHorizontalBar
                 rows={latency.buckets.map((b) => ({
                   label: b.range,
                   value: b.count,
@@ -155,7 +155,7 @@ export default function AnalyticsPage() {
             }}
           >
             <Card title="Spend by agent">
-              <HorizontalBar
+              <DynamicHorizontalBar
                 rows={agentSpend.slice(0, 10).map((a) => ({
                   label: a.label,
                   value: a.amount,
@@ -167,13 +167,13 @@ export default function AnalyticsPage() {
               {errors.length === 0 ? (
                 <EmptyState title="No failures in this window" />
               ) : (
-                <HorizontalBar
-                  rows={errors.map((e) => ({
-                    label: e.reason,
-                    value: e.count,
-                    trailing: `${e.count} orders`,
-                  }))}
-                />
+              <DynamicHorizontalBar
+                rows={errors.map((e) => ({
+                  label: e.reason,
+                  value: e.count,
+                  trailing: `${e.count} orders`,
+                }))}
+              />
               )}
             </Card>
           </div>

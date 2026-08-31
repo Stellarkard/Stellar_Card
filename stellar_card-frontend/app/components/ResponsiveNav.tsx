@@ -2,8 +2,14 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+
 import { useEffect, useRef, useState, useCallback } from 'react';
 import type { ReactNode, KeyboardEvent } from 'react';
+
+import { useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
+import { isActivePath } from './navigationConfig';
+
 
 interface NavItem {
   href: string;
@@ -28,28 +34,40 @@ export function ResponsiveNav({
   variant = 'horizontal',
   enableKeyboardNav = true,
 }: ResponsiveNavProps) {
-  const pathname = usePathname();
+  const pathname = usePathname() || '';
   const [mobileOpen, setMobileOpen] = useState(false);
+
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const navItemsRef = useRef<(HTMLAnchorElement | null)[]>([]);
 
+
+
   // Handle scroll lock on mobile menu open
   useEffect(() => {
     if (variant === 'horizontal' && mobileOpen) {
+
       // Check for reduced motion preference
       const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       if (!prefersReducedMotion) {
         document.documentElement.style.overflow = 'hidden';
         document.body.style.overflow = 'hidden';
       }
+
+      const origHtml = document.documentElement.style.overflow;
+      const origBody = document.body.style.overflow;
+      document.documentElement.style.overflow = 'hidden';
+      document.body.style.overflow = 'hidden';
+
       return () => {
-        document.documentElement.style.overflow = '';
-        document.body.style.overflow = '';
+        document.documentElement.style.overflow = origHtml;
+        document.body.style.overflow = origBody;
       };
     }
+    return undefined;
   }, [mobileOpen, variant]);
+
 
   // Close menu on route change
   useEffect(() => {
@@ -121,6 +139,16 @@ export function ResponsiveNav({
   }, [mobileOpen]);
 
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/');
+
+  const [prevPathname, setPrevPathname] = useState(pathname);
+  if (pathname !== prevPathname) {
+    setPrevPathname(pathname);
+    setMobileOpen(false);
+  }
+
+
+  const isActive = (href: string) => isActivePath(pathname, href);
+
 
   const handleNavClick = useCallback(
     (href: string) => {
@@ -220,12 +248,17 @@ export function ResponsiveNav({
   }
 
   return (
+
     <nav
       className={`responsive-nav responsive-nav-${variant} ${className || ''}`}
       ref={menuRef}
       role="navigation"
       aria-label="Main navigation"
     >
+
+    <nav className={`responsive-nav responsive-nav-${variant} ${className || ''}`}>
+      {variant === 'vertical' && navContent}
+
       {variant === 'horizontal' && (
         <>
           {navContent}

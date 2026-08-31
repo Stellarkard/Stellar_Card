@@ -26,7 +26,9 @@ const OWS_WALLET_PASSPHRASE = process.env.OWS_WALLET_PASSPHRASE ?? undefined;
 const OWS_VAULT_PATH = process.env.OWS_VAULT_PATH ?? undefined;
 
 if (!API_KEY) {
-  process.stderr.write('Warning: CARDS402_API_KEY is not set. Get one at https://stellar_card.com\n');
+  process.stderr.write(
+    'Warning: CARDS402_API_KEY is not set. Get one at https://stellar_card.com\n',
+  );
 }
 
 if (!OWS_WALLET_NAME) {

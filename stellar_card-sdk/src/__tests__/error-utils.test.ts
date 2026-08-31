@@ -76,8 +76,12 @@ describe('buildErrorChain', () => {
 
   it('chains multiple levels of Stellar_CardError', () => {
     const root = new Error('disk full');
-    const middle = new Stellar_CardError('write failed', 'write_err', 0, undefined, { cause: root });
-    const top = new Stellar_CardError('order failed', 'order_err', 500, undefined, { cause: middle });
+    const middle = new Stellar_CardError('write failed', 'write_err', 0, undefined, {
+      cause: root,
+    });
+    const top = new Stellar_CardError('order failed', 'order_err', 500, undefined, {
+      cause: middle,
+    });
 
     const chain = buildErrorChain(top);
     expect(chain).toBe('order failed → write failed → disk full');

@@ -7,6 +7,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useRef, useState, useEffect } from 'react';
+import { isActivePath } from './navigationConfig';
 
 interface Tab {
   href: string;
@@ -20,7 +21,7 @@ interface Props {
 }
 
 export function TabNav({ tabs, className }: Props) {
-  const pathname = usePathname();
+  const pathname = usePathname() || '';
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showLeftFade, setShowLeftFade] = useState(false);
   const [showRightFade, setShowRightFade] = useState(false);
@@ -66,7 +67,7 @@ export function TabNav({ tabs, className }: Props) {
         }}
       >
         {tabs.map((tab) => {
-          const active = pathname === tab.href || pathname.startsWith(tab.href + '/');
+          const active = isActivePath(pathname, tab.href);
           return (
             <Link
               key={tab.href}
