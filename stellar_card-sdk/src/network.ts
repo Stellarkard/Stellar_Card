@@ -116,7 +116,7 @@ function normalizeRpcEndpoint(
  */
 export function resolveNetworkConfig(config: NetworkConfig = {}): ResolvedNetworkConfig {
   const networkPassphrase = normalizeString(config.networkPassphrase) ?? Networks.PUBLIC;
-  
+
   let defaultSorobanRpc: string;
   let defaultHorizon: string;
   let defaultName: string;
@@ -299,9 +299,8 @@ export function validateNetworkConfig(config: NetworkConfig): string[] {
   }
 
   if (config.sorobanRpcUrl !== undefined) {
-    const url = typeof config.sorobanRpcUrl === 'string'
-      ? config.sorobanRpcUrl
-      : config.sorobanRpcUrl.url;
+    const url =
+      typeof config.sorobanRpcUrl === 'string' ? config.sorobanRpcUrl : config.sorobanRpcUrl.url;
     try {
       validateRpcEndpoint(url, 'Soroban RPC');
     } catch (err) {
@@ -310,9 +309,7 @@ export function validateNetworkConfig(config: NetworkConfig): string[] {
   }
 
   if (config.horizonUrl !== undefined) {
-    const url = typeof config.horizonUrl === 'string'
-      ? config.horizonUrl
-      : config.horizonUrl.url;
+    const url = typeof config.horizonUrl === 'string' ? config.horizonUrl : config.horizonUrl.url;
     try {
       validateRpcEndpoint(url, 'Horizon');
     } catch (err) {
@@ -488,9 +485,7 @@ export function resolveNetworkConfigFromEnv(overrides: NetworkConfig = {}): Reso
     timeout = parsed;
   }
 
-  const buildEndpoint = (
-    url: string | undefined,
-  ): string | RpcEndpointConfig | undefined => {
+  const buildEndpoint = (url: string | undefined): string | RpcEndpointConfig | undefined => {
     const cleaned = normalizeString(url);
     if (cleaned === undefined) return undefined;
     if (apiKey || timeout !== undefined) {
@@ -501,11 +496,10 @@ export function resolveNetworkConfigFromEnv(overrides: NetworkConfig = {}): Reso
 
   return resolveNetworkConfig({
     networkPassphrase:
-      normalizeString(overrides.networkPassphrase) ?? normalizeString(env[NETWORK_ENV_VARS.networkPassphrase]),
-    sorobanRpcUrl:
-      overrides.sorobanRpcUrl ?? buildEndpoint(env[NETWORK_ENV_VARS.sorobanRpcUrl]),
-    horizonUrl:
-      overrides.horizonUrl ?? buildEndpoint(env[NETWORK_ENV_VARS.horizonUrl]),
+      normalizeString(overrides.networkPassphrase) ??
+      normalizeString(env[NETWORK_ENV_VARS.networkPassphrase]),
+    sorobanRpcUrl: overrides.sorobanRpcUrl ?? buildEndpoint(env[NETWORK_ENV_VARS.sorobanRpcUrl]),
+    horizonUrl: overrides.horizonUrl ?? buildEndpoint(env[NETWORK_ENV_VARS.horizonUrl]),
     networkName:
       normalizeString(overrides.networkName) ?? normalizeString(env[NETWORK_ENV_VARS.networkName]),
   });

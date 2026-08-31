@@ -211,8 +211,8 @@ export async function* mapPaginated<T, R>(
 }
 
 // ── Order listing pagination wrapper ────────────────────────────────────────
-// Issue #530; also closes #490, a duplicate "Part 1" issue filed for the
-// same feature.
+// Issue #510 (Part 3); also closes #490, a duplicate "Part 1" issue filed for
+// the same feature.
 
 /**
  * Options for {@link createOrderPaginator}.
@@ -283,9 +283,7 @@ export interface OrderPaginator<T> {
  * }
  * ```
  */
-export function createOrderPaginator<T>(
-  opts: OrderPaginatorOptions,
-): OrderPaginator<T> {
+export function createOrderPaginator<T>(opts: OrderPaginatorOptions): OrderPaginator<T> {
   const pageSize = opts.pageSize ?? 20;
   let currentOffset = 0;
 
@@ -293,9 +291,11 @@ export function createOrderPaginator<T>(
     currentOffset = 0;
   }
 
-  async function next(): Promise<
-    { items: T[]; hasMore: boolean; nextOffset: number | null } | null
-  > {
+  async function next(): Promise<{
+    items: T[];
+    hasMore: boolean;
+    nextOffset: number | null;
+  } | null> {
     const page = await paginate<T>({
       fetchPage: async (cursor) => {
         const items = await opts.fetchPage(cursor.offset, cursor.limit);
@@ -338,7 +338,9 @@ export function createOrderPaginator<T>(
     next,
     all,
     reset,
-    get currentOffset() { return currentOffset; },
+    get currentOffset() {
+      return currentOffset;
+    },
     [Symbol.asyncIterator]: iterate,
   };
 }

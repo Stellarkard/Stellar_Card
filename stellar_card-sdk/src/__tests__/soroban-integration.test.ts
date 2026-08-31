@@ -1,4 +1,4 @@
-// Soroban client integration test suite (Issue #531 — Part 5; also closes
+// Soroban client integration test suite (Issue #511 — Part 3; also closes
 // #491, a duplicate "Part 1" issue filed for the same feature).
 //
 // Tests the full Soroban contract payment lifecycle with mocked RPC
@@ -176,7 +176,10 @@ describe('Soroban integration', () => {
 
   describe('selectContractCall', () => {
     const payment = {
-      usdc: { amount: '10.00', asset: 'USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' },
+      usdc: {
+        amount: '10.00',
+        asset: 'USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+      },
       xlm: { amount: '50.00' },
     };
 
@@ -500,9 +503,7 @@ describe('Soroban integration', () => {
 
       const server = {
         sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: txHash }),
-        getTransaction: vi
-          .fn()
-          .mockRejectedValue(new Error('Bad union switch: 4')),
+        getTransaction: vi.fn().mockRejectedValue(new Error('Bad union switch: 4')),
       } as any;
 
       const fetchMock = vi.fn().mockResolvedValue({
@@ -511,7 +512,11 @@ describe('Soroban integration', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
 
-      const hash = await submitSorobanTx(makeTx() as any, server, 'https://horizon-testnet.stellar.org');
+      const hash = await submitSorobanTx(
+        makeTx() as any,
+        server,
+        'https://horizon-testnet.stellar.org',
+      );
       expect(hash).toBe(txHash);
       expect(fetchMock).toHaveBeenCalledWith(
         `https://horizon-testnet.stellar.org/transactions/${txHash}`,
@@ -526,9 +531,7 @@ describe('Soroban integration', () => {
 
       const server = {
         sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: txHash }),
-        getTransaction: vi
-          .fn()
-          .mockRejectedValue(new Error('Bad union switch: 4')),
+        getTransaction: vi.fn().mockRejectedValue(new Error('Bad union switch: 4')),
       } as any;
 
       const fetchMock = vi.fn().mockResolvedValue({
@@ -596,8 +599,11 @@ describe('Soroban integration', () => {
 
       // Attach .catch early to prevent unhandled rejection warning
       let caughtErr: unknown;
-      const promise = submitSorobanTx(makeTx() as any, server, 'https://horizon.stellar.org')
-        .catch((e: unknown) => { caughtErr = e; });
+      const promise = submitSorobanTx(makeTx() as any, server, 'https://horizon.stellar.org').catch(
+        (e: unknown) => {
+          caughtErr = e;
+        },
+      );
 
       // Advance well past the 120s deadline
       await vi.advanceTimersByTimeAsync(130_000);
@@ -626,8 +632,11 @@ describe('Soroban integration', () => {
 
       // Attach .catch early to prevent unhandled rejection warning
       let caughtErr: unknown;
-      const promise = submitSorobanTx(makeTx() as any, server, 'https://horizon.stellar.org')
-        .catch((e: unknown) => { caughtErr = e; });
+      const promise = submitSorobanTx(makeTx() as any, server, 'https://horizon.stellar.org').catch(
+        (e: unknown) => {
+          caughtErr = e;
+        },
+      );
 
       await vi.advanceTimersByTimeAsync(130_000);
       await promise;
@@ -651,8 +660,9 @@ describe('Soroban integration', () => {
 
       // Attach .catch early to prevent unhandled rejection warning
       let caughtErr: unknown;
-      const promise = submitSorobanTx(makeTx() as any, server)
-        .catch((e: unknown) => { caughtErr = e; });
+      const promise = submitSorobanTx(makeTx() as any, server).catch((e: unknown) => {
+        caughtErr = e;
+      });
 
       // Advance past 5 × 1500ms = 7500ms of retry delays
       await vi.advanceTimersByTimeAsync(10_000);
@@ -669,9 +679,7 @@ describe('Soroban integration', () => {
 
       const server = {
         sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: txHash }),
-        getTransaction: vi
-          .fn()
-          .mockRejectedValue(new Error('Bad union switch: 4')),
+        getTransaction: vi.fn().mockRejectedValue(new Error('Bad union switch: 4')),
       } as any;
 
       const fetchMock = vi.fn().mockResolvedValue({

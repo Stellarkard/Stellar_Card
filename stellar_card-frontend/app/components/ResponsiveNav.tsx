@@ -43,7 +43,6 @@ export function ResponsiveNav({
   const navItemsRef = useRef<(HTMLAnchorElement | null)[]>([]);
 
 
-
   // Handle scroll lock on mobile menu open
   useEffect(() => {
     if (variant === 'horizontal' && mobileOpen) {
