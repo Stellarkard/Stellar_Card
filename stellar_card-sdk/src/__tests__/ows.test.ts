@@ -238,7 +238,9 @@ describe('importStellarKey', () => {
       throw new Error('Invalid key format');
     });
 
-    expect(() => importStellarKey('imported-wallet', VALID_STELLAR_SECRET)).toThrow('Invalid key format');
+    expect(() => importStellarKey('imported-wallet', VALID_STELLAR_SECRET)).toThrow(
+      'Invalid key format',
+    );
   });
 });
 
