@@ -172,14 +172,14 @@ describe('reEncrypt', () => {
     const rotated = await reEncrypt(original, 'old-pass', 'new-pass');
     const result = await decrypt({ payload: rotated, passphrase: 'new-pass' });
     expect(result).toBe('my-secret');
-  // reEncrypt = decrypt + encrypt = 2 PBKDF2 derivations at 600K iterations each
+    // reEncrypt = decrypt + encrypt = 2 PBKDF2 derivations at 600K iterations each
   }, 15_000);
 
   it('old passphrase no longer decrypts after reEncrypt', async () => {
     const original = await encrypt('my-secret', { passphrase: 'old-pass' });
     const rotated = await reEncrypt(original, 'old-pass', 'new-pass');
     await expect(decrypt({ payload: rotated, passphrase: 'old-pass' })).rejects.toThrow();
-  // reEncrypt = 2 derivations, then failed decrypt = 1 more = 3 total
+    // reEncrypt = 2 derivations, then failed decrypt = 1 more = 3 total
   }, 15_000);
 
   it('preserves context through rotation', async () => {
@@ -187,7 +187,7 @@ describe('reEncrypt', () => {
     const rotated = await reEncrypt(original, 'old', 'new', 'ctx');
     const result = await decrypt({ payload: rotated, passphrase: 'new', context: 'ctx' });
     expect(result).toBe('data');
-  // reEncrypt runs 3 PBKDF2 derivations (decrypt + encrypt) at 600K iterations each
+    // reEncrypt runs 3 PBKDF2 derivations (decrypt + encrypt) at 600K iterations each
   }, 15_000);
 
   it('throws when old passphrase is wrong', async () => {

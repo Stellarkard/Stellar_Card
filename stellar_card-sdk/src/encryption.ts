@@ -1,5 +1,5 @@
 /**
- * Secure client-side encryption for key storage (Issue #532 — Part 5; also
+ * Secure client-side encryption for key storage (Issue #512 — Part 3; also
  * closes #492, a duplicate "Part 1" issue filed for the same feature).
  *
  * Provides AES-256-GCM encryption/decryption using the Web Crypto API
@@ -230,11 +230,7 @@ export async function decrypt(options: DecryptOptions): Promise<string> {
   const ciphertext = fromBase64(payload.value);
   const key = await deriveKey(passphrase, salt, context);
 
-  const plaintext = await crypto.subtle.decrypt(
-    { name: AES_GCM_ALGO, iv },
-    key,
-    ciphertext,
-  );
+  const plaintext = await crypto.subtle.decrypt({ name: AES_GCM_ALGO, iv }, key, ciphertext);
 
   return new TextDecoder().decode(plaintext);
 }

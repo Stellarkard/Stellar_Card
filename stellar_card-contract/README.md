@@ -61,10 +61,7 @@ asset contract addresses and requires the admin signature. Calling `init` a
 second time panics with `already initialized`.
 
 The contract retains an `upgrade(new_wasm_hash)` entrypoint gated by
-`admin.require_auth()` — the admin key can swap the contract's WASM in the
-future. There is no pause function; if you want a fully immutable deployment,
-transfer the admin key to a burn address after `init` (or fork the contract
-with `upgrade` removed).
+`admin.require_auth()` and supports pausing payments during an incident.
 
 Contract IDs on Stellar mainnet:
 
@@ -112,11 +109,19 @@ Each successful payment emits one Soroban event. The `topic[0]` symbol identifie
 
 The backend event watcher filters on both `pay_usdc` and `pay_xlm` symbols.
 
+Administrative state changes emit `init`, `paused`, `unpaused`, `upgraded`,
+`admin_transferred`, `role_granted`, and `role_revoked` events. Idempotent
+operations do not emit events when no state changed.
+
 ## Testing & Verification
 
 ```bash
-# Run Soroban contract unit & integration tests
-cargo test
+# Build the WASM fixture and run contract unit tests
+make test
+
+# Run the initialized payment flow against local Quickstart
+# Requires Docker and Stellar CLI
+make integration-test
 
 # Format contract source files
 cargo fmt --check

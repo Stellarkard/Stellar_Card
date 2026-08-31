@@ -2,6 +2,16 @@
 
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import {
+  getOnboardingState,
+  initializeOnboarding,
+  completeStep as completeOnboardingStep,
+  skipOnboarding as skipOnboardingState,
+  nextStep as nextOnboardingStep,
+  previousStep as previousOnboardingStep,
+  shouldShowOnboarding,
+  getProgress,
+  type OnboardingState,
+} from '@/app/lib/onboarding';
   DEFAULT_ONBOARDING_STORAGE_KEY,
   readOnboardingCompleted,
   markOnboardingCompleted,
@@ -61,7 +71,30 @@ export function OnboardingProvider({
   const [isOpen, setIsOpen] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
 
+  // Initialize from persisted state
   useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const state = getOnboardingState();
+      if (state) {
+        setCurrentStepIndex(state.currentStep);
+        setIsCompleted(state.completed || state.skipped);
+        setIsOpen(shouldShowOnboarding());
+      } else if (shouldShowOnboarding()) {
+        initializeOnboarding();
+        setIsOpen(true);
+      }
+    }
+  }, []);
+
+  const currentStep = steps[currentStepIndex] || null;
+  const state = getOnboardingState();
+  const progress = state ? getProgress(state) : ((currentStepIndex + 1) / steps.length) * 100;
+
+  const nextStep = useCallback(() => {
+    if (currentStepIndex < steps.length - 1) {
+      const newIndex = currentStepIndex + 1;
+      setCurrentStepIndex(newIndex);
+      nextOnboardingStep();
     const completed = readOnboardingCompleted(storageKey);
     /* eslint-disable react-hooks/set-state-in-effect -- intentional hydration */
     if (completed) {
@@ -91,20 +124,40 @@ export function OnboardingProvider({
   }, [currentStepIndex, steps.length, completeOnboarding]);
 
   const previousStep = useCallback(() => {
+    if (currentStepIndex > 0) {
+      const newIndex = currentStepIndex - 1;
+      setCurrentStepIndex(newIndex);
+      previousOnboardingStep();
+    }
+  }, [currentStepIndex]);
+
+  const completeOnboarding = useCallback(() => {
+    setIsCompleted(true);
+    setIsOpen(false);
+    if (currentStep) {
+      completeOnboardingStep(currentStep.id);
+    }
+    onComplete?.();
+  }, [currentStep, onComplete]);
+
     if (canGoPrevious(currentStepIndex)) {
       setCurrentStepIndex(currentStepIndex - 1);
     }
   }, [currentStepIndex]);
 
   const skipOnboarding = useCallback(() => {
-    completeOnboarding();
+    skipOnboardingState();
+    setIsCompleted(true);
+    setIsOpen(false);
     onSkip?.();
-  }, [completeOnboarding, onSkip]);
+  }, [onSkip]);
 
   const startOnboarding = useCallback(() => {
     setIsOpen(true);
     setCurrentStepIndex(0);
     setIsCompleted(false);
+    initializeOnboarding();
+  }, []);
     clearOnboardingCompleted(storageKey);
   }, [storageKey]);
 

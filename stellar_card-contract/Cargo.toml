@@ -22,3 +22,9 @@ debug-assertions = false
 panic = "abort"
 codegen-units = 1
 lto = true
+incremental = false
+
+# Issue #422 (Part 4): Optimize all dependencies for WASM binary size
+[profile.release.package."*"]
+opt-level = "z"
+strip = "symbols"

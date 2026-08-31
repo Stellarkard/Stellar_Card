@@ -25,7 +25,8 @@
     "geist": "^1.7.0",
     "next": "16.2.4",
     "react": "19.2.5",
-    "react-dom": "19.2.5"
+    "react-dom": "19.2.5",
+    "react-window": "^1.8.10"
   },
   "optionalDependencies": {
     "@tailwindcss/oxide-linux-x64-gnu": "^4.2.2",
@@ -45,10 +46,12 @@
     "@storybook/nextjs-vite": "^10.4.6",
     "@storybook/react": "^10.4.6",
     "@storybook/react-vite": "^10.4.6",
+    "@storybook/test-runner": "^0.22.0",
     "@tailwindcss/postcss": "4.2.4",
     "@types/node": "20.19.39",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "@types/react-window": "^1.8.8",
     "@vitest/browser-playwright": "^4.1.5",
     "@vitest/coverage-v8": "^4.1.5",
     "@vitest/ui": "^4.1.5",
