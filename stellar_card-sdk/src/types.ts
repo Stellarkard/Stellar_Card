@@ -198,7 +198,7 @@ export interface OrderStatusHistory {
 }
 
 /** Specific order history event types for detailed tracking */
-export type OrderHistoryEventType = 
+export type OrderHistoryEventType =
   | 'payment_initiated'
   | 'payment_confirmed'
   | 'card_issued'
@@ -1095,8 +1095,6 @@ export function isOrderEventSubscription(value: unknown): value is OrderEventSub
     'active' in value &&
     typeof (value as { subscription_id: unknown }).subscription_id === 'string' &&
     typeof (value as { active: unknown }).active === 'boolean' &&
-    ['webhook', 'sse', 'polling'].includes(
-      (value as { transport: unknown }).transport as string,
-    )
+    ['webhook', 'sse', 'polling'].includes((value as { transport: unknown }).transport as string)
   );
 }
