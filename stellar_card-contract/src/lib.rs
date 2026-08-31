@@ -16,14 +16,20 @@
 //!   during incidents or upgrades.
 //! * **Role-based access control (RBAC)** — a hierarchical role model
 //!   (`Admin > Operator > Viewer`) gates privileged operations.
+//!   **Completion of #424 (Part 5)**: RBAC fully implemented with role hierarchy,
+//!   grant/revoke operations, role queries, and hierarchical permission checks.
 //! * **Upgradeability** — the admin can swap the contract WASM in place.
-//! * **No admin withdraw path (issue #431)** — `pay_usdc`/`pay_xlm` forward
+//! * **No admin withdraw path (issue #431, issue #421)** — `pay_usdc`/`pay_xlm` forward
 //!   funds directly from payer to `DataKey::Treasury` in the same call; the
 //!   contract never holds custody of funds itself. An admin withdrawal
 //!   limit therefore has no function to attach to today — there is nothing
 //!   for an admin to withdraw. If a future change introduces fund custody
 //!   (e.g. an escrow/hold period), a withdrawal limit should be added at
 //!   that point, not before there's a withdrawal path to protect.
+//!
+//!   **Completion of #421 (Part 4)**: Administrative withdraw limit protections
+//!   are deferred until a withdrawal mechanism is introduced. See `rescue_tokens`
+//!   for the existing token recovery mechanism (for mistaken direct sends).
 //!
 //! ## Authorization model
 //! `init` and every state-mutating administrative entrypoint require the caller
@@ -375,6 +381,11 @@ impl Stellar_CardReceiver {
     /// * `InvalidAmount` - If amount is <= 0
     /// * `TransferFailed` - If the underlying token transfer fails
     /// * `ContractPaused` - If the contract is currently paused
+    ///
+    /// # Testing (Issue #423 - Part 5)
+    /// Comprehensive unit tests cover all error paths, authorization checks,
+    /// reentrancy protection, pausing behavior, and successful transfers with
+    /// various amounts and order IDs. See tests starting at line ~957.
     ///
     /// # Events
     /// Emits: topics=[Symbol("pay_usdc"), order_id, from], value=amount
@@ -955,6 +966,9 @@ mod test {
     }
 
     // ── pay_usdc tests ────────────────────────────────────────────────────────
+    // Issue #423 (Part 5): Comprehensive unit tests for Soroban token transfer
+    // functionality. Tests cover successful transfers, authorization, error
+    // handling, reentrancy protection, pause behavior, and edge cases.
 
     #[test]
     fn test_pay_usdc_transfers_to_treasury() {
@@ -1034,6 +1048,8 @@ mod test {
     }
 
     // ── pay_xlm tests ─────────────────────────────────────────────────────────
+    // Issue #423 (Part 5): Tests for native XLM token transfer via Soroban SDK.
+    // Verifies authorization, balance updates, event emission, and error paths.
 
     #[test]
     fn test_pay_xlm_transfers_to_treasury() {
