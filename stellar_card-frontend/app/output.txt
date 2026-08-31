@@ -1,0 +1,123 @@
+C:\Users\USER\OneDrive\Desktop\Open Source 2\Stellar_Card\stellar_card-frontend\app
+├── affiliate
+|  └── page.tsx
+├── api
+|  ├── admin-proxy
+|  ├── auth
+|  └── feedback
+├── apple-icon.png
+├── blog
+|  ├── anatomy-of-a-cards402-order
+|  ├── claim-codes-credentials-that-never-touch-the-transcript
+|  ├── non-custodial-card-issuance-on-soroban
+|  ├── page.tsx
+|  ├── sse-beats-polling-for-agent-apis
+|  └── what-we-found-auditing-our-own-code
+├── careers
+|  └── page.tsx
+├── changelog
+|  ├── entries.ts
+|  ├── feed.xml
+|  └── page.tsx
+├── company
+|  └── page.tsx
+├── compare
+|  └── page.tsx
+├── components
+|  ├── AnnouncementBanner.stories.tsx
+|  ├── AnnouncementBanner.tsx
+|  ├── Breadcrumbs.stories.tsx
+|  ├── Breadcrumbs.tsx
+|  ├── CopyCodeBlock.stories.tsx
+|  ├── CopyCodeBlock.tsx
+|  ├── EmptyState.stories.tsx
+|  ├── EmptyState.tsx
+|  ├── ErrorBoundary.stories.tsx
+|  ├── ErrorBoundary.tsx
+|  ├── ErrorState.stories.tsx
+|  ├── ErrorState.tsx
+|  ├── GlobalStateProvider.stories.tsx
+|  ├── GlobalStateProvider.tsx
+|  ├── HeroCard.stories.tsx
+|  ├── HeroCard.tsx
+|  ├── index.ts
+|  ├── LazyLoad.tsx
+|  ├── LoadingState.stories.tsx
+|  ├── LoadingState.tsx
+|  ├── MarketingChrome.stories.tsx
+|  ├── MarketingChrome.tsx
+|  ├── MarketingPage.stories.tsx
+|  ├── MarketingPage.tsx
+|  ├── MobileDrawer.stories.tsx
+|  ├── MobileDrawer.tsx
+|  ├── navigation-components.test.tsx
+|  ├── NavLinks.stories.tsx
+|  ├── NavLinks.tsx
+|  ├── OnboardingFlow.tsx
+|  ├── ResponsiveNav.tsx
+|  ├── SectionLoadingState.tsx
+|  ├── state-components.test.tsx
+|  ├── TabNav.stories.tsx
+|  ├── TabNav.tsx
+|  ├── Wordmark.stories.tsx
+|  └── Wordmark.tsx
+├── dashboard
+|  ├── agents
+|  ├── alerts
+|  ├── analytics
+|  ├── approvals
+|  ├── audit
+|  ├── developer
+|  ├── feedback
+|  ├── layout.tsx
+|  ├── merchants
+|  ├── orders
+|  ├── overview
+|  ├── page.tsx
+|  ├── platform
+|  ├── settings
+|  ├── teams
+|  ├── _lib
+|  ├── _shell
+|  └── _ui
+├── docs
+|  ├── page.tsx
+|  └── quickstart
+├── error.tsx
+├── global-error.tsx
+├── globals.css
+├── icon.png
+├── layout.tsx
+├── legal
+|  └── cardholder-agreement
+├── lib
+|  ├── admin-session.ts
+|  ├── dynamic-imports.tsx
+|  ├── performance.ts
+|  ├── seo.ts
+|  ├── useAsyncState.ts
+|  └── useGlobalState.ts
+├── loading.tsx
+├── manifest.ts
+├── not-found.tsx
+├── opengraph-image.tsx
+├── page.tsx
+├── portal
+|  └── page.tsx
+├── press
+|  └── page.tsx
+├── pricing
+|  └── page.tsx
+├── privacy
+|  └── page.tsx
+├── robots.ts
+├── security
+|  └── page.tsx
+├── sitemap.ts
+├── status
+|  └── page.tsx
+└── terms
+   └── page.tsx
+
+directory: 46 file: 73
+
