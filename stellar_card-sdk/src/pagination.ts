@@ -210,7 +210,9 @@ export async function* mapPaginated<T, R>(
   }
 }
 
-// ── Order listing pagination wrapper (Issue #530) ──────────────────────────
+// ── Order listing pagination wrapper ────────────────────────────────────────
+// Issue #530; also closes #490, a duplicate "Part 1" issue filed for the
+// same feature.
 
 /**
  * Options for {@link createOrderPaginator}.

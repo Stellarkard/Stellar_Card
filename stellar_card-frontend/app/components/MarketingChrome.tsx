@@ -13,7 +13,7 @@ import { Wordmark } from './Wordmark';
 import type { MouseEvent, ReactNode } from 'react';
 
 export function MarketingChrome({ children }: { children: ReactNode }) {
-  const pathname = usePathname();
+  const pathname = usePathname() || '';
   const hideChrome = pathname.startsWith('/dashboard');
 
   if (hideChrome) {

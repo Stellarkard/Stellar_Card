@@ -107,6 +107,9 @@ const POLL_INTERVAL_MS = 1_000;
  * existing Soroban wallet flow, retries the protected resource with an
  * `Authorization: Payment` credential, and polls the receipt URL when
  * fulfillment is asynchronous.
+ *
+ * @param opts - Options for the MPP charge including URL, wallet name, and polling configurations.
+ * @returns A promise resolving to the MPP charge result containing card details and transaction information.
  */
 export async function mppCharge(opts: MppChargeOpts): Promise<MppChargeResult> {
   const url = resolveUrl(opts);

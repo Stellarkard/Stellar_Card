@@ -14,7 +14,7 @@ import { Button } from '../../_ui/Button';
 import { Toggle } from '../../_ui/Toggle';
 import { Input } from '../../_ui/Input';
 import { EmptyState } from '../../_ui/EmptyState';
-import { SpendChart } from '../../_ui/SpendChart';
+import { DynamicSpendChart } from '../../../lib/dynamic-imports';
 import { Drawer } from '../../_ui/Drawer';
 import { QrCode } from '../../_ui/QrCode';
 import { AgentStatePill } from '../../_ui/AgentStatePill';
@@ -38,11 +38,11 @@ export default function AgentDetailPage({ params }: PageProps) {
   const [groupDraft, setGroupDraft] = useState<string>('');
 
   // Keep the draft in sync whenever the stored group changes (e.g. after
-  // the user commits a new value or opens the page). This MUST be a
-  // useEffect — a setState inside useMemo is an anti-pattern that
-  // triggers React error #185 (infinite update loop).
+  // the user commits a new value or opens the page).
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- sync draft from external group storage */
     setGroupDraft(group ?? '');
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [group]);
 
   // Reuse hooks on every render but early-bail on missing data
@@ -202,7 +202,7 @@ export default function AgentDetailPage({ params }: PageProps) {
         </KpiRow>
 
         <Card title="Spend — last 14 days">
-          <SpendChart data={chartData} height={200} />
+          <DynamicSpendChart data={chartData} height={200} />
         </Card>
 
         <Card title="Recent orders" padding={0}>

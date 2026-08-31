@@ -19,13 +19,20 @@ interface Props {
   id?: string;
 }
 
-export function Toggle({ checked, onChange, label, description, children, id }: Props) {
+export function Toggle({
+  checked,
+  onChange,
+  label,
+  description,
+  children,
+  id,
+  'aria-label': ariaLabelProp,
+  'aria-describedby': ariaDescribedBy,
+  ...rest
+}: Props & { 'aria-label'?: string; 'aria-describedby'?: string }) {
   const labelId = id ? `${id}-label` : undefined;
-  'aria-label'?: string;
-  'aria-describedby'?: string;
-}
+  const ariaLabel = ariaLabelProp || (typeof label === 'string' ? label : 'Toggle switch');
 
-export function Toggle({ checked, onChange, label, description, children, ...rest }: Props) {
   return (
     <div
       style={{
@@ -37,18 +44,15 @@ export function Toggle({ checked, onChange, label, description, children, ...res
       }}
     >
       <button
+        {...rest}
         id={id}
         type="button"
         role="switch"
         aria-checked={checked}
         aria-labelledby={labelId}
-        aria-label={typeof label === 'string' ? label : undefined}
-        onClick={() => onChange(!checked)}
-        type="button"
-        role="switch"
-        aria-checked={checked}
         aria-label={rest['aria-label'] || (typeof label === 'string' ? label : 'Toggle switch')}
         aria-describedby={rest['aria-describedby']}
+        onClick={() => onChange(!checked)}
         style={{
           marginTop: 2,
           width: 30,

@@ -12,8 +12,7 @@ describe("shared dashboard ui components", () => {
       createElement(Button, {
         variant: "primary",
         icon: createElement("svg", { viewBox: "0 0 10 10" }),
-        children: "Save changes",
-      }),
+      }, "Save changes"),
     );
 
     expect(markup).toContain('aria-label="Save changes"');
@@ -51,8 +50,7 @@ describe("shared dashboard ui components", () => {
         onChange: () => {},
         label: "Auto reload",
         description: "Refreshes the dashboard automatically",
-        children: createElement("span", null, "Every 5 minutes"),
-      }),
+      }, createElement("span", null, "Every 5 minutes")),
     );
 
     expect(markup).toContain('role="switch"');

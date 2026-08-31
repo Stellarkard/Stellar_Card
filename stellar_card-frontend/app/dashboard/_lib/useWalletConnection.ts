@@ -3,7 +3,7 @@
 
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, createContext, useContext } from 'react';
 import type { WalletConnectionState } from './walletConnection';
 import {
   getWalletStateLabel,
@@ -47,7 +47,9 @@ export interface UseWalletConnectionReturn {
   retry: () => void;
 }
 
-export function useWalletConnection(
+export const MockWalletContext = createContext<UseWalletConnectionReturn | null>(null);
+
+function useWalletConnectionStateImpl(
   options: UseWalletConnectionOptions = {},
 ): UseWalletConnectionReturn {
   const {
@@ -201,4 +203,12 @@ export function useWalletConnection(
     clearError,
     retry,
   };
+}
+
+export function useWalletConnection(
+  options: UseWalletConnectionOptions = {},
+): UseWalletConnectionReturn {
+  const mockContext = useContext(MockWalletContext);
+  const impl = useWalletConnectionStateImpl(options);
+  return mockContext ?? impl;
 }
