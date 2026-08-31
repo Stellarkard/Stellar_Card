@@ -47,6 +47,11 @@ export const DynamicSpendChart = dynamic(
   }
 );
 
+export const DynamicHorizontalBar = dynamic(
+  () => import('../dashboard/_ui/HorizontalBar').then((mod) => mod.HorizontalBar),
+  { ssr: true }
+);
+
 export const DynamicQrCode = dynamic(
   () => import('../dashboard/_ui/QrCode').then((mod) => mod.QrCode),
   { ssr: false }

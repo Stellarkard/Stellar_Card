@@ -138,7 +138,7 @@ export function CreateAgentDrawer({ open, onClose }: Props) {
               lineHeight: 1.55,
             }}
           >
-            Pick a label for the agent. You'll get a one-time claim code your agent's CLI trades for
+            Pick a label for the agent. You&apos;ll get a one-time claim code your agent&apos;s CLI trades for
             its api key — the raw key never leaves this page.
           </div>
           <div>

@@ -16,9 +16,8 @@ import type { WalletInfo } from '../stellar';
 
 // Mock the Horizon server and Soroban calls
 vi.mock('@stellar/stellar-sdk', async () => {
-  const actual = await vi.importActual<typeof import('@stellar/stellar-sdk')>(
-    '@stellar/stellar-sdk',
-  );
+  const actual =
+    await vi.importActual<typeof import('@stellar/stellar-sdk')>('@stellar/stellar-sdk');
   return {
     ...actual,
     Horizon: {

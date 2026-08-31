@@ -56,7 +56,7 @@ export default function ApprovalsPage() {
           {approvals.length} pending{' '}
           {approvals.length > 0 && (
             <span>
-              · orders that exceeded an agent's approval threshold and need a human decision
+              · orders that exceeded an agent&apos;s approval threshold and need a human decision
             </span>
           )}
         </div>
@@ -141,7 +141,7 @@ export default function ApprovalsPage() {
                         border: '1px solid var(--border)',
                       }}
                     >
-                      "{a.agent_note}"
+                      &quot;{a.agent_note}&quot;
                     </div>
                   )}
                 </div>

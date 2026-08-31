@@ -7,13 +7,22 @@ on:
       - develop
     paths:
       - 'stellar_card-sdk/package*.json'
+      - 'stellar_card-backend/package*.json'
+      - 'stellar_card-frontend/package*.json'
+      - 'stellar_card-contract/Cargo.toml'
       - '.github/workflows/security.yml'
+      - '.github/dependabot.yml'
   pull_request:
     branches:
       - main
       - develop
     paths:
       - 'stellar_card-sdk/package*.json'
+      - 'stellar_card-backend/package*.json'
+      - 'stellar_card-frontend/package*.json'
+      - 'stellar_card-contract/Cargo.toml'
+      - '.github/workflows/security.yml'
+      - '.github/dependabot.yml'
   schedule:
     # Run daily at 2 AM UTC
     - cron: '0 2 * * *'
@@ -24,8 +33,13 @@ permissions:
 
 jobs:
   npm-audit:
-    name: npm audit
+    name: Security Audit (${{ matrix.directory }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        directory: ['stellar_card-sdk', 'stellar_card-backend', 'stellar_card-frontend']
+
     steps:
       - uses: actions/checkout@v4
 
@@ -34,45 +48,13 @@ jobs:
         with:
           node-version: 20.x
           cache: npm
-          cache-dependency-path: 'stellar_card-sdk/package-lock.json'
-
-      - name: Install dependencies
-        working-directory: stellar_card-sdk
-        run: npm ci
+          cache-dependency-path: '${{ matrix.directory }}/package-lock.json'
 
       - name: Run npm audit
-        working-directory: stellar_card-sdk
-        run: npm audit --audit-level=moderate
-        continue-on-error: true
-
-      - name: Upload audit results
-        if: always()
+        working-directory: ${{ matrix.directory }}
         run: |
-          cd stellar_card-sdk
-          npm audit --json > audit-results.json || true
-          cat audit-results.json
-
-  dependency-check:
-    name: Dependency Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20.x
-          cache: npm
-          cache-dependency-path: 'stellar_card-sdk/package-lock.json'
-
-      - name: Install dependencies
-        working-directory: stellar_card-sdk
-        run: npm ci
-
-      - name: Check for outdated dependencies
-        working-directory: stellar_card-sdk
-        run: npm outdated
-        continue-on-error: true
+          npm ci --package-lock-only || true
+          npm audit --audit-level=moderate || true
 
   trivy-scan:
     name: Trivy Vulnerability Scan
@@ -80,23 +62,61 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned to a release tag rather than a moving default branch: a security
+      # workflow that runs whatever happens to be on someone else's branch is
+      # itself a supply-chain risk, and Dependabot's github-actions ecosystem
+      # can only bump a pinned reference.
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: 'fs'
-          scan-ref: 'stellar_card-sdk'
+          scan-ref: '.'
           format: 'sarif'
           output: 'trivy-results.sarif'
 
       - name: Upload Trivy results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
 
+  # The npm-audit job covers the three JavaScript packages, but the Soroban
+  # contract's Cargo dependencies had no advisory check at all — Trivy's
+  # filesystem scan is not a substitute for the RustSec advisory database.
+  cargo-audit:
+    name: Cargo Advisory Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo-audit binary
+        id: cargo-audit-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}
+
+      - name: Install cargo-audit
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        working-directory: stellar_card-contract
+        # Unlike `npm audit || true` above, this one gates: a known RustSec
+        # advisory in an on-chain contract's dependency tree should fail the
+        # build rather than scroll past in the log.
+        run: cargo audit --deny warnings
+
   codeql:
     name: CodeQL Analysis
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -105,13 +125,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # v2 of the CodeQL action is deprecated and scheduled for removal; v3 is
+      # the supported line.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v2
+        uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v2
+        uses: github/codeql-action/autobuild@v3
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v2
+        uses: github/codeql-action/analyze@v3

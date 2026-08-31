@@ -5,16 +5,21 @@
 
 'use client';
 
-import { useEffect, useRef, useCallback } from 'react';
+import { useRef, type ReactNode } from 'react';
+import { useFocusTrap } from '../dashboard/_lib/useFocusTrap';
 
 interface Props {
   open: boolean;
   onClose: () => void;
+
   children: React.ReactNode;
   /** Optional ARIA label for the drawer */
   ariaLabel?: string;
   /** Width of the drawer in pixels */
   width?: number;
+
+  children: ReactNode;
+
 }
 
 export function MobileDrawer({
@@ -25,6 +30,7 @@ export function MobileDrawer({
   width = 260,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
+
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const previousActiveElementRef = useRef<Element | null>(null);
 
@@ -106,6 +112,18 @@ export function MobileDrawer({
     };
   }, [open, handleKeyDown]);
 
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  useFocusTrap({
+    active: open,
+    containerRef: panelRef,
+    initialFocusRef: closeRef,
+    onEscape: onClose,
+    restoreFocus: true,
+    lockScroll: true,
+  });
+
+
   // Handle click outside
   const handleOverlayClick = useCallback(
     (e: React.MouseEvent) => {
@@ -120,6 +138,8 @@ export function MobileDrawer({
     <>
       {open && (
         <div
+          role="presentation"
+          aria-hidden="true"
           className="mobile-drawer-overlay"
           onClick={handleOverlayClick}
           aria-hidden="true"
@@ -128,13 +148,21 @@ export function MobileDrawer({
             inset: 0,
             background: 'rgba(0, 0, 0, 0.6)',
             zIndex: 90,
+
             transition: 'opacity 300ms var(--ease-out)',
             opacity: open ? 1 : 0,
+
+            backdropFilter: 'blur(2px)',
+            WebkitBackdropFilter: 'blur(2px)',
+
           }}
         />
       )}
       <div
         ref={panelRef}
+        role="dialog"
+        aria-modal={open ? 'true' : undefined}
+        aria-label="Navigation drawer"
         className={`mobile-drawer${open ? ' mobile-drawer--open' : ''}`}
         role="dialog"
         aria-modal="true"
@@ -154,6 +182,7 @@ export function MobileDrawer({
           overscrollBehavior: 'contain',
           display: 'flex',
           flexDirection: 'column',
+          visibility: open ? 'visible' : 'hidden',
         }}
       >
         <div
@@ -179,7 +208,12 @@ export function MobileDrawer({
             Navigation
           </span>
           <button
+
             ref={closeButtonRef}
+
+            ref={closeRef}
+            type="button"
+
             onClick={onClose}
             aria-label="Close navigation drawer"
             type="button"
@@ -190,9 +224,9 @@ export function MobileDrawer({
               alignItems: 'center',
               justifyContent: 'center',
               background: 'transparent',
-              border: '1px solid var(--border)',
+              border: 'none',
               borderRadius: 6,
-              color: 'var(--fg-muted)',
+              color: 'var(--fg-dim)',
               cursor: 'pointer',
               transition: 'background 0.2s var(--ease-out), border-color 0.2s var(--ease-out)',
               padding: 0,
@@ -206,6 +240,7 @@ export function MobileDrawer({
               (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--border)';
             }}
           >
+
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
               <path
                 d="M3 3L13 13M13 3L3 13"
@@ -217,6 +252,25 @@ export function MobileDrawer({
           </button>
         </div>
         <div style={{ flex: 1, padding: '0.5rem', overflowY: 'auto' }}>{children}</div>
+
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 14 14"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              aria-hidden="true"
+            >
+              <path d="M1 1l12 12M13 1L1 13" />
+            </svg>
+          </button>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0.5rem 0' }}>
+          {children}
+        </div>
+
       </div>
     </>
   );

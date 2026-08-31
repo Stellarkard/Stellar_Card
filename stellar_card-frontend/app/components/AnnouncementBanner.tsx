@@ -16,7 +16,7 @@
 // layout.tsx or MarketingChrome when you actually have something to
 // announce.
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 
@@ -53,23 +53,14 @@ const TONE_STYLES: Record<Tone, { bg: string; border: string; dot: string; text:
 
 export function AnnouncementBanner({ id, href, tone = 'info', children }: Props) {
   const storageKey = `stellar_card.announcement.dismissed.${id}`;
-  const [dismissed, setDismissed] = useState<boolean | null>(null);
-
-  // Resolve the dismissed state after mount. We deliberately render
-  // nothing on the server (dismissed === null) and only show the
-  // banner once the effect below has read localStorage, otherwise
-  // SSR markup wouldn't match the first client paint and React 19
-  // would throw a hydration mismatch. The trade is a one-frame
-  // pop-in on the first visit — preferred over the alternative of
-  // the banner flashing visible and then disappearing for anyone
-  // who'd previously dismissed it.
-  useEffect(() => {
+  const [dismissed, setDismissed] = useState<boolean | null>(() => {
+    if (typeof window === 'undefined') return null;
     try {
-      setDismissed(window.localStorage.getItem(storageKey) === '1');
+      return window.localStorage.getItem(storageKey) === '1';
     } catch {
-      setDismissed(false);
+      return false;
     }
-  }, [storageKey]);
+  });
 
   if (dismissed === null || dismissed === true) return null;
 
