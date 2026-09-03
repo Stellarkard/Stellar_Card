@@ -1,4 +1,4 @@
-// Comprehensive tests for route-level lazy loading utilities (Part 2)
+// Comprehensive tests for route-level lazy loading utilities (Part 4)
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
@@ -7,7 +7,36 @@ import {
   batchPreload,
   RoutePreloadManager,
   routePreloadManager,
+  preloadCriticalRoutes,
 } from "../dynamic-routes";
+
+describe("RoutePreloadManager extended (Part 4)", () => {
+  let manager: RoutePreloadManager;
+
+  beforeEach(() => {
+    manager = new RoutePreloadManager();
+  });
+
+  it("exposes queue, loaded routes inspectability, and clear method", async () => {
+    const loader1 = vi.fn().mockResolvedValue({ default: () => null });
+    const loader2 = vi.fn().mockResolvedValue({ default: () => null });
+
+    manager.add({ path: "/orders", loader: loader1, priority: "high" });
+    manager.add({ path: "/settings", loader: loader2, priority: "low" });
+
+    expect(manager.getQueue().length).toBe(2);
+    expect(manager.hasRoute("/orders")).toBe(false);
+
+    await manager.loadNext();
+    expect(manager.hasRoute("/orders")).toBe(true);
+    expect(manager.getLoadedRoutes()).toContain("/orders");
+
+    manager.clear();
+    expect(manager.getQueue().length).toBe(0);
+    expect(manager.getLoadedRoutes().length).toBe(0);
+    expect(manager.hasRoute("/orders")).toBe(false);
+  });
+});
 
 describe("createLazyRoute", () => {
   it("creates a lazy component with default options", () => {

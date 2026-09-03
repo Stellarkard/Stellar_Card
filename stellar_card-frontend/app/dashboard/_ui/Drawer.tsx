@@ -12,14 +12,20 @@ interface Props {
   title?: ReactNode;
   description?: ReactNode;
   width?: number;
+  ariaLabel?: string;
+  ariaDescribedBy?: string;
+  role?: 'dialog' | 'alertdialog';
   children: ReactNode;
 }
 
-export function Drawer({ open, onClose, title, description, width = 420, children }: Props) {
-  const titleId = useId();
-  const descriptionId = useId();
+export function Drawer({ open, onClose, title, description, width = 420, ariaLabel, ariaDescribedBy, role = 'dialog', children }: Props) {
+  const autoTitleId = useId();
+  const autoDescriptionId = useId();
   const drawerRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+
+  const resolvedLabelledBy = ariaLabel ? undefined : (title ? autoTitleId : undefined);
+  const resolvedDescribedBy = ariaDescribedBy ?? (description ? autoDescriptionId : undefined);
 
   useFocusTrap({
     active: open,
@@ -57,10 +63,11 @@ export function Drawer({ open, onClose, title, description, width = 420, childre
       />
       <div
         ref={drawerRef}
-        role="dialog"
+        role={role}
         aria-modal="true"
-        aria-labelledby={title ? titleId : undefined}
-        aria-describedby={description ? descriptionId : undefined}
+        aria-label={ariaLabel}
+        aria-labelledby={resolvedLabelledBy}
+        aria-describedby={resolvedDescribedBy}
         style={{
           position: 'relative',
           width,
@@ -84,15 +91,17 @@ export function Drawer({ open, onClose, title, description, width = 420, childre
           }}
         >
           <div>
-            <div
-              id={titleId}
-              style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--fg)' }}
-            >
-              {title}
-            </div>
+            {title && (
+              <div
+                id={autoTitleId}
+                style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--fg)' }}
+              >
+                {title}
+              </div>
+            )}
             {description && (
               <div
-                id={descriptionId}
+                id={autoDescriptionId}
                 style={{ fontSize: '0.72rem', color: 'var(--fg-dim)', marginTop: '0.2rem' }}
               >
                 {description}
