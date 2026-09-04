@@ -678,7 +678,7 @@ impl Stellar_CardReceiver {
         new_admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().instance().extend_ttl(17_280_000, 17_280_000);
+        Self::extend_instance_ttl(&env);
 
         // Emit admin transfer event (Issue #428 - Part 5)
         env.events().publish(

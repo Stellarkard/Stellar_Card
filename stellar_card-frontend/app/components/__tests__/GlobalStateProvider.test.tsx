@@ -4,6 +4,8 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { GlobalStateProvider } from "../GlobalStateProvider";
 
+// Avoid 'it " syntax - use it(" instead
+
 describe("GlobalStateProvider", () => {
   const mockChildren = vi.fn(() => <div>Content</div>);
 
@@ -181,5 +183,56 @@ describe("GlobalStateProvider", () => {
     );
 
     expect(screen.getByText("Failed to load")).toBeInTheDocument();
+  });
+
+  it("renders loading with custom avatar and title", () => {
+    const { container } = render(
+      <GlobalStateProvider
+        status="loading"
+        loadingLines={8}
+        loadingAvatar={true}
+        loadingTitle={true}
+      >
+        {mockChildren}
+      </GlobalStateProvider>,
+    );
+
+    // Should have avatar and title skeletons
+    const hasAvatar = container.querySelector('[data-test="skeleton-avatar"]');
+    const hasTitle = container.querySelector('[data-test="skeleton-title"]');
+    expect(hasAvatar).toBeInTheDocument();
+    expect(hasTitle).toBeInTheDocument();
+  });
+
+  it("renders error with digest message", () => {
+    const error = new Error("Validation failed");
+    error.name = "ValidationError";
+
+    render(
+      <GlobalStateProvider status="error" error={error} errorTitle="Error">
+        {mockChildren}
+      </GlobalStateProvider>,
+    );
+
+    expect(screen.getByText("ValidationError")).toBeInTheDocument();
+    expect(screen.getByText("Failed to load")).toBeInTheDocument();
+  });
+
+  it("renders error action when provided", () => {
+    const handleRetry = vi.fn();
+
+    render(
+      <GlobalStateProvider
+        status="error"
+        error={new Error("Error")}
+        onRetry={handleRetry}
+        errorAction={<button>Custom action</button>}
+      >
+        {mockChildren}
+      </GlobalStateProvider>,
+    );
+
+    const actionButton = screen.getByText("Custom action");
+    expect(actionButton).toBeInTheDocument();
   });
 });

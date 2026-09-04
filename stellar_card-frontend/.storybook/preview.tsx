@@ -2,18 +2,43 @@ import type { Preview } from '@storybook/react';
 import '../app/globals.css';
 
 import { ThemeProvider } from '../app/dashboard/_lib/ThemeProvider';
-import { useWalletConnection, MockWalletContext } from '../app/dashboard/_lib/useWalletConnection';
+import { useWalletConnection, MockWalletContext, MockWalletSandboxProvider, useWalletSandbox } from '../app/dashboard/_lib/useWalletConnection';
+import { useState } from 'react';
 
 // Helper component to manage mock wallet state inside Storybook
 const StorybookMockWalletProvider = ({ children }: { children: React.ReactNode }) => {
-  // Since this is outside the MockWalletContext.Provider, it will call the real implementation
-  // and manage its own state internally, which we then provide to the stories.
   const wallet = useWalletConnection();
   
   return (
     <MockWalletContext.Provider value={wallet}>
       {children}
     </MockWalletContext.Provider>
+  );
+};
+
+// Helper component for wallet sandbox testing - allows stories to toggle wallet states
+const StorybookWalletSandbox = ({ children }: { children: React.ReactNode }) => {
+  const [state, setState] = useState<'disconnected' | 'connecting' | 'connected' | 'error' | 'insufficient_balance' | 'network_mismatch'>('disconnected');
+  
+  const stateMap: Record<string, WalletConnectionState> = {
+    disconnected: 'disconnected',
+    connecting: 'connecting',
+    connected: 'connected',
+    error: 'error',
+    insufficient_balance: 'insufficient_balance',
+    network_mismatch: 'network_mismatch',
+  };
+
+  const toggleState = useCallback((newState: keyof typeof stateMap) => {
+    setState(stateMap[newState]);
+  }, []);
+
+  return (
+    <MockWalletSandboxContext.Provider value={{ state, setState: toggleState, reset: () => setState('disconnected') }}>
+      <StorybookMockWalletProvider>
+        {children}
+      </StorybookMockWalletProvider>
+    </MockWalletSandboxContext.Provider>
   );
 };
 
@@ -57,7 +82,7 @@ const preview: Preview = {
   decorators: [
     (Story) => (
       <ThemeProvider>
-        <StorybookMockWalletProvider>
+        <StorybookWalletSandbox>
           <div
             style={{
               padding: '2rem',
@@ -69,7 +94,7 @@ const preview: Preview = {
           >
             <Story />
           </div>
-        </StorybookMockWalletProvider>
+        </StorybookWalletSandbox>
       </ThemeProvider>
     ),
   ],
