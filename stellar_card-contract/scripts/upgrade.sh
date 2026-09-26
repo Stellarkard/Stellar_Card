@@ -48,15 +48,15 @@ echo ""
 if [[ -z "$WASM_PATH" ]]; then
   echo "[1/3] Building and optimizing WASM..."
   cd "$CONTRACT_DIR"
-  cargo build --target wasm32-unknown-unknown --release
+  cargo build --target wasm32v1-none --release
 
   OPTIMIZED_DIR="$CONTRACT_DIR/target/optimized"
   mkdir -p "$OPTIMIZED_DIR"
   WASM_PATH="$OPTIMIZED_DIR/stellar_card_receiver.optimized.wasm"
 
   stellar contract optimize \
-    --wasm "target/wasm32-unknown-unknown/release/stellar_card_receiver.wasm" \
-    --output "$WASM_PATH"
+    --wasm "target/wasm32v1-none/release/stellar_card_receiver.wasm" \
+    --wasm-out "$WASM_PATH"
 else
   echo "[1/3] Using provided WASM: $WASM_PATH"
 fi

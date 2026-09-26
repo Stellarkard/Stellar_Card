@@ -323,3 +323,85 @@ fn init_cannot_be_replayed_after_deployment() {
     assert_eq!(net.client().admin(), net.admin);
     assert_eq!(net.client().treasury(), net.treasury);
 }
+
+// ── Issue #390 (Part 1): deployment validation and withdraw protections ──────
+
+/// Deploys the native XLM Stellar Asset Contract, as it exists on every real
+/// network. XDR `Asset::Native` is its 4-byte discriminant, 0.
+fn native_xlm_sac(env: &Env) -> Address {
+    env.deployer()
+        .with_stellar_asset(Bytes::from_array(env, &[0u8; 4]))
+        .deploy()
+}
+
+#[test]
+fn deployment_rejects_swapped_token_arguments_then_accepts_the_fix() {
+    // Mirrors a real deployment: XLM is the network's native asset SAC and
+    // USDC an issued asset. Passing them in the wrong order is caught at
+    // init, before the contract goes live, and the deployer can retry.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let usdc = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    let xlm = native_xlm_sac(&env);
+    let receiver = env.register(Stellar_CardReceiver, ());
+    let client = Stellar_CardReceiverClient::new(&env, &receiver);
+
+    assert!(client.try_init(&admin, &treasury, &xlm, &usdc).is_err());
+    assert!(client.try_admin().is_err());
+
+    client.init(&admin, &treasury, &usdc, &xlm);
+    assert_eq!(client.usdc_contract(), usdc);
+    assert_eq!(client.xlm_contract(), xlm);
+}
+
+#[test]
+fn withdraw_budget_is_visible_and_protected_through_a_rescue_incident() {
+    let net = Network::deploy();
+    let client = net.client();
+    let destination = Address::generate(&net.env);
+    net.mint(&net.usdc, &net.receiver, 3_000_000);
+
+    // A per-call limit above the daily one is refused outright, leaving no
+    // limits configured rather than a half-applied pair.
+    assert!(client
+        .try_set_withdraw_limits(&net.admin, &Some(3_000_000), &Some(1_000_000))
+        .is_err());
+    assert_eq!(client.withdraw_limits(), (None, None));
+
+    client.set_withdraw_limits(&net.admin, &Some(1_000_000), &Some(2_000_000));
+    assert_eq!(client.withdrawn_today(), 0);
+
+    // Pointing the rescue back at the receiver is rejected and costs none
+    // of the day's budget.
+    assert_eq!(
+        client.try_rescue_tokens(&net.admin, &net.usdc, &net.receiver, &1_000_000),
+        Err(Ok(Error::InvalidRecipient))
+    );
+    assert_eq!(client.withdrawn_today(), 0);
+
+    client.rescue_tokens(&net.admin, &net.usdc, &destination, &1_000_000);
+    assert_eq!(
+        net.event_names(),
+        std::vec![net.sym("tokens_rescued")],
+        "a successful rescue emits exactly one event"
+    );
+    client.rescue_tokens(&net.admin, &net.usdc, &destination, &1_000_000);
+    assert_eq!(client.withdrawn_today(), 2_000_000);
+    assert_eq!(
+        client.try_rescue_tokens(&net.admin, &net.usdc, &destination, &1),
+        Err(Ok(Error::DailyWithdrawLimitExceeded))
+    );
+
+    // Next day: the view and the budget both reset.
+    net.env.ledger().with_mut(|li| li.timestamp += 86_400);
+    assert_eq!(client.withdrawn_today(), 0);
+    client.rescue_tokens(&net.admin, &net.usdc, &destination, &1_000_000);
+    assert_eq!(client.withdrawn_today(), 1_000_000);
+
+    assert_eq!(net.balance(&net.usdc, &destination), 3_000_000);
+    assert_eq!(net.balance(&net.usdc, &net.receiver), 0);
+}

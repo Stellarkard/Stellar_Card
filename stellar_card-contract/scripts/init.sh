@@ -5,9 +5,6 @@ set -euo pipefail
 # This stores the admin, treasury, USDC, and XLM contract addresses.
 # Usage: ./scripts/init.sh --network testnet --contract-id <ID> --admin <G...> --treasury <G...> --usdc <C...> --xlm <C...>
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONTRACT_DIR="$(dirname "$SCRIPT_DIR")"
-
 NETWORK="testnet"
 IDENTITY="deployer"
 CONTRACT_ID=""

@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 NETWORK="${1:-testnet}"
 CONTRACT_NAME="stellar_card_receiver"
-WASM_PATH="$PROJECT_ROOT/target/wasm32-unknown-unknown/release/${CONTRACT_NAME}.wasm"
+WASM_PATH="$PROJECT_ROOT/target/wasm32v1-none/release/${CONTRACT_NAME}.wasm"
 OPTIMIZED_WASM="${WASM_PATH%.wasm}.optimized.wasm"
 IDENTITY="${DEPLOYER_KEY:-deployer}"
 OUTPUT_FILE="${PROJECT_ROOT}/.contract_id"
@@ -40,7 +40,7 @@ echo ""
 
 echo "[1/4] Building contract..."
 cd "$PROJECT_ROOT"
-if ! cargo build --target wasm32-unknown-unknown --release 2>&1 | tail -20; then
+if ! cargo build --target wasm32v1-none --release 2>&1 | tail -20; then
   echo "Error: Failed to build contract"
   exit 1
 fi

@@ -39,11 +39,19 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      - name: Lint shell scripts
+        run: make integration-test-lint
+
       - name: Run unit tests
         run: make test
 
       - name: Build release WASM and check binary size
         run: make build
 
+      # Reuses the optimized WASM from the build step (the script deploys
+      # it rather than the raw build, matching deploy.sh). Container logs
+      # are dumped automatically when a scenario fails.
       - name: Run local-network integration test
+        env:
+          SKIP_BUILD: '1'
         run: make integration-test
