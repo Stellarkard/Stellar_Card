@@ -71,7 +71,7 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env,
-    Symbol, Vec,
+    String, Symbol, Vec,
 };
 
 /// Instance storage is extended to this many ledgers (~1000 days at 5s
@@ -94,6 +94,11 @@ const INSTANCE_TTL_THRESHOLD: u32 = INSTANCE_TTL_MAX / 2;
 /// SACs this contract is built for — uses 7, and `pay_usdc`/`pay_xlm`
 /// document their `amount` in 7-decimal base units.
 const TOKEN_DECIMALS: u32 = 7;
+
+/// `name()` reported by the native XLM Stellar Asset Contract. Issued
+/// assets' SACs report `"CODE:ISSUER"` instead, so this identifies the
+/// native asset unambiguously (Issue #389 - Part 1).
+const NATIVE_ASSET_NAME: &str = "native";
 
 /// Represents user roles in the contract with hierarchical permissions.
 ///
@@ -188,7 +193,9 @@ impl Stellar_CardReceiver {
     /// is written (Issue #399 - Part 2): the receiver contract can't be used
     /// for any role; the admin can't be the treasury or a token contract;
     /// the token contracts must differ and not double as the treasury; and
-    /// both must implement the token interface with 7 decimals.
+    /// both must implement the token interface with 7 decimals; and the
+    /// native XLM asset can't be passed as `usdc_contract` (Issue #389 -
+    /// Part 1), which would mean the two token arguments are swapped.
     ///
     /// # Events (Issue #428 - Part 5)
     /// Emits: topics=[Symbol("init"), admin], value=(treasury, usdc_contract, xlm_contract)
@@ -271,6 +278,9 @@ impl Stellar_CardReceiver {
     ///   and report [`TOKEN_DECIMALS`], the precision `pay_usdc`/`pay_xlm`
     ///   amounts are documented in. A token with any other precision would
     ///   silently mis-scale every payment by a power of ten.
+    /// * `usdc_contract` must not be the native XLM asset contract (Issue
+    ///   #389 - Part 1), which catches the USDC/XLM arguments being passed
+    ///   in swapped order.
     ///
     /// # Panics
     /// Panics with a message naming the offending parameter on the first
@@ -332,6 +342,26 @@ impl Stellar_CardReceiver {
             Ok(Ok(_)) => panic!("xlm_contract must use 7 decimals"),
             _ => panic!("xlm_contract does not implement the token interface"),
         }
+
+        // Issue #389 (Part 1): the decimals probe can't tell USDC and XLM
+        // apart — both SACs report 7 — so swapping the two arguments would
+        // pass every check above and silently route every `pay_usdc` through
+        // native XLM. The native asset's SAC is the only one whose `name()`
+        // is "native" (issued assets report "CODE:ISSUER"), so it identifies
+        // the swap exactly. `name()` is only consulted, not required: the
+        // decimals probe above is what establishes the token interface.
+        if Self::is_native_asset(env, usdc_contract) {
+            panic!("usdc_contract cannot be the native XLM asset contract");
+        }
+    }
+
+    /// Returns whether `token_contract` is the native XLM Stellar Asset
+    /// Contract, i.e. answers `name()` with `NATIVE_ASSET_NAME`.
+    fn is_native_asset(env: &Env, token_contract: &Address) -> bool {
+        matches!(
+            token::Client::new(env, token_contract).try_name(),
+            Ok(Ok(name)) if name == String::from_str(env, NATIVE_ASSET_NAME)
+        )
     }
 
     /// Acquires the reentrancy guard to prevent reentrant calls.
@@ -1479,6 +1509,78 @@ mod test {
         f.init();
         assert_eq!(client.admin(), f.admin);
         assert_eq!(client.get_role(&f.admin), Some(Role::Admin));
+    }
+
+    // ── native-asset validation (issue #389) ──────────────────────────────────
+
+    /// Deploys the native XLM Stellar Asset Contract. XDR `Asset::Native` is
+    /// its 4-byte discriminant, 0.
+    fn register_native_sac(env: &Env) -> Address {
+        env.deployer()
+            .with_stellar_asset(Bytes::from_array(env, &[0u8; 4]))
+            .deploy()
+    }
+
+    /// A 7-decimal token that doesn't implement `name()`.
+    mod seven_decimal_token_without_name {
+        use soroban_sdk::{contract, contractimpl, Env};
+
+        #[contract]
+        pub struct NamelessToken;
+
+        #[contractimpl]
+        impl NamelessToken {
+            pub fn decimals(_env: Env) -> u32 {
+                7
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "usdc_contract cannot be the native XLM asset contract")]
+    fn test_init_rejects_native_xlm_sac_as_usdc_contract() {
+        // Both SACs report 7 decimals, so only the native-asset check can
+        // catch USDC and XLM being passed in swapped order.
+        let f = Fixture::new();
+        let native = register_native_sac(&f.env);
+        f.client().init(&f.admin, &f.treasury, &native, &f.usdc);
+    }
+
+    #[test]
+    fn test_init_accepts_native_xlm_sac_as_xlm_contract() {
+        let f = Fixture::new();
+        let native = register_native_sac(&f.env);
+        f.client().init(&f.admin, &f.treasury, &f.usdc, &native);
+        assert_eq!(f.client().xlm_contract(), native);
+        assert_eq!(f.client().usdc_contract(), f.usdc);
+    }
+
+    #[test]
+    fn test_init_accepts_usdc_contract_without_name() {
+        // `name()` is only consulted to spot the native asset; the decimals
+        // probe alone decides whether an address is a token.
+        let f = Fixture::new();
+        let token = f
+            .env
+            .register(seven_decimal_token_without_name::NamelessToken, ());
+        f.client().init(&f.admin, &f.treasury, &token, &f.xlm_sac);
+        assert_eq!(f.client().usdc_contract(), token);
+    }
+
+    #[test]
+    fn test_swapped_token_init_leaves_contract_uninitialized_and_retryable() {
+        let f = Fixture::new();
+        let client = f.client();
+        let native = register_native_sac(&f.env);
+
+        assert!(client
+            .try_init(&f.admin, &f.treasury, &native, &f.usdc)
+            .is_err());
+        assert!(client.try_admin().is_err());
+        assert_eq!(contract_event_count(&f.env, &f.contract_id, "init"), 0);
+
+        client.init(&f.admin, &f.treasury, &f.usdc, &native);
+        assert_eq!(client.xlm_contract(), native);
     }
 
     #[test]
