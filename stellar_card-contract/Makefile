@@ -1,4 +1,4 @@
-.PHONY: build optimize test contract-integration-test integration-test wasm-size
+.PHONY: build optimize test contract-integration-test integration-test integration-test-lint wasm-size
 
 # Issue #392 (Part 1): build for wasm32v1-none everywhere — the target
 # soroban-sdk 22 recommends and the one CI installs. wasm32-unknown-unknown
@@ -66,5 +66,18 @@ contract-integration-test:
 	cargo test --test integration
 
 # End-to-end suite against a local Quickstart network (needs Docker + Stellar CLI).
+# Builds via `make build` unless SKIP_BUILD=1, and deploys the optimized WASM.
 integration-test:
 	./scripts/test_local_network.sh
+
+# Issue #390 (Part 1): catch a broken script before it costs a Quickstart
+# boot (~1-3 min) to find out. `bash -n` always runs; shellcheck runs when
+# installed (it is on GitHub's ubuntu runners).
+integration-test-lint:
+	@for script in scripts/*.sh; do bash -n "$$script" || exit 1; done
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck --severity=warning scripts/*.sh; \
+	else \
+		echo "integration-test-lint: shellcheck not installed — ran bash -n only"; \
+	fi
+	@echo "integration-test-lint: scripts OK"

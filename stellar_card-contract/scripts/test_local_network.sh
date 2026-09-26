@@ -10,6 +10,9 @@ set -euo pipefail
 #   RPC_WAIT_SECONDS   How long to wait for RPC + friendbot to come up (default: 180)
 #   KEEP_NETWORK=1     Leave the container running after the test, for debugging
 #   SKIP_BUILD=1       Reuse an existing release WASM instead of rebuilding it
+#   WASM_PATH          WASM to deploy (default: the optimized build from
+#                      `make build`, or the raw release build if no optimized
+#                      binary exists)
 #
 # Issue #400 (Part 2): scenarios are grouped into functions that each assert
 # on real on-chain state (balances, getters, events), and every assertion
@@ -25,7 +28,9 @@ RPC_URL="http://localhost:$RPC_PORT/rpc"
 FRIENDBOT_URL="http://localhost:$RPC_PORT/friendbot"
 NETWORK_PASSPHRASE="Standalone Network ; February 2017"
 STELLAR_CONFIG_DIR="$(mktemp -d)"
-WASM_PATH="$PROJECT_ROOT/target/wasm32v1-none/release/stellar_card_receiver.wasm"
+RELEASE_DIR="$PROJECT_ROOT/target/wasm32v1-none/release"
+RAW_WASM_PATH="$RELEASE_DIR/stellar_card_receiver.wasm"
+OPTIMIZED_WASM_PATH="$RELEASE_DIR/stellar_card_receiver.optimized.wasm"
 CURRENT_STEP="setup"
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -183,12 +188,27 @@ if [ "$rpc_healthy" != true ]; then
 fi
 
 cd "$PROJECT_ROOT"
-if [ "${SKIP_BUILD:-0}" = "1" ] && [ -f "$WASM_PATH" ]; then
+if [ "${SKIP_BUILD:-0}" = "1" ] && [ -f "$RAW_WASM_PATH" ]; then
   step "Reusing existing contract build (SKIP_BUILD=1)"
 else
+  # Issue #390 (Part 1): `make build` also runs the optimizer and the size
+  # budget check, so the network test deploys exactly what deploy.sh would.
   step "Building contract"
-  cargo build --target wasm32v1-none --release
+  make build
 fi
+
+# Deploy the optimized binary when there is one — it's what production
+# runs, and the optimizer rewriting code is exactly what an in-process test
+# can't catch.
+if [ -z "${WASM_PATH:-}" ]; then
+  if [ -f "$OPTIMIZED_WASM_PATH" ]; then
+    WASM_PATH="$OPTIMIZED_WASM_PATH"
+  else
+    WASM_PATH="$RAW_WASM_PATH"
+  fi
+fi
+[ -f "$WASM_PATH" ] || fail "WASM not found at $WASM_PATH"
+log "Deploying $WASM_PATH ($(wc -c < "$WASM_PATH" | tr -d '[:space:]') bytes)"
 
 stellar_local network add local \
   --rpc-url "$RPC_URL" \
@@ -223,6 +243,41 @@ RECEIVER_CONTRACT_ID="$(stellar_local contract deploy \
   --network local)"
 
 # ── scenarios ───────────────────────────────────────────────────────────────
+
+# Issue #390 (Part 1): every rejected init must leave the contract
+# uninitialized, so the same deployment can still be initialized correctly
+# afterwards (scenario_init). On a real network XLM_CONTRACT_ID is the
+# genuine native-asset SAC, so the swapped-arguments check runs against the
+# exact contract it exists to recognise.
+scenario_init_validation() {
+  step "Rejecting invalid init parameters"
+  expect_failure "init with USDC and XLM swapped" "$RECEIVER_CONTRACT_ID" deployer -- init \
+    --admin "$DEPLOYER_ADDRESS" \
+    --treasury "$TREASURY_ADDRESS" \
+    --usdc_contract "$XLM_CONTRACT_ID" \
+    --xlm_contract "$USDC_CONTRACT_ID"
+  expect_failure "init with the same token for USDC and XLM" "$RECEIVER_CONTRACT_ID" deployer -- init \
+    --admin "$DEPLOYER_ADDRESS" \
+    --treasury "$TREASURY_ADDRESS" \
+    --usdc_contract "$USDC_CONTRACT_ID" \
+    --xlm_contract "$USDC_CONTRACT_ID"
+  expect_failure "init with admin as treasury" "$RECEIVER_CONTRACT_ID" deployer -- init \
+    --admin "$DEPLOYER_ADDRESS" \
+    --treasury "$DEPLOYER_ADDRESS" \
+    --usdc_contract "$USDC_CONTRACT_ID" \
+    --xlm_contract "$XLM_CONTRACT_ID"
+  expect_failure "init with the receiver as treasury" "$RECEIVER_CONTRACT_ID" deployer -- init \
+    --admin "$DEPLOYER_ADDRESS" \
+    --treasury "$RECEIVER_CONTRACT_ID" \
+    --usdc_contract "$USDC_CONTRACT_ID" \
+    --xlm_contract "$XLM_CONTRACT_ID"
+  expect_failure "init with an account address as a token" "$RECEIVER_CONTRACT_ID" deployer -- init \
+    --admin "$DEPLOYER_ADDRESS" \
+    --treasury "$TREASURY_ADDRESS" \
+    --usdc_contract "$PAYER_ADDRESS" \
+    --xlm_contract "$XLM_CONTRACT_ID"
+  expect_failure "admin() before a successful init" "$RECEIVER_CONTRACT_ID" deployer -- admin
+}
 
 scenario_init() {
   step "Initializing receiver"
@@ -364,10 +419,24 @@ scenario_rescue_tokens() {
   assert_eq "receiver USDC balance after mistaken send" 3000000 \
     "$(balance_of "$USDC_CONTRACT_ID" "$RECEIVER_CONTRACT_ID")"
 
+  # Issue #390 (Part 1): an incoherent pair is refused on-chain too.
+  expect_failure "per-call withdraw limit above the daily limit" "$RECEIVER_CONTRACT_ID" deployer -- set_withdraw_limits \
+    --caller "$DEPLOYER_ADDRESS" \
+    --per_call 3000000 \
+    --per_day 2500000
+
   invoke "$RECEIVER_CONTRACT_ID" deployer -- set_withdraw_limits \
     --caller "$DEPLOYER_ADDRESS" \
     --per_call 2000000 \
     --per_day 2500000
+  assert_eq "withdrawn_today() before any rescue" 0 \
+    "$(invoke "$RECEIVER_CONTRACT_ID" deployer -- withdrawn_today | scalar)"
+
+  expect_failure "rescue_tokens back to the receiver itself" "$RECEIVER_CONTRACT_ID" deployer -- rescue_tokens \
+    --caller "$DEPLOYER_ADDRESS" \
+    --token_contract "$USDC_CONTRACT_ID" \
+    --to "$RECEIVER_CONTRACT_ID" \
+    --amount 1
 
   expect_failure "rescue_tokens by the Operator" "$RECEIVER_CONTRACT_ID" operator -- rescue_tokens \
     --caller "$OPERATOR_ADDRESS" \
@@ -386,6 +455,8 @@ scenario_rescue_tokens() {
     --to "$RESCUE_ADDRESS" \
     --amount 2000000
   assert_eq "rescued USDC delivered" 2000000 "$(balance_of "$USDC_CONTRACT_ID" "$RESCUE_ADDRESS")"
+  assert_eq "withdrawn_today() after rescue" 2000000 \
+    "$(invoke "$RECEIVER_CONTRACT_ID" deployer -- withdrawn_today | scalar)"
 
   expect_failure "rescue_tokens over the daily limit" "$RECEIVER_CONTRACT_ID" deployer -- rescue_tokens \
     --caller "$DEPLOYER_ADDRESS" \
@@ -396,6 +467,7 @@ scenario_rescue_tokens() {
     "$(balance_of "$USDC_CONTRACT_ID" "$RECEIVER_CONTRACT_ID")"
 }
 
+scenario_init_validation
 scenario_init
 scenario_usdc_payment
 scenario_xlm_payment
