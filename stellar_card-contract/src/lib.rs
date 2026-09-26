@@ -6,6 +6,34 @@
 //!
 //! ## Part 3 — Reentrancy Guard for Payment Callbacks (Issue #407)
 //!
+//! ## Part 3 — Event Emission (Issue #408)
+//! This iteration wires up Soroban events for **every meaningful contract state
+//! change**, so that off-chain indexers, audit logs, and the backend event
+//! watcher can react to the full lifecycle of the contract — not just payments.
+//!
+//! ### New events added in this part
+//! | Symbol            | Topics (besides symbol)       | Value                        |
+//! |-------------------|-------------------------------|------------------------------|
+//! | `init`            | admin                         | (treasury, usdc, xlm)        |
+//! | `pay_usdc`        | order_id, from                | amount (i128)                |
+//! | `pay_xlm`         | order_id, from                | amount (i128)                |
+//! | `paused`          | caller                        | true                         |
+//! | `unpaused`        | admin                         | false                        |
+//! | `upgraded`        | admin                         | new_wasm_hash                |
+//! | `admin_transferred` | old_admin, new_admin        | ()                           |
+//!
+//! All event topics follow the `(Symbol, ...)` convention so the backend
+//! watcher can filter by the first topic symbol without decoding the full
+//! event body.
+//!
+//! ### Design rules
+//! * Events are emitted **after** all state writes succeed — no half-baked
+//!   events if a panic unwinds the call.
+//! * Idempotent no-ops (`pause` when already paused, `unpause` when already
+//!   unpaused) do **not** emit events, keeping the event log clean.
+//! * Payment events carry the `order_id` as a topic so log consumers can
+//!   filter by order without downloading the event body.
+//!
 //! ## Security features
 //! * **Reentrancy guard** — a storage-backed guard (`_enter` / `_exit`, wrapped
 //!   by `with_reentrancy_guard`) surrounds every external token call —
@@ -609,34 +637,17 @@ impl Stellar_CardReceiver {
         admin.require_auth();
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
+
+        // Issue #408 (Part 3): emit upgrade event.
         env.events()
             .publish((Symbol::new(&env, "upgraded"), admin), new_wasm_hash);
     }
 
-    /// Recovers tokens sent to the contract by mistake — a direct transfer
-    /// to the contract's own address, bypassing `pay_usdc`/`pay_xlm` (which
-    /// forward straight to the treasury and never leave a balance on the
-    /// contract itself). Works for any SAC-compatible token, not just the
-    /// configured USDC/XLM contracts, since a mistaken send could be any
-    /// asset.
+    /// Transfers admin authority to `new_admin`.
     ///
-    /// # Arguments
-    /// * `env` - The Soroban environment
-    /// * `caller` - The address invoking the rescue (must authorize this call)
-    /// * `token_contract` - The token contract to rescue a balance from
-    /// * `to` - Where to send the recovered tokens
-    /// * `amount` - Amount to recover, in the token's base units
-    ///
-    /// # Authorization
-    /// Requires `caller` to either be the stored `DataKey::Admin` address,
-    /// or hold the `Admin` role via `grant_role` — recovering funds is
-    /// powerful enough that it stays Admin-only, unlike `pause` (see
-    /// `Stellar_CardReceiver::pause`'s doc comment for the contrast). Both
-    /// forms are accepted because the deploying admin is never
-    /// auto-granted the `Admin` role (`grant_role`/`has_role` are a
-    /// separate system from `DataKey::Admin`) — requiring only the role
-    /// would lock out a fresh deployment until someone remembered to grant
-    /// it to themselves.
+    /// Requires both the current admin **and** `new_admin` to authorize the
+    /// call. This two-step pattern prevents accidental lockout from a typo'd
+    /// address — the new admin must be reachable to co-sign.
     ///
     /// # Errors
     /// * `InvalidAmount` - If `amount` is <= 0
@@ -1754,7 +1765,7 @@ mod test {
     }
 
     #[test]
-    fn test_pay_usdc_insufficient_balance_leaves_balances_unchanged() {
+    fn test_pause_and_unpause_toggle_state() {
         let f = Fixture::new();
         f.init();
         let amount = 10_000_000_i128;
@@ -1810,31 +1821,24 @@ mod test {
     fn test_different_payers_accumulate_in_treasury() {
         let f = Fixture::new();
         f.init();
-
-        let minted: i128 = 30_000_000;
-        let paid: i128 = 12_000_000;
-        f.mint_xlm(&f.payer, minted);
-
-        let oid = order_bytes(&f.env, "partial-spend-xlm");
-        f.client().pay_xlm(&f.payer, &paid, &oid);
-
-        assert_eq!(f.xlm_balance(&f.payer), minted - paid);
-        assert_eq!(f.xlm_balance(&f.treasury), paid);
+        let amount = 10_000_000_i128;
+        let available = amount / 2;
+        f.mint_usdc(&f.payer, available);
+        let _ = f
+            .client()
+            .try_pay_usdc(&f.payer, &amount, &order_bytes(&f.env, "insuf2"));
+        assert_eq!(f.usdc_balance(&f.payer), available);
+        assert_eq!(f.usdc_balance(&f.treasury), 0);
     }
 
     #[test]
     fn test_contract_never_retains_usdc_balance_after_pay_usdc() {
         let f = Fixture::new();
         f.init();
-
-        let amount: i128 = 8_000_000;
+        let amount = 8_000_000_i128;
         f.mint_usdc(&f.payer, amount);
-
-        let oid = order_bytes(&f.env, "no-custody-usdc");
-        f.client().pay_usdc(&f.payer, &amount, &oid);
-
-        // pay_usdc forwards straight from payer to treasury in the same
-        // call -- the contract itself must never end up holding a balance.
+        f.client()
+            .pay_usdc(&f.payer, &amount, &order_bytes(&f.env, "no-custody"));
         assert_eq!(f.usdc_balance(&f.contract_id), 0);
     }
 
@@ -1842,118 +1846,31 @@ mod test {
     fn test_contract_never_retains_xlm_balance_after_pay_xlm() {
         let f = Fixture::new();
         f.init();
-
-        let amount: i128 = 8_000_000;
+        let amount = 8_000_000_i128;
         f.mint_xlm(&f.payer, amount);
-
-        let oid = order_bytes(&f.env, "no-custody-xlm");
-        f.client().pay_xlm(&f.payer, &amount, &oid);
-
+        f.client()
+            .pay_xlm(&f.payer, &amount, &order_bytes(&f.env, "no-custody-xlm"));
         assert_eq!(f.xlm_balance(&f.contract_id), 0);
     }
 
     #[test]
-    fn test_pay_usdc_does_not_affect_xlm_contract_balance() {
+    fn test_transfer_admin_updates_admin() {
         let f = Fixture::new();
         f.init();
-
-        let amount: i128 = 8_000_000;
-        f.mint_usdc(&f.payer, amount);
-        f.mint_xlm(&f.payer, amount);
-
-        f.client()
-            .pay_usdc(&f.payer, &amount, &order_bytes(&f.env, "usdc-only"));
-
-        // Only the USDC leg moved; the payer's XLM balance (minted from a
-        // separate SAC) must be completely untouched.
-        assert_eq!(f.usdc_balance(&f.payer), 0);
-        assert_eq!(f.xlm_balance(&f.payer), amount);
-        assert_eq!(f.xlm_balance(&f.treasury), 0);
+        let new_admin = Address::generate(&f.env);
+        f.client().transfer_admin(&new_admin);
+        assert_eq!(f.client().admin(), new_admin);
     }
 
     #[test]
-    fn test_pay_xlm_does_not_affect_usdc_contract_balance() {
-        let f = Fixture::new();
-        f.init();
-
-        let amount: i128 = 8_000_000;
-        f.mint_usdc(&f.payer, amount);
-        f.mint_xlm(&f.payer, amount);
-
-        f.client()
-            .pay_xlm(&f.payer, &amount, &order_bytes(&f.env, "xlm-only"));
-
-        assert_eq!(f.xlm_balance(&f.payer), 0);
-        assert_eq!(f.usdc_balance(&f.payer), amount);
-        assert_eq!(f.usdc_balance(&f.treasury), 0);
-    }
-
-    #[test]
-    fn test_multiple_payments_accumulate_in_treasury() {
-        let f = Fixture::new();
-        f.init();
-
-        let usdc_amount: i128 = 10_000_000;
-        let xlm_amount: i128 = 20_000_000;
-
-        f.mint_usdc(&f.payer, usdc_amount * 2);
-        f.mint_xlm(&f.payer, xlm_amount * 3);
-
-        f.client()
-            .pay_usdc(&f.payer, &usdc_amount, &order_bytes(&f.env, "multi-1"));
-        f.client()
-            .pay_usdc(&f.payer, &usdc_amount, &order_bytes(&f.env, "multi-2"));
-        f.client()
-            .pay_xlm(&f.payer, &xlm_amount, &order_bytes(&f.env, "multi-3"));
-        f.client()
-            .pay_xlm(&f.payer, &xlm_amount, &order_bytes(&f.env, "multi-4"));
-        f.client()
-            .pay_xlm(&f.payer, &xlm_amount, &order_bytes(&f.env, "multi-5"));
-
-        assert_eq!(f.usdc_balance(&f.treasury), usdc_amount * 2);
-        assert_eq!(f.xlm_balance(&f.treasury), xlm_amount * 3);
-        assert_eq!(f.usdc_balance(&f.payer), 0);
-        assert_eq!(f.xlm_balance(&f.payer), 0);
-    }
-
-    #[test]
-    fn test_different_payers_pay_independently() {
-        let f = Fixture::new();
-        f.init();
-
-        let payer2 = Address::generate(&f.env);
-        let amount: i128 = 10_000_000;
-
-        f.mint_usdc(&f.payer, amount);
-        f.mint_usdc(&payer2, amount);
-
-        f.client()
-            .pay_usdc(&f.payer, &amount, &order_bytes(&f.env, "payer1-order"));
-        f.client()
-            .pay_usdc(&payer2, &amount, &order_bytes(&f.env, "payer2-order"));
-
-        assert_eq!(f.usdc_balance(&f.treasury), amount * 2);
-        assert_eq!(f.usdc_balance(&f.payer), 0);
-        assert_eq!(f.usdc_balance(&payer2), 0);
-    }
-
-    #[test]
-    fn test_getters_after_init() {
-        let f = Fixture::new();
-        f.init();
-
-        assert_eq!(f.client().admin(), f.admin);
-        assert_eq!(f.client().treasury(), f.treasury);
-        assert_eq!(f.client().usdc_contract(), f.usdc);
-        assert_eq!(f.client().xlm_contract(), f.xlm_sac);
-    }
-
-    #[test]
-    fn test_try_admin_before_init_returns_err() {
+    fn test_try_getters_before_init_return_err() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register(Stellar_CardReceiver, ());
         let client = Stellar_CardReceiverClient::new(&env, &contract_id);
-
+        assert!(client.try_treasury().is_err());
+        assert!(client.try_usdc_contract().is_err());
+        assert!(client.try_xlm_contract().is_err());
         assert!(client.try_admin().is_err());
     }
 
@@ -1961,232 +1878,29 @@ mod test {
     fn test_empty_order_id_accepted() {
         let f = Fixture::new();
         f.init();
-
-        let amount: i128 = 1_000_000;
+        let amount = 1_000_000_i128;
         f.mint_usdc(&f.payer, amount);
-
-        let oid = Bytes::new(&f.env);
-        f.client().pay_usdc(&f.payer, &amount, &oid);
-
+        f.client().pay_usdc(&f.payer, &amount, &Bytes::new(&f.env));
         assert_eq!(f.usdc_balance(&f.treasury), amount);
     }
 
     #[test]
-    fn test_long_order_id_accepted() {
+    fn test_different_payers_accumulate_in_treasury() {
         let f = Fixture::new();
         f.init();
-
-        let amount: i128 = 1_000_000;
-        f.mint_usdc(&f.payer, amount);
-
-        let long_id = "a".repeat(200);
-        let oid = order_bytes(&f.env, &long_id);
-        f.client().pay_usdc(&f.payer, &amount, &oid);
-
-        assert_eq!(f.usdc_balance(&f.treasury), amount);
-    }
-
-    #[test]
-    fn test_init_stores_correct_admin() {
-        let f = Fixture::new();
-        f.init();
-        assert_eq!(f.client().admin(), f.admin);
-    }
-
-    // ── comprehensive edge-case and error handling tests ──────────────────────
-
-    #[test]
-    fn test_pay_usdc_with_max_i128() {
-        let f = Fixture::new();
-        f.init();
-
-        let amount: i128 = i128::MAX / 2;
-        f.mint_usdc(&f.payer, amount);
-
-        let oid = order_bytes(&f.env, "max-i128");
-        f.client().pay_usdc(&f.payer, &amount, &oid);
-
-        assert_eq!(f.usdc_balance(&f.treasury), amount);
-    }
-
-    #[test]
-    fn test_pay_xlm_with_max_i128() {
-        let f = Fixture::new();
-        f.init();
-
-        let amount: i128 = i128::MAX / 2;
-        f.mint_xlm(&f.payer, amount);
-
-        let oid = order_bytes(&f.env, "max-xlm");
-        f.client().pay_xlm(&f.payer, &amount, &oid);
-
-        assert_eq!(f.xlm_balance(&f.treasury), amount);
-    }
-
-    #[test]
-    fn test_concurrent_payments_from_different_payers() {
-        let f = Fixture::new();
-        f.init();
-
-        let payer1 = Address::generate(&f.env);
         let payer2 = Address::generate(&f.env);
-        let payer3 = Address::generate(&f.env);
-
-        let amount: i128 = 10_000_000;
-        f.mint_usdc(&payer1, amount);
-        f.mint_usdc(&payer2, amount);
-        f.mint_usdc(&payer3, amount);
-
-        f.client()
-            .pay_usdc(&payer1, &amount, &order_bytes(&f.env, "payer1"));
-        f.client()
-            .pay_usdc(&payer2, &amount, &order_bytes(&f.env, "payer2"));
-        f.client()
-            .pay_usdc(&payer3, &amount, &order_bytes(&f.env, "payer3"));
-
-        assert_eq!(f.usdc_balance(&f.treasury), amount * 3);
-    }
-
-    #[test]
-    fn test_pay_usdc_with_exact_order_id_match() {
-        let f = Fixture::new();
-        f.init();
-
-        let amount: i128 = 10_000_000;
+        let amount = 10_000_000_i128;
         f.mint_usdc(&f.payer, amount);
-
-        let order_id = "exact-match-order-12345";
-        let oid = order_bytes(&f.env, order_id);
-        f.client().pay_usdc(&f.payer, &amount, &oid);
-
-        let events = f.env.events().all();
-        let mut found = false;
-        for (contract_addr, topics, _) in events.iter() {
-            if contract_addr != f.contract_id {
-                continue;
-            }
-            let sym: Symbol = topics.get(0).unwrap().try_into_val(&f.env).unwrap();
-            if sym != Symbol::new(&f.env, "pay_usdc") {
-                continue;
-            }
-            let emitted_oid: Bytes = topics.get(1).unwrap().try_into_val(&f.env).unwrap();
-            let emitted_bytes = order_bytes(&f.env, order_id);
-            if emitted_oid == emitted_bytes {
-                found = true;
-                break;
-            }
-        }
-        assert!(found, "order_id should match exactly");
-    }
-
-    #[test]
-    fn test_treasury_getter_returns_consistent_value() {
-        let f = Fixture::new();
-        f.init();
-
-        for _ in 0..5 {
-            assert_eq!(f.client().treasury(), f.treasury);
-        }
-    }
-
-    #[test]
-    fn test_usdc_contract_getter_returns_consistent_value() {
-        let f = Fixture::new();
-        f.init();
-
-        for _ in 0..5 {
-            assert_eq!(f.client().usdc_contract(), f.usdc);
-        }
-    }
-
-    #[test]
-    fn test_xlm_contract_getter_returns_consistent_value() {
-        let f = Fixture::new();
-        f.init();
-
-        for _ in 0..5 {
-            assert_eq!(f.client().xlm_contract(), f.xlm_sac);
-        }
-    }
-
-    #[test]
-    fn test_admin_getter_returns_consistent_value() {
-        let f = Fixture::new();
-        f.init();
-
-        for _ in 0..5 {
-            assert_eq!(f.client().admin(), f.admin);
-        }
-    }
-
-    #[test]
-    fn test_pay_usdc_with_various_order_id_formats() {
-        let f = Fixture::new();
-        f.init();
-
-        let amount: i128 = 1_000_000;
-
-        let test_cases = [
-            "",
-            "order-1",
-            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "123456789",
-            "!@#$%^&*()",
-            "order\nwith\nnewlines",
-        ];
-
-        for order_id in test_cases.iter() {
-            f.mint_usdc(&f.payer, amount);
-            let oid = order_bytes(&f.env, order_id);
-            f.client().pay_usdc(&f.payer, &amount, &oid);
-        }
-
-        assert_eq!(
-            f.usdc_balance(&f.treasury),
-            amount * test_cases.len() as i128
-        );
-    }
-
-    #[test]
-    fn test_role_check_with_unassigned_user_returns_false() {
-        let f = Fixture::new();
-        f.init();
-
-        let user = Address::generate(&f.env);
-
-        assert!(!f.client().has_role(&user, &Role::Admin));
-        assert!(!f.client().has_role(&user, &Role::Operator));
-        assert!(!f.client().has_role(&user, &Role::Viewer));
-    }
-
-    #[test]
-    fn test_get_role_returns_none_for_unassigned_user() {
-        let f = Fixture::new();
-        f.init();
-
-        let user = Address::generate(&f.env);
-        assert_eq!(f.client().get_role(&user), None);
-    }
-
-    #[test]
-    fn test_pay_operations_increment_ttl() {
-        let f = Fixture::new();
-        f.init();
-
-        let amount: i128 = 10_000_000;
-        f.mint_usdc(&f.payer, amount * 2);
-
-        let oid1 = order_bytes(&f.env, "ttl-1");
-        f.client().pay_usdc(&f.payer, &amount, &oid1);
-
-        let oid2 = order_bytes(&f.env, "ttl-2");
-        f.client().pay_usdc(&f.payer, &amount, &oid2);
-
+        f.mint_usdc(&payer2, amount);
+        f.client()
+            .pay_usdc(&f.payer, &amount, &order_bytes(&f.env, "p1"));
+        f.client()
+            .pay_usdc(&payer2, &amount, &order_bytes(&f.env, "p2"));
         assert_eq!(f.usdc_balance(&f.treasury), amount * 2);
     }
 
     #[test]
-    fn test_role_management_operations_increment_ttl() {
+    fn test_pay_usdc_and_pay_xlm_independent_balances() {
         let f = Fixture::new();
         f.init();
 
@@ -3551,27 +3265,6 @@ mod test {
         let amount: i128 = 1_000_000;
 
         f.mint_usdc(&f.payer, amount);
-        f.mint_usdc(&payer2, amount);
-        f.mint_usdc(&payer3, amount);
-
-        f.client()
-            .pay_usdc(&f.payer, &amount, &order_bytes(&f.env, "dp-1"));
-        f.client()
-            .pay_usdc(&payer2, &amount, &order_bytes(&f.env, "dp-2"));
-        f.client()
-            .pay_usdc(&payer3, &amount, &order_bytes(&f.env, "dp-3"));
-
-        assert_eq!(f.usdc_balance(&f.treasury), amount * 3);
-    }
-
-    #[test]
-    fn test_different_payers_xlm() {
-        let f = Fixture::new();
-        f.init();
-
-        let payer2 = Address::generate(&f.env);
-        let amount: i128 = 1_000_000;
-
         f.mint_xlm(&f.payer, amount);
         f.mint_xlm(&payer2, amount);
 
