@@ -66,8 +66,8 @@
 
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env,
-    String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
+    BytesN, Env, String, Symbol, Vec,
 };
 
 /// Instance storage is extended to this many ledgers (~1000 days at 5s
@@ -255,7 +255,7 @@ impl Stellar_CardReceiver {
 
         // Emit initialization event (Issue #428 - Part 5)
         env.events().publish(
-            (Symbol::new(&env, "init"), admin.clone()),
+            (symbol_short!("init"), admin.clone()),
             (
                 treasury.clone(),
                 usdc_contract.clone(),
@@ -484,7 +484,7 @@ impl Stellar_CardReceiver {
 
         // Emit pause event (Issue #428 - Part 5)
         env.events()
-            .publish((Symbol::new(&env, "paused"), caller), true);
+            .publish((symbol_short!("paused"), caller), true);
     }
 
     /// Unpauses the contract, re-enabling token transfers.
@@ -513,7 +513,7 @@ impl Stellar_CardReceiver {
 
         // Emit unpause event (Issue #428 - Part 5)
         env.events()
-            .publish((Symbol::new(&env, "unpaused"), admin), false);
+            .publish((symbol_short!("unpaused"), admin), false);
     }
 
     /// Extends instance storage's TTL, but only performs the (fee-costing)
@@ -595,7 +595,7 @@ impl Stellar_CardReceiver {
         }
 
         env.events()
-            .publish((Symbol::new(&env, "pay_usdc"), order_id, from), amount);
+            .publish((symbol_short!("pay_usdc"), order_id, from), amount);
 
         Self::extend_instance_ttl(&env);
         Ok(())
@@ -643,7 +643,7 @@ impl Stellar_CardReceiver {
         }
 
         env.events()
-            .publish((Symbol::new(&env, "pay_xlm"), order_id, from), amount);
+            .publish((symbol_short!("pay_xlm"), order_id, from), amount);
 
         Self::extend_instance_ttl(&env);
         Ok(())
@@ -743,7 +743,7 @@ impl Stellar_CardReceiver {
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
         env.events()
-            .publish((Symbol::new(&env, "upgraded"), admin), new_wasm_hash);
+            .publish((symbol_short!("upgraded"), admin), new_wasm_hash);
     }
 
     /// Recovers tokens sent to the contract by mistake — a direct transfer
@@ -803,14 +803,7 @@ impl Stellar_CardReceiver {
         amount: i128,
     ) -> Result<(), Error> {
         caller.require_auth();
-        // The contract's single DataKey::Admin address is never
-        // auto-granted the Admin *role* — grant_role/has_role are a
-        // separate system, so a fresh deployer wouldn't satisfy a
-        // has_role-only check until someone explicitly grants it to
-        // themselves. Accept either form of admin authority here.
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        let is_stored_admin = caller == stored_admin;
-        if !is_stored_admin && !Self::has_role(env.clone(), caller.clone(), Role::Admin) {
+        if !Self::has_admin_authority(&env, &caller) {
             panic!("rescue_tokens requires the Admin role");
         }
         if amount <= 0 {
@@ -907,9 +900,7 @@ impl Stellar_CardReceiver {
         per_day: Option<i128>,
     ) {
         caller.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        let is_stored_admin = caller == stored_admin;
-        if !is_stored_admin && !Self::has_role(env.clone(), caller.clone(), Role::Admin) {
+        if !Self::has_admin_authority(&env, &caller) {
             panic!("set_withdraw_limits requires the Admin role");
         }
         if per_call.is_some_and(|v| v <= 0) || per_day.is_some_and(|v| v <= 0) {
@@ -960,6 +951,17 @@ impl Stellar_CardReceiver {
         let per_call = env.storage().instance().get(&DataKey::WithdrawLimitPerCall);
         let per_day = env.storage().instance().get(&DataKey::WithdrawLimitPerDay);
         (per_call, per_day)
+    }
+
+    /// Whether `caller` may use the withdraw entrypoints: either the stored
+    /// `DataKey::Admin` address or a holder of the `Admin` role. The stored
+    /// admin was not always auto-granted the Admin *role* (grant_role /
+    /// has_role are a separate system), so both forms of admin authority
+    /// are accepted. Shared by `rescue_tokens` and `set_withdraw_limits`
+    /// so the rule, and its code, exist once (Issue #392 - Part 1).
+    fn has_admin_authority(env: &Env, caller: &Address) -> bool {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        *caller == stored_admin || Self::has_role(env.clone(), caller.clone(), Role::Admin)
     }
 
     /// Returns how much `rescue_tokens` has moved so far during the current
@@ -4464,6 +4466,67 @@ mod test {
             found = true;
         }
         assert!(found, "upgrade event not found");
+    }
+
+    // ── WASM size (issue #392) ────────────────────────────────────────────────
+
+    /// Raw (pre-`stellar contract optimize`) size budget. Mirrors
+    /// `WASM_SIZE_BUDGET_BYTES` in the Makefile — keep the two in sync.
+    const WASM_SIZE_BUDGET_BYTES: usize = 49_152;
+    /// Soroban's network-enforced ceiling on contract code size.
+    const NETWORK_WASM_SIZE_LIMIT_BYTES: usize = 65_536;
+
+    #[test]
+    fn test_wasm_within_size_budget() {
+        // Runs as part of every `cargo test`, so a size regression fails
+        // locally without needing `make build`'s separate budget check.
+        let size = upgrade_wasm::WASM.len();
+        assert!(
+            size <= WASM_SIZE_BUDGET_BYTES,
+            "contract WASM is {size} bytes, over its {WASM_SIZE_BUDGET_BYTES}-byte budget \
+             by {} bytes",
+            size - WASM_SIZE_BUDGET_BYTES
+        );
+        assert!(WASM_SIZE_BUDGET_BYTES < NETWORK_WASM_SIZE_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn test_wasm_has_no_custom_sections_beyond_contract_metadata() {
+        // `strip = "symbols"` + `debug = 0` should leave only the sections
+        // Soroban itself reads (contract spec / env and SDK metadata). A
+        // `name` or DWARF `.debug_*` section showing up means the release
+        // profile stopped stripping and the binary grew for nothing.
+        let wasm = upgrade_wasm::WASM;
+        let mut offset = 8; // "\0asm" magic + version
+        while offset < wasm.len() {
+            let id = wasm[offset];
+            offset += 1;
+            let (len, used) = read_leb128_u32(&wasm[offset..]);
+            offset += used;
+            if id == 0 {
+                let (name_len, name_used) = read_leb128_u32(&wasm[offset..]);
+                let start = offset + name_used;
+                let name = core::str::from_utf8(&wasm[start..start + name_len as usize]).unwrap();
+                assert!(
+                    name.starts_with("contract"),
+                    "unexpected custom section `{name}` in release WASM"
+                );
+            }
+            offset += len as usize;
+        }
+        assert_eq!(offset, wasm.len());
+    }
+
+    /// Decodes an unsigned LEB128 `u32`, returning `(value, bytes_read)`.
+    fn read_leb128_u32(bytes: &[u8]) -> (u32, usize) {
+        let mut value = 0u32;
+        for (i, byte) in bytes.iter().enumerate() {
+            value |= u32::from(byte & 0x7f) << (7 * i);
+            if byte & 0x80 == 0 {
+                return (value, i + 1);
+            }
+        }
+        panic!("truncated LEB128");
     }
 
     // ── init events test ───────────────────────────────────────────────────

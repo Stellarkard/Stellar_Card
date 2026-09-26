@@ -14,29 +14,43 @@ Soroban smart contract that receives USDC payments from AI agents and emits `pay
 ### 1. Install toolchain
 
 ```bash
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 cargo install --locked stellar-cli
 ```
 
-### 2. Build
+### 2. Build and optimise
 
 ```bash
-cargo build --target wasm32-unknown-unknown --release
+make build
 ```
 
-### 3. Optimise
+This compiles for `wasm32v1-none`, runs `stellar contract optimize` (or
+binaryen's `wasm-opt` if the CLI's optimizer isn't available) to produce
+`target/wasm32v1-none/release/stellar_card_receiver.optimized.wasm`, and fails
+if either binary exceeds its size budget. The equivalent manual steps:
 
 ```bash
-stellar contract optimize --wasm target/wasm32-unknown-unknown/release/stellar_card_receiver.wasm
+cargo build --target wasm32v1-none --release
+stellar contract optimize --wasm target/wasm32v1-none/release/stellar_card_receiver.wasm
 ```
 
-This produces `stellar_card_receiver.optimized.wasm`.
+Use `wasm32v1-none`, not `wasm32-unknown-unknown`: on Rust 1.82+ the latter
+emits reference-types / multi-value WASM that Soroban rejects.
+
+### 3. Binary size
+
+The optimizer pass takes the contract from ~46 KB to ~37 KB (Soroban's hard
+limit is 64 KiB). `make wasm-size` checks both binaries against the budgets in
+the Makefile (`WASM_SIZE_BUDGET_BYTES`, `OPTIMIZED_WASM_SIZE_BUDGET_BYTES`), and
+`test_wasm_within_size_budget` asserts the raw budget on every `cargo test`.
+When a change legitimately needs more room, raise both budgets together, with
+the new measured size in the Makefile comment.
 
 ### 4. Deploy to testnet
 
 ```bash
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/stellar_card_receiver.optimized.wasm \
+  --wasm target/wasm32v1-none/release/stellar_card_receiver.optimized.wasm \
   --source <YOUR_SECRET_KEY> \
   --network testnet
 ```
@@ -49,7 +63,7 @@ The command prints the deployed contract ID (C...). Save it as `RECEIVER_CONTRAC
 
 ```bash
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/stellar_card_receiver.optimized.wasm \
+  --wasm target/wasm32v1-none/release/stellar_card_receiver.optimized.wasm \
   --source <YOUR_SECRET_KEY> \
   --network mainnet
 ```
