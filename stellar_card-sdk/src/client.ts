@@ -17,8 +17,15 @@ import {
   WaitTimeoutError,
   AuthError as AuthErrorCtor,
   ValidationError,
+  TimeoutError,
+  AbortError,
 } from './errors';
 import { calculateExponentialBackoffDelay, sleep } from './retry';
+import { DEFAULT_REQUEST_TIMEOUT_MS, withRequestTimeout, type RequestOptions } from './network';
+import { validateClientOptions, validateCreateOrderInput } from './validation';
+import type { AccountBalances } from './stellar';
+
+export type { RequestOptions } from './network';
 
 export interface Budget {
   spent_usdc: string;
@@ -135,7 +142,7 @@ export interface RetryOptions {
   onRetry?: (error: unknown, attempt: number, delayMs: number) => void;
 }
 
-export interface CreateOrderOptions extends OrderOptions {
+export interface CreateOrderOptions extends OrderOptions, RequestOptions {
   /** Optional idempotency key for caller-managed create-order retries. */
   idempotencyKey?: string;
 }
@@ -150,7 +157,7 @@ export interface WaitForCardOptions {
   pollIntervalMs?: number;
 }
 
-export interface ListOrdersOptions {
+export interface ListOrdersOptions extends RequestOptions {
   status?: string;
   limit?: number;
   offset?: number;
@@ -179,7 +186,7 @@ export interface IterateOrdersOptions extends ListOrdersOptions {
   maxItems?: number;
 }
 
-export interface ReportStatusOptions {
+export interface ReportStatusOptions extends RequestOptions {
   wallet_public_key?: string;
   detail?: string;
 }
@@ -188,6 +195,12 @@ export interface StellarCardClientOptions {
   baseUrl?: string;
   apiKey?: string;
   retry?: RetryOptions;
+  /** Default per-request timeout in ms. Defaults to 30000. */
+  timeout?: number;
+  /** Stellar network used by on-chain helpers such as {@link Stellar_CardClient.getAccountBalances}. */
+  network?: 'mainnet' | 'testnet' | 'futurenet';
+  /** Optional Soroban RPC URL override. */
+  rpcUrl?: string;
 }
 
 // Shared order-ID shape validator. Keeps the client, the MCP tool,
@@ -228,6 +241,8 @@ export class Stellar_CardClient {
   private baseUrl: string;
   private apiKey: string;
   private retry: Required<RetryOptions>;
+  private timeout: number;
+  private network: 'mainnet' | 'testnet' | 'futurenet';
 
   /**
    * Create a client from explicit options, env vars, or on-disk config.
@@ -242,7 +257,12 @@ export class Stellar_CardClient {
    * @param opts.retry - Retry policy applied to transient (429/502/503/504) errors.
    * @throws {AuthError} When no API key can be resolved.
    */
-  constructor({ baseUrl, apiKey, retry = {} }: StellarCardClientOptions = {}) {
+  constructor(options: StellarCardClientOptions = {}) {
+    // Fail fast on malformed options (#700) with every bad field listed.
+    validateClientOptions(options);
+    const { baseUrl, apiKey, retry = {} } = options;
+    this.timeout = options.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.network = options.network ?? 'mainnet';
     // Resolve api key + base URL in priority order:
     //   1. Explicit constructor args
     //   2. CARDS402_API_KEY / CARDS402_BASE_URL env vars
@@ -327,12 +347,22 @@ export class Stellar_CardClient {
     return status === 429 || status === 503 || status === 504 || status === 502 || status === 0;
   }
 
+  private async fetchWithRetry(
+    url: string,
+    init: RequestInit,
+    { timeout = this.timeout, signal }: RequestOptions = {},
+  ): Promise<Response> {
+    const { attempts, baseDelayMs, maxDelayMs } = this.retry;
+    const operation = `${init.method ?? 'GET'} ${url}`;
   private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
     const { attempts, baseDelayMs, maxDelayMs, jitter, onRetry } = this.retry;
     let lastErr: unknown;
     for (let i = 0; i <= attempts; i++) {
       try {
-        const res = await fetch(url, init);
+        const res = await withRequestTimeout(operation, (s) => fetch(url, { ...init, signal: s }), {
+          timeout,
+          signal,
+        });
         if (res.ok || !this.shouldRetry(res.status) || i === attempts) return res;
         lastErr = new Error(`HTTP ${res.status}`);
         // Enhanced exponential backoff with full jitter and Retry-After header support
@@ -349,6 +379,8 @@ export class Stellar_CardClient {
         continue;
       } catch (err) {
         lastErr = err;
+        // Timeouts and caller aborts are final — never retried.
+        if (err instanceof TimeoutError || err instanceof AbortError) throw err;
         if (i === attempts) throw err;
         // Enhanced exponential backoff for network errors
         const delayMs = calculateExponentialBackoffDelay({
@@ -384,19 +416,24 @@ export class Stellar_CardClient {
    * @throws {RateLimitError} When the order-creation rate limit (60/hour) is hit.
    */
   async createOrder(opts: CreateOrderOptions): Promise<OrderResponse> {
-    const { idempotencyKey: providedKey, ...body } = opts;
+    validateCreateOrderInput(opts);
+    const { idempotencyKey: providedKey, timeout, signal, ...body } = opts;
     const idempotencyKey = providedKey ?? crypto.randomUUID();
     // Safe to retry: the Idempotency-Key collapses duplicate creates on the
     // backend, so replaying on a 5xx/timeout can't charge twice.
-    const res = await this.fetchWithRetry(`${this.baseUrl}/orders`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Api-Key': this.apiKey,
-        'Idempotency-Key': idempotencyKey,
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/orders`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Api-Key': this.apiKey,
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+      { timeout, signal },
+    );
     if (!res.ok) return this.handleError(res);
     return res.json() as Promise<OrderResponse>;
   }
@@ -409,14 +446,16 @@ export class Stellar_CardClient {
    * @throws {ValidationError} When `orderId` fails the UUID-shaped pattern check.
    * @throws {AuthError} When the API key is invalid.
    */
-  async getOrder(orderId: string): Promise<OrderStatus> {
+  async getOrder(orderId: string, reqOpts: RequestOptions = {}): Promise<OrderStatus> {
     // Validate and encode — path param must be a UUID-shaped identifier.
     // The server also validates, but failing here avoids a round-trip
     // on typos and eliminates a path-traversal surface on misuse.
     validateOrderId(orderId);
-    const res = await this.fetchWithRetry(`${this.baseUrl}/orders/${encodeURIComponent(orderId)}`, {
-      headers: { 'X-Api-Key': this.apiKey },
-    });
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/orders/${encodeURIComponent(orderId)}`,
+      { headers: { 'X-Api-Key': this.apiKey } },
+      reqOpts,
+    );
     if (!res.ok) return this.handleError(res);
     return res.json() as Promise<OrderStatus>;
   }
@@ -604,6 +643,8 @@ export class Stellar_CardClient {
     offset,
     since_created_at,
     since_updated_at,
+    timeout,
+    signal,
   }: ListOrdersOptions = {}): Promise<OrderListItem[]> {
     const normalizedLimit = normalizeIntegerOption('limit', limit, 20);
     const normalizedOffset =
@@ -615,9 +656,11 @@ export class Stellar_CardClient {
     if (since_created_at) params.set('since_created_at', since_created_at);
     if (since_updated_at) params.set('since_updated_at', since_updated_at);
     const qs = params.toString() ? `?${params}` : '';
-    const res = await this.fetchWithRetry(`${this.baseUrl}/orders${qs}`, {
-      headers: { 'X-Api-Key': this.apiKey },
-    });
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/orders${qs}`,
+      { headers: { 'X-Api-Key': this.apiKey } },
+      { timeout, signal },
+    );
     if (!res.ok) return this.handleError(res);
     return res.json() as Promise<OrderListItem[]>;
   }
@@ -711,10 +754,12 @@ export class Stellar_CardClient {
    * @returns Spend summary including budget limits and order counts.
    * @throws {AuthError} When the API key is invalid.
    */
-  async getUsage(): Promise<UsageSummary> {
-    const res = await this.fetchWithRetry(`${this.baseUrl}/usage`, {
-      headers: { 'X-Api-Key': this.apiKey },
-    });
+  async getUsage(reqOpts: RequestOptions = {}): Promise<UsageSummary> {
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/usage`,
+      { headers: { 'X-Api-Key': this.apiKey } },
+      reqOpts,
+    );
     if (!res.ok) return this.handleError(res);
     return res.json() as Promise<UsageSummary>;
   }
@@ -735,20 +780,42 @@ export class Stellar_CardClient {
     opts: ReportStatusOptions = {},
   ): Promise<void> {
     try {
-      await this.fetchWithRetry(`${this.baseUrl}/agent/status`, {
-        method: 'POST',
-        headers: {
-          'X-Api-Key': this.apiKey,
-          'Content-Type': 'application/json',
+      await this.fetchWithRetry(
+        `${this.baseUrl}/agent/status`,
+        {
+          method: 'POST',
+          headers: {
+            'X-Api-Key': this.apiKey,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            state,
+            wallet_public_key: opts.wallet_public_key,
+            detail: opts.detail,
+          }),
         },
-        body: JSON.stringify({
-          state,
-          wallet_public_key: opts.wallet_public_key,
-          detail: opts.detail,
-        }),
-      });
+        { timeout: opts.timeout, signal: opts.signal },
+      );
     } catch {
       /* best-effort; do not block the caller */
     }
+  }
+
+  /**
+   * Fetch XLM, USDC and every trustline balance for a Stellar account in a
+   * single Horizon call (#701). Unfunded accounts resolve to zero balances.
+   * Results are cached for 3 seconds.
+   *
+   * @param publicKey - Stellar G-address to inspect.
+   */
+  async getAccountBalances(publicKey: string): Promise<AccountBalances> {
+    const { getAccountBalances } = await import('./stellar');
+    const { Networks } = await import('@stellar/stellar-sdk');
+    const passphrase = {
+      mainnet: Networks.PUBLIC,
+      testnet: Networks.TESTNET,
+      futurenet: Networks.FUTURENET,
+    }[this.network];
+    return getAccountBalances(publicKey, passphrase);
   }
 }

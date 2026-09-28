@@ -296,6 +296,35 @@ export class TimeoutError extends Stellar_CardError {
   }
 }
 
+/** Request was cancelled through a caller-supplied `AbortSignal`. */
+export class AbortError extends Stellar_CardError {
+  constructor(operation: string, context?: ErrorContext) {
+    super(`Operation "${operation}" was aborted by the caller.`, 'aborted', 0, undefined, context);
+    this.name = 'AbortError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/** A single field-level configuration problem. */
+export interface ConfigurationIssue {
+  field: string;
+  message: string;
+}
+
+/** Invalid client configuration (bad apiKey, baseUrl, timeout, ...). */
+export class ConfigurationError extends Stellar_CardError {
+  constructor(public readonly issues: ConfigurationIssue[]) {
+    super(
+      `Invalid Stellar_Card configuration: ${issues.map((i) => `${i.field}: ${i.message}`).join('; ')}`,
+      'configuration_error',
+      0,
+      { issues },
+    );
+    this.name = 'ConfigurationError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 /** Validation error — invalid input parameters. */
 export class ValidationError extends Stellar_CardError {
   constructor(

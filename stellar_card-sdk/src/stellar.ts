@@ -113,6 +113,96 @@ export async function getBalance(
   return { xlm, usdc };
 }
 
+/** One balance line from a Stellar account. */
+export interface AssetBalance {
+  /** `"XLM"` for the native asset, otherwise the asset code. */
+  code: string;
+  /** Issuer G-address; `null` for native XLM. */
+  issuer: string | null;
+  /** Horizon asset type, e.g. `native`, `credit_alphanum4`. */
+  assetType: string;
+  /** Decimal balance string. */
+  balance: string;
+}
+
+/** Result of {@link getAccountBalances}. */
+export interface AccountBalances {
+  xlm: string;
+  usdc: string;
+  balances: AssetBalance[];
+  /** `false` when the account does not exist on-chain yet. */
+  funded: boolean;
+}
+
+/** How long balance lookups are cached, in ms. */
+export const BALANCE_CACHE_TTL_MS = 3000;
+const balanceCache = new Map<string, { expires: number; value: Promise<AccountBalances> }>();
+
+/** Clear the {@link getAccountBalances} cache (mainly for tests). */
+export function clearBalanceCache(): void {
+  balanceCache.clear();
+}
+
+function isNotFound(err: unknown): boolean {
+  const e = err as { response?: { status?: number }; name?: string };
+  return e?.response?.status === 404 || e?.name === 'NotFoundError';
+}
+
+/**
+ * Fetch XLM, USDC and every trustline balance in one Horizon call.
+ *
+ * Unfunded accounts (Horizon 404) resolve to zero balances instead of
+ * throwing. Results are cached per network + account for
+ * {@link BALANCE_CACHE_TTL_MS} so tight polling loops don't spam Horizon.
+ *
+ * @param publicKey - Stellar G-address to inspect
+ * @param networkPassphrase - Optional network passphrase (defaults to mainnet)
+ */
+export function getAccountBalances(
+  publicKey: string,
+  networkPassphrase?: string,
+): Promise<AccountBalances> {
+  if (!StrKey.isValidEd25519PublicKey(publicKey)) {
+    return Promise.reject(new Error(`Invalid Stellar public key: ${publicKey}`));
+  }
+  const key = `${getHorizonUrl(networkPassphrase)}|${publicKey}`;
+  const now = Date.now();
+  const cached = balanceCache.get(key);
+  if (cached && cached.expires > now) return cached.value;
+
+  const value = (async (): Promise<AccountBalances> => {
+    try {
+      const account = await withTimeout(getServer(networkPassphrase).loadAccount(publicKey));
+      const balances: AssetBalance[] = account.balances.map((b) => {
+        const line = b as {
+          asset_type: string;
+          balance: string;
+          asset_code?: string;
+          asset_issuer?: string;
+        };
+        return line.asset_type === 'native'
+          ? { code: 'XLM', issuer: null, assetType: 'native', balance: line.balance }
+          : {
+              code: line.asset_code ?? line.asset_type,
+              issuer: line.asset_issuer ?? null,
+              assetType: line.asset_type,
+              balance: line.balance,
+            };
+      });
+      const xlm = balances.find((b) => b.assetType === 'native')?.balance ?? '0';
+      const usdc =
+        balances.find((b) => b.code === 'USDC' && b.issuer === USDC_ISSUER)?.balance ?? '0';
+      return { xlm, usdc, balances, funded: true };
+    } catch (err) {
+      if (isNotFound(err)) return { xlm: '0', usdc: '0', balances: [], funded: false };
+      balanceCache.delete(key); // never cache failures
+      throw err;
+    }
+  })();
+  balanceCache.set(key, { expires: now + BALANCE_CACHE_TTL_MS, value });
+  return value;
+}
+
 /**
  * Add a USDC trustline to a Stellar account.
  *

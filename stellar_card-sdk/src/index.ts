@@ -43,7 +43,8 @@ export {
   // Back-compat alias for payViaContract.
   payVCC,
 } from './stellar';
-export type { WalletInfo, PayOpts } from './stellar';
+export { getAccountBalances, clearBalanceCache, BALANCE_CACHE_TTL_MS } from './stellar';
+export type { WalletInfo, PayOpts, AccountBalances, AssetBalance } from './stellar';
 
 export {
   createOWSWallet,
@@ -80,6 +81,8 @@ export {
   ResumableError,
   NetworkError,
   TimeoutError,
+  AbortError,
+  ConfigurationError,
   ValidationError,
   SorobanRpcError,
   HorizonError,
@@ -95,6 +98,7 @@ export {
   wrapHorizonError,
   wrapWalletError,
   type ErrorContext,
+  type ConfigurationIssue,
 } from './errors';
 
 export { InsufficientFeeError } from './soroban';
@@ -149,6 +153,8 @@ export {
   validateRpcEndpoint,
   validateNetworkConfig,
   NETWORK_ENV_VARS,
+  withRequestTimeout,
+  DEFAULT_REQUEST_TIMEOUT_MS,
 } from './network';
 export type {
   NetworkConfig,
@@ -157,7 +163,15 @@ export type {
   ExtendedRpcEndpointConfig,
   ResolvedRpcEndpoint,
   ResolvedNetworkConfig,
+  RequestOptions,
 } from './network';
+
+export {
+  clientOptionsSchema,
+  createOrderSchema,
+  validateClientOptions,
+  validateCreateOrderInput,
+} from './validation';
 
 // Export comprehensive type definitions
 export type {
