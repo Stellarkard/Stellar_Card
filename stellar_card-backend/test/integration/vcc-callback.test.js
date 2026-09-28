@@ -541,3 +541,41 @@ describe('POST /vcc-callback — F2 per-order secret decrypt failure', () => {
     assert.equal(res.status, 200);
   });
 });
+
+// ── Issue #591: generic signature header aliases ─────────────────────────────
+
+describe('POST /vcc-callback — X-Webhook-Signature / X-Signature aliases (#591)', () => {
+  beforeEach(() => resetDb());
+
+  for (const alias of ['X-Webhook-Signature', 'X-Signature']) {
+    it(`verifies a correctly signed callback sent with ${alias}`, async () => {
+      const orderId = seedOrder({ status: 'ordering' });
+      const payload = { order_id: orderId, status: 'failed', error: 'declined' };
+      const { timestamp, signature, bodyStr } = sign(payload);
+      const res = await request
+        .post('/vcc-callback')
+        .set('Content-Type', 'application/json')
+        .set('X-VCC-Timestamp', timestamp)
+        .set('X-VCC-Order-Id', orderId)
+        .set(alias, signature)
+        .send(bodyStr);
+      assert.notEqual(res.status, 401, `expected the ${alias} alias to pass signature checks`);
+    });
+
+    it(`rejects a tampered body sent with ${alias}`, async () => {
+      const orderId = seedOrder({ status: 'ordering' });
+      const payload = { order_id: orderId, status: 'failed' };
+      const { timestamp, signature } = sign(payload);
+      const tampered = JSON.stringify({ order_id: orderId, status: 'fulfilled' });
+      const res = await request
+        .post('/vcc-callback')
+        .set('Content-Type', 'application/json')
+        .set('X-VCC-Timestamp', timestamp)
+        .set('X-VCC-Order-Id', orderId)
+        .set(alias, signature)
+        .send(tampered);
+      assert.equal(res.status, 401);
+      assert.equal(res.body.error, 'invalid_signature');
+    });
+  }
+});

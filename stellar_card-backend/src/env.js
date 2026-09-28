@@ -181,6 +181,15 @@ const EnvSchema = z
     // recommended for HMAC-SHA256 — 16 was the historical floor but gives only
     // ~80 bits of strength. Audit finding C-13.
     VCC_CALLBACK_SECRET: z.string().min(32, 'VCC_CALLBACK_SECRET must be at least 32 characters'),
+    // Shared secret for generic partner webhooks verified by
+    // middleware/verifyWebhookSignature.js (issue #591). Optional.
+    PARTNER_WEBHOOK_SECRET: z
+      .string()
+      .min(32, 'PARTNER_WEBHOOK_SECRET must be at least 32 characters')
+      .optional(),
+    // Local-development-only escape hatch for webhook signature checks.
+    // Honoured only when NODE_ENV=development; refused at boot in production.
+    WEBHOOK_SIGNATURE_BYPASS: z.enum(['true', 'false']).optional(),
 
     // CORS — comma-separated list of allowed origins for the agent API.
     // F3-env: each entry is parsed as an http(s) URL origin at boot so
@@ -311,6 +320,17 @@ const EnvSchema = z
         'SENTRY_PROFILES_SAMPLE_RATE must be a number between 0 and 1',
       )
       .optional(),
+  })
+  .superRefine((val, ctx) => {
+    // Issue #591: the webhook signature bypass must never be enabled in
+    // production — fail boot rather than silently ignore it.
+    if (val.NODE_ENV === 'production' && val.WEBHOOK_SIGNATURE_BYPASS === 'true') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'WEBHOOK_SIGNATURE_BYPASS=true is not allowed in production.',
+        path: ['WEBHOOK_SIGNATURE_BYPASS'],
+      });
+    }
   })
   .superRefine((val, ctx) => {
     // Production must have a secret-box key set. Dev/test can skip it and
