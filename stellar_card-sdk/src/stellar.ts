@@ -43,6 +43,111 @@ function withTimeout<T>(promise: Promise<T>, ms = HORIZON_TIMEOUT_MS): Promise<T
   ]);
 }
 
+export interface EstimateXlmOptions {
+  /** Slippage buffer percentage (e.g., 0.01 for 1%). Defaults to 0.01 (1%). */
+  slippage?: number;
+  /** Stellar network passphrase (defaults to Networks.PUBLIC). */
+  networkPassphrase?: string;
+  /** Custom Horizon REST URL override. */
+  horizonUrl?: string;
+  /** Quote validity window in milliseconds. Defaults to 60000 (60s). */
+  quoteTtlMs?: number;
+  /** Custom USDC issuer address */
+  usdcIssuer?: string;
+  /** Optional custom price quote fetcher or fallback function */
+  fetchPriceQuote?: () => Promise<number>;
+}
+
+export interface XlmEstimateResult {
+  /** Required XLM amount as a decimal string formatted to 7 decimal places */
+  xlmAmount: string;
+  /** Required XLM stroops (1 XLM = 10^7 stroops) as a numeric string */
+  stroops: string;
+  /** Effective exchange rate (XLM per 1 USDC) */
+  effectiveRate: number;
+  /** Quote expiration ISO-8601 timestamp */
+  expiresAt: string;
+  /** Slippage buffer applied (e.g. 0.01 for 1%) */
+  slippageApplied: number;
+}
+
+/**
+ * Estimate the required XLM stroops and effective exchange rate to pay for a given
+ * USDC amount before submitting order payment.
+ *
+ * Queries the Stellar Horizon DEX orderbook for the USDC/XLM pair and applies a
+ * configurable slippage buffer (default 1%). Falls back to a custom quote fetcher
+ * or returns an informative error on network disconnects.
+ *
+ * @param usdcAmount - Amount of USDC required for the order
+ * @param opts - Options including slippage buffer, network passphrase, and quote fallback
+ * @returns Estimated XLM stroops, effective exchange rate, and quote expiration timestamp
+ * @throws {Error} If usdcAmount is invalid or both orderbook and fallback quote fail
+ */
+export async function estimateXlmRequired(
+  usdcAmount: string | number,
+  opts: EstimateXlmOptions = {},
+): Promise<XlmEstimateResult> {
+  const numUsdc = typeof usdcAmount === 'string' ? parseFloat(usdcAmount) : Number(usdcAmount);
+  if (isNaN(numUsdc) || numUsdc <= 0) {
+    throw new Error(`Invalid USDC amount for estimation: ${usdcAmount}. Must be a positive number.`);
+  }
+
+  const slippage = opts.slippage ?? 0.01;
+  const issuer = opts.usdcIssuer ?? USDC_ISSUER;
+  const usdcAsset = new Asset('USDC', issuer);
+  const xlmAsset = Asset.native();
+
+  let effectiveRate: number | undefined;
+  let orderbookError: unknown;
+
+  try {
+    const server = opts.horizonUrl ? new Horizon.Server(opts.horizonUrl) : getServer(opts.networkPassphrase);
+    const book = await withTimeout(server.orderbook(usdcAsset, xlmAsset).call());
+    if (book.asks && book.asks.length > 0) {
+      effectiveRate = parseFloat(book.asks[0].price);
+    } else if (book.bids && book.bids.length > 0) {
+      effectiveRate = parseFloat(book.bids[0].price);
+    }
+  } catch (err) {
+    orderbookError = err;
+  }
+
+  if (effectiveRate === undefined || isNaN(effectiveRate) || effectiveRate <= 0) {
+    if (opts.fetchPriceQuote) {
+      try {
+        effectiveRate = await opts.fetchPriceQuote();
+      } catch (fallbackErr) {
+        throw new Error(
+          `Failed to estimate XLM required: unable to fetch price quote from fallback source: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`,
+        );
+      }
+    }
+  }
+
+  if (effectiveRate === undefined || isNaN(effectiveRate) || effectiveRate <= 0) {
+    const reason = orderbookError instanceof Error ? `: ${orderbookError.message}` : '';
+    throw new Error(
+      `Failed to estimate XLM required: unable to fetch USDC/XLM price quote from Horizon orderbook${reason}. Fallback price source unavailable.`,
+    );
+  }
+
+  const rateWithSlippage = effectiveRate * (1 + slippage);
+  const totalXlm = numUsdc * rateWithSlippage;
+  const xlmAmount = totalXlm.toFixed(7);
+  const stroops = decimalToStroops(xlmAmount).toString();
+  const ttl = opts.quoteTtlMs ?? 60000;
+  const expiresAt = new Date(Date.now() + ttl).toISOString();
+
+  return {
+    xlmAmount,
+    stroops,
+    effectiveRate,
+    expiresAt,
+    slippageApplied: slippage,
+  };
+}
+
 export interface WalletInfo {
   publicKey: string;
   secret: string; // Keep safe — never share

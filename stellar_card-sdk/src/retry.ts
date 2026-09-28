@@ -53,7 +53,43 @@ export interface AdvancedRetryStrategy {
     /** Sliding window in milliseconds used to count consecutive failures. */
     monitoringPeriodMs: number;
   };
+  /** Optional AbortSignal to cancel pending retry delays */
+  signal?: AbortSignal;
 }
+
+/**
+ * Check whether an HTTP status code indicates a retryable condition.
+ * 429 (Too Many Requests), 502 (Bad Gateway), 503 (Service Unavailable),
+ * 504 (Gateway Timeout), and 0 (network failure) are retryable.
+ * 400 (Bad Request) and 401 (Unauthorized) client errors fail immediately without retry.
+ */
+export function isRetryableHttpStatus(status: number): boolean {
+  return status === 429 || status === 502 || status === 503 || status === 504 || status === 0;
+}
+
+/**
+ * Determine if an error is a transient network or server error that should be retried.
+ * Covers socket errors (ECONNRESET, ETIMEDOUT), network disconnects, and 429/503 HTTP statuses.
+ */
+export function isTransientError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const err = error as { status?: number; statusCode?: number; code?: string; message?: string };
+  const status = err.status ?? err.statusCode;
+  if (typeof status === 'number') {
+    return isRetryableHttpStatus(status);
+  }
+  if (err.code) {
+    const code = String(err.code).toUpperCase();
+    if (['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_SOCKET'].includes(code)) {
+      return true;
+    }
+  }
+  if (err.message && /socket|network disconnect|connection reset|econnreset|etimedout/i.test(err.message)) {
+    return true;
+  }
+  return false;
+}
+
 
 /**
  * Parse an HTTP Retry-After header into milliseconds.
@@ -229,7 +265,7 @@ export async function withAdvancedRetry<T>(
           break;
       }
 
-      await sleep(Math.min(delay, strategy.maxDelayMs));
+      await sleep(Math.min(delay, strategy.maxDelayMs), strategy.signal);
     }
   }
 
@@ -238,12 +274,32 @@ export async function withAdvancedRetry<T>(
 
 /**
  * Sleep for the requested number of milliseconds.
+ * Can be cancelled early if an optional AbortSignal is aborted.
  *
  * @param ms - Duration to wait in milliseconds. Values ≤ 0 resolve immediately.
- * @returns A promise that resolves after the specified delay.
+ * @param signal - Optional AbortSignal that aborts the sleep delay
+ * @returns A promise that resolves after the specified delay or rejects if aborted.
  */
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new Error('Aborted'));
+  }
+  if (ms <= 0) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error('Aborted'));
+    };
+
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
@@ -282,6 +338,18 @@ export interface WithRetryOptions<T> {
    * Useful for logging or emitting metrics without coupling to a logger.
    */
   onRetry?: (err: unknown, attempt: number, delayMs: number) => void;
+  /**
+   * Optional AbortSignal to cancel pending retry attempts and delay timers.
+   */
+  signal?: AbortSignal;
+  /**
+   * Optional jitter strategy. Defaults to 'full'.
+   */
+  jitter?: 'full' | 'equal' | 'decorrelated' | 'none';
+  /**
+   * Optional static Retry-After header or delay to respect.
+   */
+  retryAfter?: string | null;
 }
 
 /**
@@ -313,6 +381,10 @@ export async function withRetry<T>(opts: WithRetryOptions<T>): Promise<T> {
 
   let lastErr: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (opts.signal?.aborted) {
+      throw opts.signal.reason ?? new Error('Aborted');
+    }
+
     try {
       return await opts.fn(attempt);
     } catch (err) {
@@ -320,15 +392,23 @@ export async function withRetry<T>(opts: WithRetryOptions<T>): Promise<T> {
       if (attempt === maxRetries || !isRetryable(err, attempt)) {
         throw err;
       }
+
+      // Check for Retry-After header on error object or response
+      const errObj = err as { retryAfter?: string; headers?: { get?(k: string): string | null } };
+      const retryAfter = opts.retryAfter ?? errObj?.retryAfter ?? errObj?.headers?.get?.('Retry-After');
+
       const delayMs = calculateExponentialBackoffDelay({
         attempt,
         baseDelayMs,
         maxDelayMs,
+        retryAfter,
+        jitter: opts.jitter,
       });
       opts.onRetry?.(err, attempt, delayMs);
-      await sleep(delayMs);
+      await sleep(delayMs, opts.signal);
     }
   }
   // Unreachable — the loop always returns or throws before exhausting.
   throw lastErr;
 }
+
