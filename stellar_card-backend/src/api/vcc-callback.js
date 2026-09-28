@@ -13,6 +13,7 @@ const { normalizeCardBrand } = require('../lib/normalize-card');
 const { FulfillmentCard } = require('../lib/validate');
 const { event: bizEvent } = require('../lib/logger');
 const { recordAudit } = require('../lib/audit');
+const { verifyWebhookSignature } = require('../middleware/verifyWebhookSignature');
 
 // Look up the dashboard that owns an order so vcc-callback can write
 // audit rows scoped to it. Returns null if the order has no api_key
@@ -71,7 +72,19 @@ const baseBodySchema = z.object({
 // POST /vcc-callback
 // Body: { order_id, status: 'fulfilled'|'failed', card?: { number, cvv, expiry, brand }, error?: string }
 // Headers: X-VCC-Signature: sha256=<hmac>, X-VCC-Timestamp: <epoch_ms>
-router.post('/', (req, res) => {
+// Issue #591: fail fast on unsigned/malformed requests (before the order-row
+// read below) and accept X-Webhook-Signature / X-Signature as aliases of
+// X-VCC-Signature. precheckOnly: the v3 verification in this handler remains
+// the authoritative check. Also hosts the explicit local-dev bypass.
+const webhookSignaturePrecheck = verifyWebhookSignature({
+  precheckOnly: true,
+  canonicalHeader: 'x-vcc-signature',
+});
+
+router.post('/', webhookSignaturePrecheck, (req, res) => {
+  // Only set by the middleware when NODE_ENV=development AND
+  // WEBHOOK_SIGNATURE_BYPASS=true — never in test or production.
+  const signatureBypassed = /** @type {any} */ (req).webhookSignatureBypassed === true;
   const signature = req.headers['x-vcc-signature'];
   const timestamp = req.headers['x-vcc-timestamp'];
   const headerOrderId = req.headers['x-vcc-order-id']; // v2+
@@ -89,7 +102,7 @@ router.post('/', (req, res) => {
     });
   }
 
-  if (!signature || !timestamp) {
+  if (!signatureBypassed && (!signature || !timestamp)) {
     return res.status(401).json({ error: 'missing_signature' });
   }
 
@@ -172,7 +185,7 @@ router.post('/', (req, res) => {
     // The header MUST be present AND must match — no "if both present"
     // shortcut. This is the anchor check that prevents an attacker from
     // downgrading to v2 by simply not sending X-VCC-Nonce.
-    if (storedNonce) {
+    if (storedNonce && !signatureBypassed) {
       if (!headerNonce || headerNonce !== storedNonce) {
         bizEvent('callback.rejected', {
           reason: !headerNonce ? 'nonce_missing' : 'nonce_mismatch',
@@ -193,15 +206,20 @@ router.post('/', (req, res) => {
   const requireV3 = Boolean(storedNonce) || orderHasPerOrderSecret;
 
   const rawBody = req.rawBody;
-  const verdict = verifyVccSignature(
-    rawBody,
-    signature,
-    timestamp,
-    headerOrderId,
-    storedNonce,
-    perOrderSecret,
-    { requireV3 },
-  );
+  const verdict = signatureBypassed
+    ? /** @type {{ ok: true, version: string, reason?: undefined }} */ ({
+        ok: true,
+        version: 'dev-bypass',
+      })
+    : verifyVccSignature(
+        rawBody,
+        signature,
+        timestamp,
+        headerOrderId,
+        storedNonce,
+        perOrderSecret,
+        { requireV3 },
+      );
   if (!verdict.ok) {
     bizEvent('callback.rejected', {
       reason: verdict.reason,
