@@ -38,6 +38,7 @@
 // a shape check, and it is async.
 
 const { z } = require('zod');
+const { StrKey } = require('@stellar/stellar-sdk');
 
 // The exact message the hand-written body guards returned. Kept verbatim
 // so the response contract is byte-identical.
@@ -223,6 +224,29 @@ function boundedString(maxLength, typeMessage, lengthMessage, options = {}) {
 }
 
 /**
+ * A Stellar ed25519 public key, checksum-enforced.
+ *
+ * The bare `^G[A-Z2-7]{55}$` shape check was retired from agent/status
+ * after the 2026-04-15 audit: it accepted any 56-char base32 string,
+ * including one with a wrong Ed25519 checksum. That stored silently and
+ * later blew up in the xlm-sender or Horizon's account loader. StrKey is
+ * the same check the rest of the Stellar pipeline uses, so a value that
+ * passes here is a value the SDK will accept downstream.
+ *
+ * Non-strings, null and undefined all fail unless the caller opts in via
+ * `.nullable().optional()` (agent/status lets `null` mean "clear it").
+ *
+ * @param {string} message
+ */
+function stellarPublicKey(message) {
+  return z.unknown().superRefine((value, ctx) => {
+    if (typeof value !== 'string' || !StrKey.isValidEd25519PublicKey(value)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    }
+  });
+}
+
+/**
  * A plain JSON object whose serialised form fits within a byte budget.
  *
  * Arrays and `null` are rejected: both are `typeof 'object'` and both
@@ -385,6 +409,7 @@ module.exports = {
   validate,
   patternString,
   boundedString,
+  stellarPublicKey,
   jsonObject,
   boundedIntQuery,
   optionalIsoTimestamp,
