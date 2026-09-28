@@ -6,7 +6,7 @@ const db = require('./db');
 const logger = require('./lib/logger');
 const {
   fireWebhook,
-  WEBHOOK_RETRY_DELAYS_MS,
+  getWebhookRetryDelay,
   MAX_WEBHOOK_ATTEMPTS,
   refundOrQuarantine,
 } = require('./fulfillment');
@@ -809,10 +809,19 @@ async function retryWebhooks() {
         log(`  webhook ${row.id.slice(0, 8)} delivered`);
       } catch (err) {
         const nextAttempts = row.attempts + 1;
-        // Index by current attempts (not next) so delays map correctly:
-        // attempts=1→delay[1]=5m, attempts=2→delay[2]=30m, attempts=3→delay[3]=null→abandon
-        const delayMs = WEBHOOK_RETRY_DELAYS_MS[row.attempts] ?? null;
-        if (delayMs === null || nextAttempts > MAX_WEBHOOK_ATTEMPTS) {
+        // Go through getWebhookRetryDelay rather than indexing the array
+        // directly: the helper is the unit-tested backoff, and it is the only
+        // one that guarantees a finite delay. `new Date(Date.now() + NaN)
+        // .toISOString()` throws, and that throw is inside this catch — so the
+        // UPDATE below would never run and the row would retry forever.
+        //
+        // The previous comment here claimed "attempts=1→5m, attempts=2→30m",
+        // which has not matched WEBHOOK_RETRY_DELAYS_MS ([30s, 60s, 120s])
+        // for some time. Actual schedule: attempts=1→60s, 2→120s, then
+        // abandoned.
+        const delayMs =
+          nextAttempts > MAX_WEBHOOK_ATTEMPTS ? null : getWebhookRetryDelay(row.attempts);
+        if (delayMs === null) {
           db.prepare(
             `
           UPDATE webhook_queue SET attempts = ?, last_error = ?, next_attempt = ? WHERE id = ?
