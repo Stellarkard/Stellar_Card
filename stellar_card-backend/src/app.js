@@ -52,7 +52,6 @@ const {
 } = require('./lib/sentry-config');
 const { captureException } = require('./lib/sentry-config');
 const { registerRoutes } = require('./routes');
-const { registerRoutes } = require('./routes');
 const corsDenial = require('./middleware/corsDenial');
 const notFound = require('./middleware/notFound');
 const errorHandler = require('./middleware/errorHandler');

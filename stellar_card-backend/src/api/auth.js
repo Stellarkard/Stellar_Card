@@ -183,11 +183,6 @@ function extractBearerToken(req) {
 // Content-Type, an array body, or a null body used to crash the
 // destructure with "Cannot destructure property 'email' of 'undefined'"
 // and return 500 instead of a clear 400) as well as the address shape.
-router.post(
-  '/login',
-  loginLimiter,
-  validateLogin,
-  async (req, res) => {
 //
 // The schema is declared once, next to the route, in the shared
 // validate() middleware (src/lib/validate.js) rather than as an inline

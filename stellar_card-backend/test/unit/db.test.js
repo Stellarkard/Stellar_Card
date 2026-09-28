@@ -26,13 +26,6 @@ const { execFileSync } = require('node:child_process');
 const { v4: uuidv4 } = require('uuid');
 const { db, resetDb } = require('../helpers/app');
 
-// Must stay in lock-step with EXPECTED_SCHEMA_VERSION in src/db.js. The
-// test asserting equality is the tripwire for a migration added without
-// bumping the constant — that mismatch is what the "refusing to start"
-// guard at the bottom of db.js keys off, so a silent drift here turns
-// into a production boot failure.
-const EXPECTED_SCHEMA_VERSION = 30;
-
 const DB_MODULE_PATH = path.join(__dirname, '..', '..', 'src', 'db.js');
 
 // Read from src/db.js rather than hardcoding, so a new migration needs one
