@@ -50,6 +50,8 @@ Usage:
                                      the wallet can receive USDC)
   stellar_card status [--order <id>]     Show orders as a table (--json for raw JSON)
   stellar_card balance                   Show the api key's spend budget (--json)
+  stellar_card logout                    Clear cached session tokens and api keys
+  stellar_card cache clear               Clear local cached state (same as logout)
   stellar_card mcp                       Start the MCP server over stdio (default)
   stellar_card version                   Print the SDK version
   stellar_card --help                    Show this message
@@ -93,6 +95,11 @@ Onboarding guide for agents: https://stellar_card.com/skill.md
   if (cmd === 'wallet') {
     const { walletCommand } = await import('./commands/wallet');
     return walletCommand(rest);
+  }
+
+  if (cmd === 'logout' || cmd === 'cache-clear' || cmd === 'cache') {
+    const { cacheCommand } = await import('./commands/cache');
+    return cacheCommand(rest);
   }
 
   if (cmd === 'mcp') {

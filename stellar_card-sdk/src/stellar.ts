@@ -522,6 +522,69 @@ export async function purchaseCard(opts: {
   return { ...card, order_id: orderId };
 }
 
+/**
+ * Sign an arbitrary message with a Stellar secret key using Ed25519.
+ *
+ * The message is prefixed with the standard separator (`stellar:message:`)
+ * to prevent confusion with Stellar transactions. Returns a base64-encoded signature.
+ *
+ * @param message - The message to sign (string or binary)
+ * @param secretKey - The Stellar secret key (S-address)
+ * @returns Base64-encoded signature
+ * @throws {Error} If the secret key is invalid
+ *
+ * @example
+ * ```typescript
+ * const signature = signMessage('hello world', 'SXXXXXXX...');
+ * console.log('Signature:', signature); // base64-encoded string
+ * ```
+ */
+export function signMessage(message: string | Uint8Array, secretKey: string): string {
+  const keypair = Keypair.fromSecret(secretKey);
+  const prefix = 'stellar:message:';
+  const messageBuffer =
+    typeof message === 'string' ? Buffer.from(message, 'utf-8') : Buffer.from(message);
+  const prefixedMessage = Buffer.concat([Buffer.from(prefix, 'utf-8'), messageBuffer]);
+  const signature = keypair.sign(prefixedMessage);
+  return signature.toString('base64');
+}
+
+/**
+ * Verify a message signature against a Stellar public key using Ed25519.
+ *
+ * The message is prefixed with the standard separator (`stellar:message:`)
+ * to match the signing process. Returns true if the signature is valid, false otherwise.
+ *
+ * @param message - The original message that was signed (string or binary)
+ * @param signature - The base64-encoded signature to verify
+ * @param publicKey - The Stellar public key (G-address)
+ * @returns true if the signature is valid, false otherwise
+ * @throws {Error} If the public key is invalid or signature is not valid base64
+ *
+ * @example
+ * ```typescript
+ * const isValid = verifyMessage('hello world', 'Aqd8...', 'GXXXXXXX...');
+ * if (isValid) console.log('Signature is valid');
+ * ```
+ */
+export function verifyMessage(
+  message: string | Uint8Array,
+  signature: string,
+  publicKey: string,
+): boolean {
+  try {
+    const keypair = Keypair.fromPublicKey(publicKey);
+    const prefix = 'stellar:message:';
+    const messageBuffer =
+      typeof message === 'string' ? Buffer.from(message, 'utf-8') : Buffer.from(message);
+    const prefixedMessage = Buffer.concat([Buffer.from(prefix, 'utf-8'), messageBuffer]);
+    const sigBuffer = Buffer.from(signature, 'base64');
+    return keypair.verify(prefixedMessage, sigBuffer);
+  } catch {
+    return false;
+  }
+}
+
 // Back-compat aliases — the pre-V3 SDK exposed these names. Keep them around
 // as deprecated exports so existing imports don't break on upgrade.
 
