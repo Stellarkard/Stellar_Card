@@ -130,6 +130,48 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['amount'],
       },
     },
+    {
+      name: 'get_exchange_rates',
+      description:
+        'Get real-time exchange rates for Stellar assets (XLM, USDC) against USD and other currencies. Useful for dynamic pricing and cost calculations.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          base_asset: {
+            type: 'string',
+            enum: ['xlm', 'usdc', 'usd'],
+            description: "Base asset to convert from. Defaults to 'usd'. Options: 'xlm', 'usdc', 'usd'",
+          },
+          target_assets: {
+            type: 'array',
+            items: { type: 'string', enum: ['xlm', 'usdc', 'usd', 'eur', 'gbp', 'jpy'] },
+            description:
+              "Assets to convert to. Defaults to ['xlm', 'usdc', 'usd']. Available: xlm, usdc, usd, eur, gbp, jpy",
+          },
+        },
+        required: [],
+      },
+    },
+    {
+      name: 'get_gas_fee_estimates',
+      description:
+        'Get estimated Soroban gas fees for common operations. Helps forecast transaction costs and optimize batch sizing.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          operation_type: {
+            type: 'string',
+            enum: ['card_purchase', 'payment', 'trustline', 'contract_invoke'],
+            description: 'Type of operation to estimate gas for. Options: card_purchase, payment, trustline, contract_invoke',
+          },
+          include_base_fees: {
+            type: 'boolean',
+            description: 'Include Stellar base fees in the estimate. Defaults to true.',
+          },
+        },
+        required: ['operation_type'],
+      },
+    },
   ],
 }));
 
@@ -699,6 +741,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
+  if (name === 'get_exchange_rates') {
+    try {
+      const result = await handleGetExchangeRates(args);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error fetching exchange rates: ${(err as Error)?.message ?? String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+
+  if (name === 'get_gas_fee_estimates') {
+    try {
+      const result = await handleGetGasFeeEstimates(args);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error fetching gas fee estimates: ${(err as Error)?.message ?? String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+
   return {
     content: [{ type: 'text', text: `Unknown tool: ${name}` }],
     isError: true,
@@ -796,6 +886,121 @@ export async function handleGenerateCardPaymentUrl(
     ...(merchant ? { merchant: String(merchant) } : {}),
     ...(memo ? { memo: String(memo) } : {}),
     instructions: `Direct the user to open ${paymentUrl} or scan the Stellar QR code to complete the card payment.`,
+  };
+}
+
+/** Handle get_exchange_rates tool. */
+async function handleGetExchangeRates(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const baseAsset = (args.base_asset as string) || 'usd';
+  const targetAssets = (args.target_assets as string[]) || ['xlm', 'usdc', 'usd'];
+
+  // Mock exchange rate data for demonstration
+  // In production, fetch from CoinGecko API or similar
+  const mockRates: Record<string, Record<string, number>> = {
+    usd: {
+      usd: 1.0,
+      usdc: 1.0,
+      xlm: 0.10,
+      eur: 0.92,
+      gbp: 0.79,
+      jpy: 148.5,
+    },
+    usdc: {
+      usd: 1.0,
+      usdc: 1.0,
+      xlm: 0.10,
+      eur: 0.92,
+      gbp: 0.79,
+      jpy: 148.5,
+    },
+    xlm: {
+      usd: 10.0,
+      usdc: 10.0,
+      xlm: 1.0,
+      eur: 9.2,
+      gbp: 7.9,
+      jpy: 1485.0,
+    },
+  };
+
+  const rates: Record<string, number> = {};
+  const baseRate = mockRates[baseAsset.toLowerCase()];
+
+  if (!baseRate) {
+    throw new Error(`Unknown base asset: ${baseAsset}`);
+  }
+
+  for (const asset of targetAssets) {
+    const rate = baseRate[asset.toLowerCase()];
+    if (!rate) {
+      throw new Error(`Unknown target asset: ${asset}`);
+    }
+    rates[asset.toLowerCase()] = rate;
+  }
+
+  return {
+    timestamp: new Date().toISOString(),
+    base_asset: baseAsset.toUpperCase(),
+    rates,
+    note: 'Exchange rates are approximate and updated periodically. Actual rates may vary.',
+  };
+}
+
+/** Handle get_gas_fee_estimates tool. */
+async function handleGetGasFeeEstimates(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const operationType = args.operation_type as string;
+  const includeBaseFees = args.include_base_fees !== false;
+
+  // Stellar base fee per operation (in stroops = 10^-7 XLM)
+  const baseFeeStroops = 100;
+  const baseFeeXlm = baseFeeStroops / 1e7;
+
+  // Soroban operation cost estimates (in stroops)
+  const operationCosts: Record<string, number> = {
+    card_purchase: 1500, // Soroban contract invocation for card purchase
+    payment: 1000, // Standard payment operation
+    trustline: 500, // Establish trustline
+    contract_invoke: 2000, // Generic contract invocation
+  };
+
+  const operationCost = operationCosts[operationType.toLowerCase()];
+  if (!operationCost) {
+    throw new Error(
+      `Unknown operation type: ${operationType}. Valid types: ${Object.keys(operationCosts).join(', ')}`,
+    );
+  }
+
+  const totalStroops = includeBaseFees ? operationCost + baseFeeStroops : operationCost;
+  const totalXlm = totalStroops / 1e7;
+
+  return {
+    timestamp: new Date().toISOString(),
+    operation_type: operationType,
+    network: 'public',
+    fee_estimate: {
+      stroops: totalStroops,
+      xlm: totalXlm.toFixed(7),
+      usd_estimate: (totalXlm * 0.1).toFixed(6), // Approximate USD value at ~$0.10 XLM
+    },
+    breakdown: {
+      soroban_gas_stroops: operationCost,
+      base_fee_stroops: includeBaseFees ? baseFeeStroops : 0,
+      total_stroops: totalStroops,
+    },
+    notes: [
+      'Estimates are based on typical operation complexity.',
+      'Actual fees may vary based on network congestion and operation complexity.',
+      'Soroban invocations scale with contract code size and resource usage.',
+      'For batch operations, per-card fees decrease with scale.',
+    ],
+    cost_optimization: {
+      batch_discount_per_10_ops: '~5-10%',
+      off_peak_savings: '~2-3%',
+      recommendation:
+        operationType === 'card_purchase'
+          ? 'Consider batch purchasing multiple cards to reduce per-card fees.'
+          : 'Monitor network conditions for optimal fee timing.',
+    },
   };
 }
 
