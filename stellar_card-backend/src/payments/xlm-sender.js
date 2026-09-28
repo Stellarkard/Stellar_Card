@@ -8,6 +8,11 @@
 // payout end-to-end — including the network-error/ambiguous-outcome
 // cases where we don't yet know if the tx landed — without grepping
 // Horizon directly. See submitWithRetry for the full state machine.
+//
+// The retry-ladder length is an ops knob: STELLAR_TX_MAX_ATTEMPTS
+// (default 3, validated 1..10) drives both how many attempts actually
+// run AND the `max_attempts` field every event carries, so the log
+// always reflects the ladder that really executed.
 
 const {
   Horizon,
@@ -84,9 +89,36 @@ const NETWORK_PASSPHRASE = NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TE
 
 const server = new Horizon.Server(HORIZON_URL);
 
+// Resolve the retry-ladder length for submitWithRetry. Default 3; ops can
+// override with STELLAR_TX_MAX_ATTEMPTS. Any value that isn't an integer in
+// [1,10] falls back to 3 — the conservative default — because the ladder
+// length is also a log field: wallet.tx_initiated.max_attempts must always
+// match the ladder that actually ran, and a corrupt value (bogus, 0, >10,
+// fractional) must never silently swap how many Horizon round-trips a payout
+// burns. The FIRST fallback is surfaced loudly via a wallet.transaction.*
+// log line + wallet.tx_config_invalid bizEvent so an ops typo is traceable.
+let walletTxConfigWarned = false;
+function walletTxMaxAttempts() {
+  const raw = process.env.STELLAR_TX_MAX_ATTEMPTS;
+  if (raw === undefined || raw === null || raw === '') return 3;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 1 && n <= 10) return n;
+  if (!walletTxConfigWarned) {
+    walletTxConfigWarned = true;
+    const fields = {
+      raw_value: String(raw),
+      fallback_max_attempts: 3,
+    };
+    log('error', 'wallet.transaction.config_invalid', fields);
+    bizEvent('wallet.tx_config_invalid', fields);
+  }
+  return 3;
+}
+
 // Submit a Stellar transaction with two layers of safety:
 //
-//   1. Retry on tx_bad_seq up to `maxAttempts` times. Concurrent sends that
+//   1. Retry on tx_bad_seq up to `maxAttempts` times (configurable via
+//      STELLAR_TX_MAX_ATTEMPTS, default 3). Concurrent sends that
 //      race on the treasury's sequence number resolve naturally: the losing
 //      submit gets tx_bad_seq, reloads the account, and rebuilds with the
 //      fresh seq. tx_bad_seq is definitive — stellar-core validated the
@@ -118,7 +150,7 @@ const server = new Horizon.Server(HORIZON_URL);
 //
 //      The `stellarStatus` marker lets callers differentiate safe-retry
 //      from must-not-retry without parsing error strings.
-async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
+async function submitWithRetry(buildTx, keypair, maxAttempts = walletTxMaxAttempts()) {
   let lastErr;
   const publicKey = keypair.publicKey();
   // Total wall-clock for the whole retry ladder, not per attempt. The gap

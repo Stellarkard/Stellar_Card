@@ -360,3 +360,147 @@ describe('Wallet Transaction Execution Logging (Part 1): real submitWithRetry', 
     }
   });
 });
+
+// ── Part 5: core configuration — STELLAR_TX_MAX_ATTEMPTS ─────────────────
+//
+// The retry-ladder length is an ops knob (default 3, validated 1..10). Every
+// wallet.tx_* event already carries `max_attempts`, so these tests pin that
+// field to the ladder that REALLY ran — including the fallback when ops feeds
+// a corrupt value, and the one-time wallet.tx_config_invalid warning that
+// makes a misconfiguration traceable instead of silent.
+describe('Wallet Transaction Execution Logging (Part 5): configurable retry ladder', () => {
+  const { submitWithRetry } = require('../../src/payments/xlm-sender');
+  const {
+    Horizon,
+    Account,
+    TransactionBuilder,
+    Networks,
+    Operation,
+    Asset,
+  } = require('@stellar/stellar-sdk');
+
+  const realLoadAccount = Horizon.Server.prototype.loadAccount;
+  const realSubmit = Horizon.Server.prototype.submitTransaction;
+
+  const keypair = Keypair.random();
+  const publicKey = keypair.publicKey();
+
+  let captured;
+  let unsubscribe;
+  let savedMaxAttempts;
+
+  beforeEach(() => {
+    captured = [];
+    savedMaxAttempts = process.env.STELLAR_TX_MAX_ATTEMPTS;
+    unsubscribe = subscribe((evt) => {
+      if (evt.type === 'biz' && evt.name.startsWith('wallet.tx_')) captured.push(evt);
+    });
+  });
+
+  afterEach(() => {
+    if (savedMaxAttempts === undefined) delete process.env.STELLAR_TX_MAX_ATTEMPTS;
+    else process.env.STELLAR_TX_MAX_ATTEMPTS = savedMaxAttempts;
+    unsubscribe();
+    Horizon.Server.prototype.loadAccount = realLoadAccount;
+    Horizon.Server.prototype.submitTransaction = realSubmit;
+  });
+
+  const byName = (name) => captured.filter((e) => e.name === name);
+
+  function buildTx(account) {
+    return new TransactionBuilder(account, { fee: '100000', networkPassphrase: Networks.TESTNET })
+      .addOperation(
+        Operation.payment({
+          destination: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+          asset: Asset.native(),
+          amount: '1.0000000',
+        }),
+      )
+      .setTimeout(60)
+      .build();
+  }
+
+  function badSeqError() {
+    const err = /** @type {any} */ (new Error('bad seq'));
+    err.response = { data: { extras: { result_codes: { transaction: 'tx_bad_seq' } } } };
+    return err;
+  }
+
+  it('uses the default ladder (3) when STELLAR_TX_MAX_ATTEMPTS is unset', async () => {
+    delete process.env.STELLAR_TX_MAX_ATTEMPTS;
+    Horizon.Server.prototype.loadAccount = async () => new Account(publicKey, '100');
+    Horizon.Server.prototype.submitTransaction = async () => ({ hash: 'OK_HASH' });
+
+    await submitWithRetry(buildTx, keypair);
+
+    const [initiated] = byName('wallet.tx_initiated');
+    assert.equal(initiated.fields.max_attempts, 3);
+  });
+
+  it('honours STELLAR_TX_MAX_ATTEMPTS and reflects it on every event', async () => {
+    process.env.STELLAR_TX_MAX_ATTEMPTS = '2';
+    let loads = 0;
+    Horizon.Server.prototype.loadAccount = async () =>
+      new Account(publicKey, String(100 + ++loads));
+    Horizon.Server.prototype.submitTransaction = async () => {
+      throw badSeqError();
+    };
+
+    await assert.rejects(submitWithRetry(buildTx, keypair));
+
+    assert.deepEqual(
+      captured.map((e) => e.name),
+      ['wallet.tx_initiated', 'wallet.tx_failed', 'wallet.tx_initiated', 'wallet.tx_failed'],
+    );
+    for (const initiated of byName('wallet.tx_initiated')) {
+      assert.equal(initiated.fields.max_attempts, 2);
+    }
+    const failures = byName('wallet.tx_failed');
+    assert.equal(failures[0].fields.retries_exhausted, false);
+    assert.equal(failures[1].fields.attempt, 2);
+    assert.equal(failures[1].fields.retries_exhausted, true);
+  });
+
+  it('accepts a single-attempt ladder: one failure is immediately terminal', async () => {
+    process.env.STELLAR_TX_MAX_ATTEMPTS = '1';
+    Horizon.Server.prototype.loadAccount = async () => new Account(publicKey, '100');
+    Horizon.Server.prototype.submitTransaction = async () => {
+      throw badSeqError();
+    };
+
+    await assert.rejects(submitWithRetry(buildTx, keypair));
+
+    assert.deepEqual(
+      captured.map((e) => e.name),
+      ['wallet.tx_initiated', 'wallet.tx_failed'],
+    );
+    assert.equal(byName('wallet.tx_initiated')[0].fields.max_attempts, 1);
+    assert.equal(byName('wallet.tx_failed')[0].fields.retries_exhausted, true);
+  });
+
+  it('falls back to 3 and emits wallet.tx_config_invalid on a corrupt value', async () => {
+    process.env.STELLAR_TX_MAX_ATTEMPTS = 'bogus';
+    Horizon.Server.prototype.loadAccount = async () => new Account(publicKey, '100');
+    Horizon.Server.prototype.submitTransaction = async () => ({ hash: 'OK_HASH' });
+
+    await submitWithRetry(buildTx, keypair);
+
+    const [warning] = byName('wallet.tx_config_invalid');
+    assert.ok(warning, 'expected one wallet.tx_config_invalid warning');
+    assert.equal(warning.fields.raw_value, 'bogus');
+    assert.equal(warning.fields.fallback_max_attempts, 3);
+    assert.equal(byName('wallet.tx_initiated')[0].fields.max_attempts, 3);
+  });
+
+  it('rejects out-of-range and fractional configs, always running the default ladder', async () => {
+    for (const bad of ['0', '11', '-1', '2.5', 'three']) {
+      process.env.STELLAR_TX_MAX_ATTEMPTS = bad;
+      Horizon.Server.prototype.loadAccount = async () => new Account(publicKey, '100');
+      Horizon.Server.prototype.submitTransaction = async () => ({ hash: 'OK_HASH' });
+      await submitWithRetry(buildTx, keypair);
+    }
+    for (const initiated of byName('wallet.tx_initiated')) {
+      assert.equal(initiated.fields.max_attempts, 3, 'corrupt config must never change the ladder');
+    }
+  });
+});
