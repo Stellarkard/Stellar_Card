@@ -46,7 +46,12 @@ export type {
   MapPaginatedOptions,
 } from './pagination';
 
+// Keystore utilities — secure cross-platform encrypted storage adapter (#705)
+export { BrowserKeystore, createKeystore } from './keystore';
+export type { EncryptedKeystore } from './keystore';
+
 // Network configuration helpers — pure functions, no Node.js deps.
+
 // `resolveNetworkConfigFromEnv` guards its `process.env` access so it is safe
 // to call in the browser (it simply ignores the absent environment there).
 export {

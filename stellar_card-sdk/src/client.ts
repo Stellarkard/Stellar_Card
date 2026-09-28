@@ -751,4 +751,21 @@ export class Stellar_CardClient {
       /* best-effort; do not block the caller */
     }
   }
+
+  /**
+   * Estimate the XLM required to pay for a given USDC order amount before payment,
+   * querying the Stellar Horizon DEX orderbook with configurable slippage.
+   *
+   * @param usdcAmount - Amount in USDC
+   * @param options - Estimation options including slippage buffer and fallback quote fetcher
+   * @returns Estimated stroops, effective exchange rate, and expiration timestamp
+   */
+  async estimateXlmRequired(
+    usdcAmount: string | number,
+    options?: import('./stellar').EstimateXlmOptions,
+  ): Promise<import('./stellar').XlmEstimateResult> {
+    const { estimateXlmRequired } = await import('./stellar');
+    return estimateXlmRequired(usdcAmount, options);
+  }
 }
+

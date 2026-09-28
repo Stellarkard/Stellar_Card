@@ -843,3 +843,46 @@ export async function purchaseCardOWS(
     );
   }
 }
+
+// ── Secure Keystore Integration (#705) ──────────────────────────────────────
+
+export { createKeystore, NodeFileSystemKeystore, BrowserKeystore } from './keystore';
+export type { EncryptedKeystore } from './keystore';
+
+/**
+ * Persist an encrypted Stellar wallet secret using a cross-platform keystore adapter.
+ *
+ * @param walletName - Wallet identifier
+ * @param stellarSecret - Secret key (S...) to store
+ * @param passphrase - User passphrase to encrypt the secret
+ * @param keystore - Optional keystore adapter (defaults to auto-detected environment keystore)
+ */
+export async function saveWalletToKeystore(
+  walletName: string,
+  stellarSecret: string,
+  passphrase: string,
+  keystore?: import('./keystore').EncryptedKeystore,
+): Promise<void> {
+  const { createKeystore } = await import('./keystore');
+  const store = keystore ?? createKeystore();
+  await store.set(walletName, stellarSecret, passphrase);
+}
+
+/**
+ * Load and decrypt a Stellar wallet secret from a keystore adapter.
+ *
+ * @param walletName - Wallet identifier
+ * @param passphrase - User passphrase to decrypt the secret
+ * @param keystore - Optional keystore adapter (defaults to auto-detected environment keystore)
+ * @returns Decrypted Stellar secret key or null if not found
+ */
+export async function loadWalletFromKeystore(
+  walletName: string,
+  passphrase: string,
+  keystore?: import('./keystore').EncryptedKeystore,
+): Promise<string | null> {
+  const { createKeystore } = await import('./keystore');
+  const store = keystore ?? createKeystore();
+  return store.get(walletName, passphrase);
+}
+

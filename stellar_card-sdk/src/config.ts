@@ -352,3 +352,104 @@ export async function loadEncryptedConfigKey(
 ): Promise<string> {
   return decrypt({ payload, passphrase, context: 'config-secret' });
 }
+
+// ── Stellar Network Auto-Detection (#703) ───────────────────────────────────
+
+export const MAINNET_PASSPHRASE = 'Public Global Stellar Network ; September 2015';
+export const TESTNET_PASSPHRASE = 'Test SDF Network ; September 2015';
+
+export const MAINNET_HORIZON_URL = 'https://horizon.stellar.org';
+export const TESTNET_HORIZON_URL = 'https://horizon-testnet.stellar.org';
+export const MAINNET_SOROBAN_RPC_URL = 'https://mainnet.sorobanrpc.com';
+export const TESTNET_SOROBAN_RPC_URL = 'https://soroban-testnet.stellar.org';
+
+export const MAINNET_USDC_SAC = 'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75';
+export const TESTNET_USDC_SAC = 'CBIELTK6YBZJU5UP2WWQEUCYJLPU6QXNLTEXDJ5TYWKPONBHZXDVZAC2';
+
+export interface NetworkDetectionOptions {
+  networkPassphrase?: string;
+  horizonUrl?: string;
+  sorobanRpcUrl?: string;
+  contractAddresses?: Record<string, string>;
+}
+
+export interface DetectedNetworkConfig {
+  networkType: 'mainnet' | 'testnet' | 'custom';
+  networkPassphrase: string;
+  horizonUrl: string;
+  sorobanRpcUrl: string;
+  contractAddresses: {
+    usdcSac: string;
+    [key: string]: string;
+  };
+}
+
+/**
+ * Automatically infer network type, default Horizon URL, Soroban RPC URL,
+ * and contract addresses (including USDC SAC) from a Stellar network passphrase.
+ *
+ * Recognizes Testnet and Mainnet passphrases by default. Custom passphrases
+ * require a custom RPC configuration; otherwise, a descriptive error is thrown.
+ *
+ * @param input - A network passphrase string or configuration options object
+ * @returns Fully resolved network configuration including SAC contract addresses
+ * @throws {Error} When an unrecognized passphrase is provided without custom RPC configuration
+ */
+export function detectNetworkFromPassphrase(
+  input: string | NetworkDetectionOptions,
+): DetectedNetworkConfig {
+  const opts: NetworkDetectionOptions =
+    typeof input === 'string' ? { networkPassphrase: input } : input || {};
+
+  const passphrase = opts.networkPassphrase?.trim();
+  if (!passphrase) {
+    throw new Error('A Stellar network passphrase is required to detect network configuration');
+  }
+
+  if (passphrase === TESTNET_PASSPHRASE) {
+    return {
+      networkType: 'testnet',
+      networkPassphrase: TESTNET_PASSPHRASE,
+      horizonUrl: opts.horizonUrl ?? TESTNET_HORIZON_URL,
+      sorobanRpcUrl: opts.sorobanRpcUrl ?? TESTNET_SOROBAN_RPC_URL,
+      contractAddresses: {
+        usdcSac: TESTNET_USDC_SAC,
+        ...opts.contractAddresses,
+      },
+    };
+  }
+
+  if (passphrase === MAINNET_PASSPHRASE) {
+    return {
+      networkType: 'mainnet',
+      networkPassphrase: MAINNET_PASSPHRASE,
+      horizonUrl: opts.horizonUrl ?? MAINNET_HORIZON_URL,
+      sorobanRpcUrl: opts.sorobanRpcUrl ?? MAINNET_SOROBAN_RPC_URL,
+      contractAddresses: {
+        usdcSac: MAINNET_USDC_SAC,
+        ...opts.contractAddresses,
+      },
+    };
+  }
+
+  // Unrecognized passphrase: custom standalone sandbox or private network.
+  // Requires custom RPC configuration (sorobanRpcUrl or horizonUrl).
+  if (!opts.sorobanRpcUrl && !opts.horizonUrl) {
+    throw new Error(
+      `Unrecognized network passphrase: "${passphrase}". ` +
+        `When connecting to a custom or standalone sandbox, you must explicitly provide a sorobanRpcUrl and horizonUrl.`,
+    );
+  }
+
+  return {
+    networkType: 'custom',
+    networkPassphrase: passphrase,
+    horizonUrl: opts.horizonUrl ?? 'http://localhost:8000',
+    sorobanRpcUrl: opts.sorobanRpcUrl ?? 'http://localhost:8000/soroban/rpc',
+    contractAddresses: {
+      usdcSac: opts.contractAddresses?.usdcSac ?? '',
+      ...opts.contractAddresses,
+    },
+  };
+}
+

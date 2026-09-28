@@ -25,6 +25,8 @@ export {
   sleep,
   withRetry,
   withAdvancedRetry,
+  isRetryableHttpStatus,
+  isTransientError,
 } from './retry';
 export type {
   ExponentialBackoffDelayOptions,
@@ -38,12 +40,14 @@ export {
   addUsdcTrustline,
   payViaContract,
   purchaseCard,
+  estimateXlmRequired,
   // Re-export from this barrel to keep external imports stable even if
   // internal module boundaries change later.
   // Back-compat alias for payViaContract.
   payVCC,
 } from './stellar';
-export type { WalletInfo, PayOpts } from './stellar';
+export type { WalletInfo, PayOpts, EstimateXlmOptions, XlmEstimateResult } from './stellar';
+
 
 export {
   createOWSWallet,
@@ -57,7 +61,14 @@ export {
   onboardAgent,
   // Back-compat alias.
   payVCCOWS,
+  saveWalletToKeystore,
+  loadWalletFromKeystore,
+  createKeystore,
+  NodeFileSystemKeystore,
+  BrowserKeystore,
 } from './ows';
+export type { EncryptedKeystore } from './ows';
+
 export type {
   TrustlineOpts,
   PayViaContractOwsOpts,
@@ -118,8 +129,14 @@ export {
   resolveCredentials,
   saveEncryptedConfigKey,
   loadEncryptedConfigKey,
+  detectNetworkFromPassphrase,
+  MAINNET_PASSPHRASE,
+  TESTNET_PASSPHRASE,
+  MAINNET_USDC_SAC,
+  TESTNET_USDC_SAC,
 } from './config';
-export type { Stellar_CardConfig } from './config';
+export type { Stellar_CardConfig, NetworkDetectionOptions, DetectedNetworkConfig } from './config';
+
 
 export {
   paginate,
