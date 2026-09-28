@@ -228,7 +228,12 @@ function createOrderCreateLimiter(overrideOptions = {}) {
     limit: (req) => {
       const rpm = req.apiKey?.rate_limit_rpm;
       if (rpm && rpm > 0) return rpm * 60; // convert rpm → per-hour
-      return 60; // default 60/hour
+      // Env-overridable, so ops can tighten/loosen the ceiling without a
+      // redeploy. This used to be a hardcoded 60 here while the inline
+      // production limiter below used the env-aware version — i.e. the
+      // tested factory and the limiter actually mounted on POST / behaved
+      // differently, and only the inline one was real.
+      return defaultCreateLimitPerHour();
     },
     keyGenerator: (req) => req.apiKey?.id || /** @type {any} */ (ipKeyGenerator)(req),
     standardHeaders: 'draft-7',
@@ -270,22 +275,11 @@ function defaultCreateLimitPerHour() {
   const raw = parseInt(process.env.ORDER_CREATE_LIMIT_PER_HOUR || '60', 10);
   return Number.isFinite(raw) && raw > 0 ? raw : 60;
 }
-const orderCreateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  limit: (req) => {
-    const rpm = req.apiKey?.rate_limit_rpm;
-    if (rpm && rpm > 0) return rpm * 60; // convert rpm → per-hour
-    return defaultCreateLimitPerHour();
-  },
-  keyGenerator: (req) => req.apiKey?.id || /** @type {any} */ (ipKeyGenerator)(req),
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  handler: (req, res) =>
-    res.status(429).json({
-      error: 'rate_limit_exceeded',
-      message: "Too many orders created. Check your key's rate_limit_rpm setting.",
-    }),
-});
+// Built from the tested factory rather than a second, near-identical inline
+// rateLimit() call. The inline copy was the one mounted on POST /, which
+// meant the factory's own test coverage described a limiter that was not
+// the one serving traffic.
+const orderCreateLimiter = createOrderCreateLimiter();
 
 // Concurrent-stream tracking. Each open SSE connection on
 // /v1/orders/:id/stream or /dashboard/stream increments the relevant
