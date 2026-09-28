@@ -1,6 +1,9 @@
 // @ts-check
 // Background jobs — run on startup and on a repeating interval.
 // Handles order expiry, stuck-order recovery, and unmatched payment refunds.
+// Scheduler failures (any sub-job, the funding-check guard, or the alert
+// evaluator) are also mirrored to Sentry via reportSchedulerError below —
+// see the comment on _reportError for why that hook exists.
 
 const db = require('./db');
 const logger = require('./lib/logger');

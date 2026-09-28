@@ -1,6 +1,13 @@
 // @ts-check
 // Stellar payment helpers — sends USDC or XLM from the treasury wallet.
 // Used for refunds to agents and for paying CTX.com gift card invoices.
+//
+// Every attempt in the submit-retry ladder below emits a structured
+// wallet.transaction.* log line plus a matching wallet.tx_* bizEvent
+// (attempt, success, failed, recovered, unresolved) so ops can trace a
+// payout end-to-end — including the network-error/ambiguous-outcome
+// cases where we don't yet know if the tx landed — without grepping
+// Horizon directly. See submitWithRetry for the full state machine.
 
 const {
   Horizon,

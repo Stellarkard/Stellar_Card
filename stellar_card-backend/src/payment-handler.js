@@ -14,6 +14,10 @@
 //      ordering) and runs the three vcc-client steps, persisting a checkpoint
 //      after each one so the reconciler in jobs.js can recover from a mid-
 //      flight crash without double-paying.
+//
+// Unit coverage lives in test/unit/payment-handler.test.js (helpers and the
+// corrupt-amount / non-Error-throw edge cases); the happy path and
+// concurrency races are covered by the e2e-stellar_card-vcc integration test.
 
 const { v4: uuidv4 } = require('uuid');
 const db = require('./db');

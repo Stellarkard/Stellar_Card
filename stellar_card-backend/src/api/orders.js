@@ -220,6 +220,13 @@ const validateListOrders = validate({
 /**
  * Factory for creating order creation rate limiters.
  *
+ * keyGenerator prefers the authenticated api key id so a single agent's
+ * budget follows them across IPs (NAT, proxies, IPv6 rotation); it only
+ * falls back to the request IP for the rare case this runs before auth
+ * middleware has attached req.apiKey. standardHeaders uses the draft-7
+ * RateLimit-* headers (not legacy X-RateLimit-*) to match the rest of
+ * this API's header conventions.
+ *
  * @param {Partial<import('express-rate-limit').Options>} [overrideOptions]
  */
 function createOrderCreateLimiter(overrideOptions = {}) {
