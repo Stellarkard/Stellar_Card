@@ -42,6 +42,8 @@ export {
   payViaContract,
   purchaseCard,
   estimateXlmRequired,
+  signMessage,
+  verifyMessage,
   // Re-export from this barrel to keep external imports stable even if
   // internal module boundaries change later.
   // Back-compat alias for payViaContract.
