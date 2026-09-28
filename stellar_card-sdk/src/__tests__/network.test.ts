@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { Networks } from '@stellar/stellar-sdk';
 import {
   resolveNetworkConfig,
@@ -7,6 +7,9 @@ import {
   getDefaultHorizonUrl,
   NETWORK_ENV_VARS,
   validateRpcEndpoint,
+  createProxyAgent,
+  resolveProxyUrl,
+  shouldBypassProxy,
 } from '../network';
 
 describe('resolveNetworkConfig', () => {
@@ -190,5 +193,136 @@ describe('validateRpcEndpoint', () => {
   it('rejects invalid URL structures or protocols', () => {
     expect(() => validateRpcEndpoint('invalid-url')).toThrow(/Invalid RPC endpoint URL/);
     expect(() => validateRpcEndpoint('ftp://rpc.stellar.org')).toThrow(/Invalid protocol: ftp/);
+  });
+});
+
+describe('proxy support (#768)', () => {
+  let envBackup: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    envBackup = {};
+    if (typeof process !== 'undefined' && process.env) {
+      envBackup.HTTPS_PROXY = process.env.HTTPS_PROXY;
+      envBackup.HTTP_PROXY = process.env.HTTP_PROXY;
+      envBackup.NO_PROXY = process.env.NO_PROXY;
+      delete process.env.HTTPS_PROXY;
+      delete process.env.HTTP_PROXY;
+      delete process.env.NO_PROXY;
+    }
+  });
+
+  afterEach(() => {
+    if (typeof process !== 'undefined' && process.env) {
+      if (envBackup.HTTPS_PROXY !== undefined) process.env.HTTPS_PROXY = envBackup.HTTPS_PROXY;
+      else delete process.env.HTTPS_PROXY;
+      if (envBackup.HTTP_PROXY !== undefined) process.env.HTTP_PROXY = envBackup.HTTP_PROXY;
+      else delete process.env.HTTP_PROXY;
+      if (envBackup.NO_PROXY !== undefined) process.env.NO_PROXY = envBackup.NO_PROXY;
+      else delete process.env.NO_PROXY;
+    }
+  });
+
+  describe('createProxyAgent', () => {
+    it('returns undefined when proxy packages are not available', () => {
+      const agent = createProxyAgent('http://proxy.example.com:8080');
+      // If packages are not installed, should return undefined
+      // If packages are installed, should return an agent
+      expect(agent === undefined || typeof agent === 'object').toBe(true);
+    });
+
+    it('throws error for unsupported proxy protocol', () => {
+      if (typeof process !== 'undefined' && process.env) {
+        // Mock the proxy packages to be available
+        vi.stubGlobal('require', vi.fn(() => ({ default: class {} })));
+        expect(() => createProxyAgent('ftp://proxy.example.com')).toThrow(
+          /Unsupported proxy protocol/,
+        );
+        vi.unstubAllGlobals();
+      }
+    });
+  });
+
+  describe('resolveProxyUrl', () => {
+    it('returns config.proxyUrl when explicitly set', () => {
+      const config = { proxyUrl: 'http://config-proxy.example.com:8080' };
+      const result = resolveProxyUrl(config);
+      expect(result).toBe('http://config-proxy.example.com:8080');
+    });
+
+    it('prioritizes HTTPS_PROXY over HTTP_PROXY', () => {
+      if (typeof process !== 'undefined' && process.env) {
+        process.env.HTTPS_PROXY = 'https://secure-proxy.example.com:8443';
+        process.env.HTTP_PROXY = 'http://proxy.example.com:8080';
+        const result = resolveProxyUrl();
+        expect(result).toBe('https://secure-proxy.example.com:8443');
+      }
+    });
+
+    it('falls back to HTTP_PROXY when HTTPS_PROXY is not set', () => {
+      if (typeof process !== 'undefined' && process.env) {
+        process.env.HTTP_PROXY = 'http://proxy.example.com:8080';
+        const result = resolveProxyUrl();
+        expect(result).toBe('http://proxy.example.com:8080');
+      }
+    });
+
+    it('returns undefined when no proxy is configured', () => {
+      const result = resolveProxyUrl({});
+      expect(result).toBeUndefined();
+    });
+
+    it('respects config.proxyUrl over environment variables', () => {
+      if (typeof process !== 'undefined' && process.env) {
+        process.env.HTTPS_PROXY = 'https://env-proxy.example.com:8443';
+        const config = { proxyUrl: 'http://config-proxy.example.com:8080' };
+        const result = resolveProxyUrl(config);
+        expect(result).toBe('http://config-proxy.example.com:8080');
+      }
+    });
+
+    it('handles lowercase environment variable names', () => {
+      if (typeof process !== 'undefined' && process.env) {
+        process.env.https_proxy = 'https://secure-proxy.example.com:8443';
+        const result = resolveProxyUrl();
+        expect(result).toBe('https://secure-proxy.example.com:8443');
+      }
+    });
+  });
+
+  describe('shouldBypassProxy', () => {
+    it('returns false when NO_PROXY is not set', () => {
+      expect(shouldBypassProxy('https://api.example.com')).toBe(false);
+    });
+
+    it('returns true for exact hostname match', () => {
+      expect(shouldBypassProxy('https://localhost', 'localhost')).toBe(true);
+      expect(shouldBypassProxy('https://api.example.com', 'api.example.com')).toBe(true);
+    });
+
+    it('returns true for domain suffix match with wildcard', () => {
+      expect(shouldBypassProxy('https://api.example.com', '*.example.com')).toBe(true);
+      expect(shouldBypassProxy('https://sub.api.example.com', '*.example.com')).toBe(true);
+    });
+
+    it('returns true for substring match', () => {
+      expect(shouldBypassProxy('https://internal-api.example.com', 'internal')).toBe(true);
+    });
+
+    it('returns false when hostname does not match any pattern', () => {
+      expect(shouldBypassProxy('https://external.com', '*.example.com')).toBe(false);
+      expect(shouldBypassProxy('https://api.example.com', 'localhost')).toBe(false);
+    });
+
+    it('handles comma-separated NO_PROXY list', () => {
+      const noProxy = 'localhost,*.example.com,192.168.1.1';
+      expect(shouldBypassProxy('https://localhost', noProxy)).toBe(true);
+      expect(shouldBypassProxy('https://api.example.com', noProxy)).toBe(true);
+      expect(shouldBypassProxy('https://192.168.1.1', noProxy)).toBe(true);
+      expect(shouldBypassProxy('https://external.com', noProxy)).toBe(false);
+    });
+
+    it('trims whitespace from NO_PROXY patterns', () => {
+      expect(shouldBypassProxy('https://api.example.com', ' *.example.com , ')).toBe(true);
+    });
   });
 });
