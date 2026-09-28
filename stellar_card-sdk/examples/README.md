@@ -109,7 +109,83 @@ Pay a stellar_card order directly via the Soroban smart contract using a raw Ste
 CARDS402_API_KEY=... STELLAR_SECRET=S... node examples/soroban-payment.js
 ```
 
-### 5. [cli-commands.md](./cli-commands.md) - CLI Cheat Sheet
+### 9. [advanced-wallet-management.js](./advanced-wallet-management.js) - Advanced Wallet Management
+
+Professional wallet management for multi-environment deployments:
+- Create and manage multiple wallet profiles
+- Switch between production, staging, and development wallets
+- Monitor wallet health and check balances
+- Automatic optimal wallet selection for payments
+- Secure wallet configuration storage
+
+```bash
+CARDS402_API_KEY=... node examples/advanced-wallet-management.js
+```
+
+### 10. [batch-card-purchasing.js](./batch-card-purchasing.js) - Batch Card Purchasing
+
+Efficient bulk card purchasing with advanced retry logic:
+- Purchase multiple cards in sequence with proper spacing
+- Rate limit handling with exponential backoff
+- Per-card error recovery
+- Summary reporting and failure tracking
+- Production-ready retry strategy
+
+```bash
+CARDS402_API_KEY=... node examples/batch-card-purchasing.js
+```
+
+### 11. [monitoring-and-analytics.js](./monitoring-and-analytics.js) - Monitoring and Analytics
+
+Comprehensive wallet monitoring and analytics:
+- Real-time wallet health checks
+- Purchase metrics collection
+- Spending pattern analysis
+- Alert threshold configuration
+- JSON report generation for archival
+
+```bash
+CARDS402_API_KEY=... node examples/monitoring-and-analytics.js
+```
+
+### 12. [testing-patterns.js](./testing-patterns.js) - Testing Patterns
+
+Complete testing framework and patterns:
+- Mock response generators
+- Test suite utilities
+- Format validation tests
+- Data validation tests
+- Business logic test examples
+
+```bash
+node examples/testing-patterns.js
+```
+
+### 13. [cost-optimization.js](./cost-optimization.js) - Cost Optimization
+
+Financial analysis and optimization:
+- Asset cost comparison (XLM vs USDC)
+- Batch size optimization
+- Budget forecasting
+- Cost reduction strategies
+- Fee percentage analysis
+
+```bash
+CARDS402_API_KEY=... node examples/cost-optimization.js
+```
+
+### 14. [production-deployment.md](./production-deployment.md) - Production Deployment Guide
+
+Complete production deployment checklist covering:
+- Environment setup and security
+- Pre-deployment testing and validation
+- Monitoring and alerting setup
+- Disaster recovery procedures
+- Post-deployment operations
+- Troubleshooting guide
+- Rollback procedures
+
+### 15. [cli-commands.md](./cli-commands.md) - CLI Cheat Sheet
 
 Command-line reference for the `stellar_card` CLI tool.
 

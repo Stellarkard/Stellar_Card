@@ -42,6 +42,7 @@ async function main(): Promise<number> {
     process.stdout.write(`stellar_card — virtual Visa cards for AI agents
 
 Usage:
+  stellar_card setup-wizard              Interactive setup for merchants (recommended)
   stellar_card onboard --claim <code>    Set up an agent from a dashboard claim code
   stellar_card purchase --amount <USDC>  Buy a card using the wallet from onboard
   stellar_card wallet address            Print this agent's Stellar address
@@ -55,7 +56,8 @@ Usage:
   stellar_card --help                    Show this message
 
 All the 'purchase' and 'wallet' subcommands read ~/.stellar_card/config.json
-(written by 'stellar_card onboard') so you don't need to pass an api key.
+(written by 'stellar_card setup-wizard' or 'stellar_card onboard') so you don't
+need to pass an api key.
 
 Docs: https://stellar_card.com/docs
 Onboarding guide for agents: https://stellar_card.com/skill.md
@@ -73,6 +75,11 @@ Onboarding guide for agents: https://stellar_card.com/skill.md
   if (cmd === 'onboard') {
     const { onboardCommand } = await import('./commands/onboard');
     return onboardCommand(rest);
+  }
+
+  if (cmd === 'setup-wizard' || cmd === 'setup') {
+    const { setupWizardCommand } = await import('./commands/setup-wizard');
+    return setupWizardCommand(rest);
   }
 
   if (cmd === 'purchase' || cmd === 'buy') {
