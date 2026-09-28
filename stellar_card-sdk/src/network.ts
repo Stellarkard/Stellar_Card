@@ -7,7 +7,7 @@
  */
 
 import { Networks } from '@stellar/stellar-sdk';
-import { AbortError, TimeoutError } from './errors';
+import { AbortError, TimeoutError, ValidationError } from './errors';
 import { calculateExponentialBackoffDelay } from './retry';
 import type { Logger } from './logger';
 
@@ -527,6 +527,8 @@ export interface RequestOptions {
   timeout?: number;
   /** Caller-supplied signal; aborting it cancels the request. */
   signal?: AbortSignal;
+  /** Custom per-request HTTP headers. */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -558,6 +560,89 @@ export async function withRequestTimeout<T>(
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
   }
+}
+
+/**
+ * Validate that a header key does not contain disallowed control characters or whitespace.
+ * Conforms to RFC 7230 §3.2.6 token requirements.
+ */
+export function validateHeaderKey(key: string): void {
+  if (typeof key !== 'string' || key.length === 0) {
+    throw new ValidationError('headers', 'Header key must be a non-empty string');
+  }
+  // Disallow control characters (0x00-0x1F, 0x7F) and whitespace
+  for (let i = 0; i < key.length; i++) {
+    const code = key.charCodeAt(i);
+    if (code <= 32 || code === 127) {
+      throw new ValidationError(
+        'headers',
+        `Header key "${key}" contains disallowed control characters or whitespace`,
+      );
+    }
+  }
+}
+
+/**
+ * Validate that a header value does not contain disallowed control characters (CR, LF, NUL).
+ */
+export function validateHeaderValue(key: string, value: string): void {
+  if (typeof value !== 'string') {
+    throw new ValidationError('headers', `Header value for "${key}" must be a string`);
+  }
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code === 0 || code === 10 || code === 13) {
+      throw new ValidationError(
+        'headers',
+        `Header value for "${key}" contains disallowed control characters`,
+      );
+    }
+  }
+}
+
+/**
+ * Sanitize and validate a dictionary of custom HTTP headers.
+ */
+export function sanitizeHeaders(headers?: Record<string, string>): Record<string, string> {
+  if (!headers || typeof headers !== 'object') return {};
+  const sanitized: Record<string, string> = {};
+  for (const [rawKey, rawVal] of Object.entries(headers)) {
+    const key = rawKey.trim();
+    validateHeaderKey(key);
+    validateHeaderValue(key, rawVal);
+    sanitized[key] = rawVal;
+  }
+  return sanitized;
+}
+
+/**
+ * Merge base headers, custom client headers, and per-request headers.
+ * Protects critical auth headers from being overridden by custom headers.
+ */
+export function mergeHeaders(
+  baseHeaders: Record<string, string>,
+  customClientHeaders?: Record<string, string>,
+  perRequestHeaders?: Record<string, string>,
+): Record<string, string> {
+  const sanitizedClient = sanitizeHeaders(customClientHeaders);
+  const sanitizedRequest = sanitizeHeaders(perRequestHeaders);
+
+  // Combine custom client headers and per-request overrides
+  const customMerged = {
+    ...sanitizedClient,
+    ...sanitizedRequest,
+  };
+
+  const result: Record<string, string> = { ...customMerged };
+
+  // Base auth and critical headers always take precedence over custom headers
+  for (const [key, value] of Object.entries(baseHeaders)) {
+    result[key] = value;
+  }
+
+  return result;
+}
+
 /**
  * Normalize a string value, trimming whitespace and converting empty strings to undefined.
  */

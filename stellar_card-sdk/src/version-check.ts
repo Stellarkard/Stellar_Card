@@ -80,10 +80,33 @@ function writeState(state: CheckState): void {
   }
 }
 
+/** Parsed semantic version triple. */
+export interface SemVer {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+/** Parse a semantic version string into major, minor, patch numbers. */
+export function parseSemVer(v: string): SemVer | null {
+  const clean = v.split('-')[0] ?? v;
+  const parts = clean.split('.').map((p) => parseInt(p, 10));
+  if (parts.length < 3 || parts.some((n) => Number.isNaN(n))) return null;
+  return { major: parts[0]!, minor: parts[1]!, patch: parts[2]! };
+}
+
+/** Check if local version is behind latest by at least one major release. */
+export function isMajorBehind(local: string, latest: string): boolean {
+  const parsedLocal = parseSemVer(local);
+  const parsedLatest = parseSemVer(latest);
+  if (!parsedLocal || !parsedLatest) return false;
+  return parsedLatest.major > parsedLocal.major;
+}
+
 /** Returns >0 if a > b, <0 if a < b, 0 if equal. Handles plain semver
  *  triples; pre-release tags (e.g. 0.4.6-beta.1) fall back to string
  *  compare which is accurate enough for our gating. */
-function compareVersions(a: string, b: string): number {
+export function compareVersions(a: string, b: string): number {
   const stripped = (s: string) => s.split('-')[0] ?? s;
   const pa = stripped(a)
     .split('.')
@@ -97,6 +120,16 @@ function compareVersions(a: string, b: string): number {
     if (x !== y) return x - y;
   }
   return a.localeCompare(b);
+}
+
+function printDeprecationWarning(local: string, latest: string): void {
+  try {
+    console.warn(
+      `[DEPRECATION WARNING] stellar_card v${local} is behind by a major release (latest is v${latest}). Please upgrade to ensure compatibility and security: npm install -g stellar_card@latest`,
+    );
+  } catch {
+    /* console.warn closed/suppressed — ignore */
+  }
 }
 
 function printWarning(local: string, latest: string): void {
@@ -117,13 +150,39 @@ function printWarning(local: string, latest: string): void {
   }
 }
 
+function readDisableOption(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { loadConfig } = require('./config') as {
+      loadConfig: () => { disable_version_check?: boolean; disableVersionCheck?: boolean } | null;
+    };
+    const cfg = loadConfig();
+    return Boolean(cfg?.disable_version_check ?? cfg?.disableVersionCheck);
+  } catch {
+    return false;
+  }
+}
+
+export interface VersionCheckOptions {
+  /** Disable the background version check. */
+  disableVersionCheck?: boolean;
+}
+
 /**
- * Fire-and-forget npm update check for the CLI package.
+ * Fire-and-forget npm update check for the CLI and SDK package.
  *
  * Returns immediately; the network work happens in the background and
  * never blocks the calling command.
  */
-export function checkForUpdates(): void {
+export function checkForUpdates(options: VersionCheckOptions = {}): void {
+  if (options.disableVersionCheck || readDisableOption()) return;
+  if (
+    process.env.CARDS402_DISABLE_VERSION_CHECK === 'true' ||
+    process.env.STELLAR_CARD_DISABLE_VERSION_CHECK === 'true'
+  ) {
+    return;
+  }
+
   const local = readLocalVersion();
   if (!local) return;
 
@@ -134,6 +193,9 @@ export function checkForUpdates(): void {
     if (age < CHECK_INTERVAL_MS && state.latest_seen) {
       // Re-use the cached result so a stale install still nags.
       if (compareVersions(local, state.latest_seen) < 0) {
+        if (isMajorBehind(local, state.latest_seen)) {
+          printDeprecationWarning(local, state.latest_seen);
+        }
         printWarning(local, state.latest_seen);
       }
       return;
@@ -164,6 +226,9 @@ export function checkForUpdates(): void {
       if (!latest) return;
       writeState({ last_checked_at: new Date().toISOString(), latest_seen: latest });
       if (compareVersions(local, latest) < 0) {
+        if (isMajorBehind(local, latest)) {
+          printDeprecationWarning(local, latest);
+        }
         printWarning(local, latest);
       }
     } catch {

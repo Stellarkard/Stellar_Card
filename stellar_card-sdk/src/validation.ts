@@ -30,6 +30,8 @@ export const clientOptionsSchema = z
         maxDelayMs: z.number().min(0).optional(),
       })
       .optional(),
+    headers: z.record(z.string()).optional(),
+    disableVersionCheck: z.boolean().optional(),
   })
   .passthrough();
 
