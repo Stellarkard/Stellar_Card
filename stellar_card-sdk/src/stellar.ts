@@ -19,6 +19,7 @@ import {
   selectContractCall,
   InsufficientFeeError,
 } from './soroban';
+import type { Logger } from './logger';
 
 const USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
 const HORIZON_TIMEOUT_MS = 15000;
@@ -254,6 +255,8 @@ export interface PayOpts {
   sorobanRpcUrl?: string;
   /** Override the Horizon REST API URL. Defaults to the public endpoint for the selected network. */
   horizonUrl?: string;
+  /** Optional logger instance */
+  logger?: Logger;
 }
 
 /**
@@ -288,6 +291,7 @@ export async function payViaContract(opts: PayOpts): Promise<string> {
     networkPassphrase = Networks.PUBLIC,
     sorobanRpcUrl,
     horizonUrl,
+    logger,
   } = opts;
 
   if (!StrKey.isValidContract(payment.contract_id)) {
@@ -298,6 +302,11 @@ export async function payViaContract(opts: PayOpts): Promise<string> {
   const { fn, amountDecimal } = selectContractCall(payment, paymentAsset);
   const amountStroops = decimalToStroops(amountDecimal);
   const resolvedHorizonUrl = horizonUrl ?? getHorizonUrl(networkPassphrase);
+
+  logger?.info?.(
+    `Submitting Soroban contract payment for order ${payment.order_id} (${fn}: ${amountDecimal} ${paymentAsset.toUpperCase()})`,
+    { orderId: payment.order_id, contractId: payment.contract_id, fn, amountDecimal },
+  );
 
   // Fee retry: if the network rejects the fee, rebuild with the
   // required fee as the floor. At most one retry — the network's
@@ -316,12 +325,17 @@ export async function payViaContract(opts: PayOpts): Promise<string> {
     });
     tx.sign(keypair);
     try {
-      return await submitSorobanTx(tx, server, resolvedHorizonUrl);
+      logger?.debug?.(`Submitting Soroban transaction (attempt ${attempt + 1}) to RPC`);
+      const txHash = await submitSorobanTx(tx, server, resolvedHorizonUrl);
+      logger?.info?.(`Soroban transaction submitted successfully: ${txHash}`);
+      return txHash;
     } catch (err) {
       if (err instanceof InsufficientFeeError && attempt === 0) {
         fee = err.requiredFee;
+        logger?.info?.(`Soroban transaction fee insufficient, bumping fee to ${fee} and retrying`);
         continue;
       }
+      logger?.error?.(`Soroban transaction submission failed: ${String(err)}`, { error: err });
       throw err;
     }
   }

@@ -15,6 +15,175 @@ import {
   xdr,
   type Transaction,
 } from '@stellar/stellar-sdk';
+import { ContractExecutionError } from './errors';
+import type { Logger } from './logger';
+
+export { ContractExecutionError };
+
+/**
+ * Mapping of Soroban custom contract error codes to descriptive human-readable messages.
+ * Matches `stellar_card-contract/src/lib.rs` Error enum.
+ */
+export const CONTRACT_ERROR_MESSAGES: Record<number, string> = {
+  1: 'Invalid amount: amount must be positive',
+  2: 'Transfer failed: token transfer operation failed',
+  3: 'Contract paused: no new payments accepted until unpaused',
+  4: 'Withdraw limit exceeded',
+  5: 'Daily withdraw limit exceeded',
+  6: 'Invalid recipient',
+};
+
+export const CONTRACT_ERROR_MAP = CONTRACT_ERROR_MESSAGES;
+
+/**
+ * Attempt to extract a numeric contract error code from an XDR result, simulation response,
+ * diagnostic events, or error object/string.
+ */
+export function extractContractErrorCode(xdrResult: unknown): number | null {
+  if (typeof xdrResult === 'number' && Number.isInteger(xdrResult)) {
+    return xdrResult;
+  }
+
+  if (typeof xdrResult === 'string') {
+    // Check if it's a plain numeric string
+    if (/^\d+$/.test(xdrResult.trim())) {
+      return parseInt(xdrResult.trim(), 10);
+    }
+
+    // Match Soroban HostError string patterns, e.g.:
+    // Error(Contract, #1) or Error(Contract, 1) or HostError: Error(Contract, #1)
+    const hostErrMatch = xdrResult.match(/Error\s*\(\s*Contract\s*,\s*#?(\d+)\s*\)/i);
+    if (hostErrMatch && hostErrMatch[1]) {
+      return parseInt(hostErrMatch[1], 10);
+    }
+
+    // Match patterns like ContractError(1) or contract_error: 1 or error code 1
+    const genericCodeMatch = xdrResult.match(
+      /(?:contract\s*error|error\s*code|custom\s*error)[^\d]*(\d+)/i,
+    );
+    if (genericCodeMatch && genericCodeMatch[1]) {
+      return parseInt(genericCodeMatch[1], 10);
+    }
+
+    // Try decoding base64 XDR as ScVal or DiagnosticEvent
+    try {
+      const val = xdr.ScVal.fromXDR(xdrResult, 'base64') as any;
+      if (val?.arm?.() === 'error') {
+        const scErr = val.value?.();
+        if (scErr && (scErr.arm?.() === 'contractCode' || scErr.arm?.() === 'sceContract')) {
+          return scErr.value?.() ?? null;
+        }
+      }
+    } catch {
+      // Not an ScVal base64 string
+    }
+
+    try {
+      const diag = xdr.DiagnosticEvent.fromXDR(xdrResult, 'base64') as any;
+      const body = diag?.event?.()?.body?.();
+      if (body) {
+        const val = body.value?.() ?? body.data?.();
+        if (val) {
+          const code = extractContractErrorCode(val);
+          if (code !== null) return code;
+        }
+      }
+    } catch {
+      // Not a DiagnosticEvent base64 string
+    }
+
+    return null;
+  }
+
+  if (xdrResult && typeof xdrResult === 'object') {
+    if (xdrResult instanceof ContractExecutionError) {
+      return xdrResult.contractCode;
+    }
+
+    const obj = xdrResult as Record<string, unknown>;
+
+    if (typeof obj.contractCode === 'number') return obj.contractCode;
+    if (typeof obj.code === 'number') return obj.code;
+    if (typeof obj.errorCode === 'number') return obj.errorCode;
+
+    if (obj.error) {
+      const fromErr = extractContractErrorCode(obj.error);
+      if (fromErr !== null) return fromErr;
+    }
+
+    if (typeof obj.message === 'string') {
+      const fromMsg = extractContractErrorCode(obj.message);
+      if (fromMsg !== null) return fromMsg;
+    }
+
+    const events = (obj.diagnosticEvents ?? obj.events ?? obj.diagnosticEventsXdr) as unknown[];
+    if (Array.isArray(events)) {
+      for (const event of events) {
+        const fromEvent = extractContractErrorCode(event);
+        if (fromEvent !== null) return fromEvent;
+      }
+    }
+
+    if (Array.isArray(obj.results)) {
+      for (const res of obj.results) {
+        if (res && typeof res === 'object') {
+          const fromRes = extractContractErrorCode((res as any).xdr ?? res);
+          if (fromRes !== null) return fromRes;
+        }
+      }
+    }
+
+    if (obj.resultXdr) {
+      const fromXdr = extractContractErrorCode(obj.resultXdr);
+      if (fromXdr !== null) return fromXdr;
+    }
+    if (obj.errorResult) {
+      const fromErrRes = extractContractErrorCode(obj.errorResult);
+      if (fromErrRes !== null) return fromErrRes;
+    }
+
+    if (typeof (xdrResult as any).arm === 'function') {
+      try {
+        const scVal = xdrResult as any;
+        if (scVal?.arm?.() === 'error') {
+          const scErr = scVal.value?.();
+          if (scErr && (scErr.arm?.() === 'contractCode' || scErr.arm?.() === 'sceContract')) {
+            return scErr.value?.() ?? null;
+          }
+        }
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Decode Soroban contract error codes into a human-readable ContractExecutionError.
+ *
+ * Maps numeric error codes (e.g. Error::InvalidAmount = 1, Error::TransferFailed = 2,
+ * Error::ContractPaused = 3) to descriptive error messages, and handles unknown custom
+ * error codes with a fallback string.
+ *
+ * @param xdrResult - Error code, error object, diagnostic event, simulation result, or XDR string.
+ * @returns ContractExecutionError wrapping the code and explanation.
+ */
+export function parseContractError(xdrResult: unknown): ContractExecutionError {
+  const code = extractContractErrorCode(xdrResult);
+
+  if (code !== null) {
+    const explanation = CONTRACT_ERROR_MESSAGES[code] ?? `Unknown custom contract error: ${code}`;
+    return new ContractExecutionError(code, explanation, xdrResult);
+  }
+
+  const fallbackExplanation =
+    typeof xdrResult === 'string'
+      ? `Unknown contract error: ${xdrResult}`
+      : 'Unknown contract error';
+  return new ContractExecutionError(0, fallbackExplanation, xdrResult);
+}
 
 const MAINNET_RPC = 'https://mainnet.sorobanrpc.com';
 const TESTNET_RPC = 'https://soroban-testnet.stellar.org';
@@ -234,6 +403,10 @@ export async function buildContractPaymentTx(
 
   const sim = await server.simulateTransaction(raw);
   if (rpc.Api.isSimulationError(sim)) {
+    const contractCode = extractContractErrorCode(sim);
+    if (contractCode !== null) {
+      throw parseContractError(sim);
+    }
     throw new Error(`Soroban simulation failed: ${sim.error}`);
   }
 
@@ -279,7 +452,9 @@ export async function submitSorobanTx(
   // backward compat — callers that don't pass this parameter get the
   // same behaviour as before.
   horizonUrl: string = MAINNET_HORIZON,
+  logger?: Logger,
 ): Promise<string> {
+  logger?.debug?.(`Submitting transaction to Soroban RPC`);
   // sendTransaction is idempotent for the same envelope. Three cases we
   // retry explicitly:
   //   - TRY_AGAIN_LATER: RPC is congested, re-send after a short wait
@@ -304,6 +479,10 @@ export async function submitSorobanTx(
         );
       }
       if (send.status === 'ERROR') {
+        const contractCode = extractContractErrorCode(send.errorResult ?? send);
+        if (contractCode !== null) {
+          throw parseContractError(send.errorResult ?? send);
+        }
         // txInsufficientFee — the network tells us what fee it needed.
         // Surface it as InsufficientFeeError so callers can rebuild
         // with the required fee as the floor and retry immediately.
@@ -329,6 +508,7 @@ export async function submitSorobanTx(
       // failure and retry.
       if (
         err instanceof InsufficientFeeError ||
+        err instanceof ContractExecutionError ||
         (err instanceof Error &&
           (err.message.startsWith('Soroban network congested') ||
             err.message.startsWith('Soroban sendTransaction error')))
@@ -378,10 +558,17 @@ export async function submitSorobanTx(
       const status = await server.getTransaction(send.hash);
       if (status.status === 'SUCCESS') return send.hash;
       if (status.status === 'FAILED') {
+        const contractCode = extractContractErrorCode(status);
+        if (contractCode !== null) {
+          throw parseContractError(status);
+        }
         throw new Error(`Soroban transaction ${send.hash} failed on-chain`);
       }
       // NOT_FOUND (or any transient non-terminal status): keep polling.
     } catch (pollErr: unknown) {
+      if (pollErr instanceof ContractExecutionError) {
+        throw pollErr;
+      }
       // Re-raise our own terminal throws so they escape the loop.
       if (
         pollErr instanceof Error &&

@@ -21,6 +21,7 @@ import {
   AbortError,
 } from './errors';
 import { calculateExponentialBackoffDelay, sleep } from './retry';
+import { createLogger, type Logger, type LogLevel } from './logger';
 import { DEFAULT_REQUEST_TIMEOUT_MS, withRequestTimeout, type RequestOptions } from './network';
 import { validateClientOptions, validateCreateOrderInput } from './validation';
 import type { AccountBalances } from './stellar';
@@ -195,6 +196,8 @@ export interface StellarCardClientOptions {
   baseUrl?: string;
   apiKey?: string;
   retry?: RetryOptions;
+  logger?: Logger;
+  logLevel?: LogLevel;
   /** Default per-request timeout in ms. Defaults to 30000. */
   timeout?: number;
   /** Stellar network used by on-chain helpers such as {@link Stellar_CardClient.getAccountBalances}. */
@@ -241,6 +244,7 @@ export class Stellar_CardClient {
   private baseUrl: string;
   private apiKey: string;
   private retry: Required<RetryOptions>;
+  public readonly logger: Logger;
   private timeout: number;
   private network: 'mainnet' | 'testnet' | 'futurenet';
 
@@ -255,8 +259,12 @@ export class Stellar_CardClient {
    * @param opts.apiKey - stellar_card API key. Required via one of the sources above.
    * @param opts.baseUrl - API base URL. Defaults to `https://api.stellar_card.com/v1`.
    * @param opts.retry - Retry policy applied to transient (429/502/503/504) errors.
+   * @param opts.logger - Optional custom logger implementation (Pino, Winston, Console).
+   * @param opts.logLevel - Optional log level filter ('debug' | 'info' | 'warn' | 'error' | 'silent').
    * @throws {AuthError} When no API key can be resolved.
    */
+  constructor({ baseUrl, apiKey, retry = {}, logger, logLevel }: StellarCardClientOptions = {}) {
+    this.logger = createLogger({ logger, logLevel });
   constructor(options: StellarCardClientOptions = {}) {
     // Fail fast on malformed options (#700) with every bad field listed.
     validateClientOptions(options);
@@ -357,8 +365,14 @@ export class Stellar_CardClient {
   private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
     const { attempts, baseDelayMs, maxDelayMs, jitter, onRetry } = this.retry;
     let lastErr: unknown;
+    this.logger.debug(`HTTP ${init.method ?? 'GET'} ${url}`);
     for (let i = 0; i <= attempts; i++) {
       try {
+        const res = await fetch(url, init);
+        if (res.ok || !this.shouldRetry(res.status) || i === attempts) {
+          this.logger.debug(`HTTP ${res.status} for ${init.method ?? 'GET'} ${url}`);
+          return res;
+        }
         const res = await withRequestTimeout(operation, (s) => fetch(url, { ...init, signal: s }), {
           timeout,
           signal,
@@ -374,11 +388,21 @@ export class Stellar_CardClient {
           jitter,
           factor: 2, // Standard exponential backoff factor
         });
+        this.logger.info(
+          `Retrying request to ${url} (attempt ${i + 1}/${attempts}) after ${delayMs}ms due to HTTP ${res.status}`,
+          { attempt: i, delayMs, status: res.status },
+        );
         onRetry(lastErr, i, delayMs);
         await sleep(delayMs);
         continue;
       } catch (err) {
         lastErr = err;
+        if (i === attempts) {
+          this.logger.error(`HTTP request to ${url} failed after ${attempts} retries`, {
+            error: err,
+          });
+          throw err;
+        }
         // Timeouts and caller aborts are final — never retried.
         if (err instanceof TimeoutError || err instanceof AbortError) throw err;
         if (i === attempts) throw err;
@@ -390,6 +414,10 @@ export class Stellar_CardClient {
           jitter,
           factor: 2,
         });
+        this.logger.info(
+          `Retrying request to ${url} (attempt ${i + 1}/${attempts}) after ${delayMs}ms due to network error`,
+          { attempt: i, delayMs, error: err },
+        );
         onRetry(err, i, delayMs);
         await sleep(delayMs);
       }

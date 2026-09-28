@@ -5,7 +5,16 @@
 // 402 → pay → retry with Authorization: Payment → 200 or 202+poll.
 
 import { describe, it, expect } from 'vitest';
-import { mppCharge, type MppChargeOpts } from '../mpp';
+import { Keypair } from '@stellar/stellar-sdk';
+import {
+  mppCharge,
+  generateMppChallenge,
+  serializeMppChallenge,
+  signMppChallenge,
+  verifyMppChallengeSignature,
+  formatMppCredentialHeader,
+  type MppChargeOpts,
+} from '../mpp';
 
 type Body = Record<string, unknown>;
 
@@ -328,5 +337,118 @@ describe('mppCharge — url resolution', () => {
     });
 
     expect(calls[0].url).toBe('https://api.stellar_card.test/v1/cards/visa/10.00');
+  });
+});
+
+describe('MPP challenge-response cryptographic verification (#708)', () => {
+  it('generates challenge payload with nonce, timestamp, and realm', () => {
+    const challenge = generateMppChallenge({
+      realm: 'test_realm',
+      ttlMs: 300_000,
+    });
+
+    expect(challenge.realm).toBe('test_realm');
+    expect(challenge.nonce).toMatch(/^[0-9a-f]{32}$/);
+    expect(challenge.timestamp).toBeGreaterThan(0);
+    expect(challenge.expiresAt).toBe(challenge.timestamp + 300_000);
+    expect(challenge.methods).toEqual(['stellar']);
+  });
+
+  it('signs challenge with Stellar keypair and verifies valid signature', () => {
+    const keypair = Keypair.random();
+    const challenge = generateMppChallenge({ realm: 'stellar_card' });
+
+    const signature = signMppChallenge(challenge, keypair);
+    expect(signature).toBeDefined();
+    expect(signature.length).toBeGreaterThan(0);
+
+    const verified = verifyMppChallengeSignature(challenge, signature, keypair.publicKey());
+    expect(verified).toBe(true);
+  });
+
+  it('rejects expired challenges', () => {
+    const keypair = Keypair.random();
+    const challenge = generateMppChallenge({ ttlMs: 1000 });
+    const signature = signMppChallenge(challenge, keypair);
+
+    // Simulated verification after expiry
+    expect(() =>
+      verifyMppChallengeSignature(challenge, signature, keypair.publicKey(), {
+        now: challenge.expiresAt + 1,
+      }),
+    ).toThrow(/MPP challenge expired/);
+  });
+
+  it('rejects challenges exceeding maxAgeMs', () => {
+    const keypair = Keypair.random();
+    const challenge = generateMppChallenge({ ttlMs: 600_000 });
+    const signature = signMppChallenge(challenge, keypair);
+
+    expect(() =>
+      verifyMppChallengeSignature(challenge, signature, keypair.publicKey(), {
+        maxAgeMs: 5000,
+        now: challenge.timestamp + 10_000,
+      }),
+    ).toThrow(/MPP challenge expired/);
+  });
+
+  it('rejects mismatched nonces', () => {
+    const keypair = Keypair.random();
+    const challenge = generateMppChallenge({ nonce: 'nonce_original' });
+    const signature = signMppChallenge(challenge, keypair);
+
+    expect(() =>
+      verifyMppChallengeSignature(challenge, signature, keypair.publicKey(), {
+        expectedNonce: 'nonce_different',
+      }),
+    ).toThrow(/MPP challenge nonce mismatch/);
+  });
+
+  it('rejects mismatched realm', () => {
+    const keypair = Keypair.random();
+    const challenge = generateMppChallenge({ realm: 'realm_a' });
+    const signature = signMppChallenge(challenge, keypair);
+
+    expect(() =>
+      verifyMppChallengeSignature(challenge, signature, keypair.publicKey(), {
+        expectedRealm: 'realm_b',
+      }),
+    ).toThrow(/MPP challenge realm mismatch/);
+  });
+
+  it('rejects invalid signature signed by another keypair', () => {
+    const keypair1 = Keypair.random();
+    const keypair2 = Keypair.random();
+    const challenge = generateMppChallenge();
+
+    const signatureFromOtherKey = signMppChallenge(challenge, keypair2);
+
+    expect(() =>
+      verifyMppChallengeSignature(challenge, signatureFromOtherKey, keypair1.publicKey()),
+    ).toThrow(/Invalid MPP challenge signature/);
+  });
+
+  it('formats credential headers (Authorization: MPP ... and Authorization: Payment ...)', () => {
+    const mppHeader = formatMppCredentialHeader({
+      scheme: 'MPP',
+      realm: 'stellar_card',
+      nonce: '1234567890abcdef',
+      signature: 'deadbeef1234',
+      publicKey: 'GBRPYHIL2CI3WHZDTOOQFC6EB4NCCCEFVPXF2GYXBG4FDGBIYWXUPQM',
+    });
+    expect(mppHeader).toMatch(/^MPP realm="stellar_card"/);
+    expect(mppHeader).toContain('nonce="1234567890abcdef"');
+    expect(mppHeader).toContain('signature="deadbeef1234"');
+    expect(mppHeader).toContain(
+      'public_key="GBRPYHIL2CI3WHZDTOOQFC6EB4NCCCEFVPXF2GYXBG4FDGBIYWXUPQM"',
+    );
+
+    const paymentHeader = formatMppCredentialHeader({
+      challengeId: 'mpp_c_123',
+      txHash: 'tx_hash_456',
+    });
+    expect(paymentHeader).toBe(
+      'Payment scheme="stellar", challenge="mpp_c_123", tx_hash="tx_hash_456"',
+    );
   });
 });

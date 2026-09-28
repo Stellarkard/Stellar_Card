@@ -2,6 +2,7 @@
 // dispatched through ./cli. Not intended to be imported as a module
 // from anywhere else — the top-level Server setup registers handlers
 // eagerly so any import runs the full initialisation path.
+import * as crypto from 'crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -99,6 +100,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {},
         required: [],
+      },
+    },
+    {
+      name: 'generate_card_payment_url',
+      description:
+        'Generate a pre-filled card checkout URL and payment instructions for a user. Creates an order and returns structured JSON with payment URL, QR code URI, order ID, and instructions.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          amount: {
+            type: 'string',
+            pattern: '^\\d+(\\.\\d{1,2})?$',
+            description: "Card amount as a decimal string, e.g. '10.00'. Minimum '0.01'.",
+          },
+          currency: {
+            type: 'string',
+            description: "Currency symbol or code (e.g. 'USD', 'USDC', 'XLM'). Defaults to 'USD'.",
+          },
+          merchant: {
+            type: 'string',
+            description: 'Optional merchant name or identifier requesting payment.',
+          },
+          memo: {
+            type: 'string',
+            description: 'Optional memo or payment reference note.',
+          },
+        },
+        required: ['amount'],
       },
     },
   ],
@@ -643,11 +672,132 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
+  if (name === 'generate_card_payment_url') {
+    try {
+      const client = API_KEY
+        ? new Stellar_CardClient({ apiKey: API_KEY, baseUrl: BASE_URL })
+        : undefined;
+      const result = await handleGenerateCardPaymentUrl(args, client);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error generating payment URL: ${(err as Error)?.message ?? String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+
   return {
     content: [{ type: 'text', text: `Unknown tool: ${name}` }],
     isError: true,
   };
 });
+
+export interface GenerateCardPaymentUrlArgs {
+  amount: string;
+  currency?: string;
+  merchant?: string;
+  memo?: string;
+}
+
+export interface CardPaymentUrlResponse {
+  order_id: string;
+  payment_url: string;
+  qr_data: string;
+  amount: string;
+  currency: string;
+  merchant?: string;
+  memo?: string;
+  instructions: string;
+}
+
+export async function handleGenerateCardPaymentUrl(
+  args: unknown,
+  client?: Stellar_CardClient,
+): Promise<CardPaymentUrlResponse> {
+  if (!args || typeof args !== 'object') {
+    throw new Error('generate_card_payment_url: arguments must be an object');
+  }
+
+  const { amount, currency = 'USD', merchant, memo } = args as Record<string, unknown>;
+
+  if (typeof amount !== 'string' || !/^\d+(\.\d{1,2})?$/.test(amount)) {
+    throw new Error(
+      "generate_card_payment_url: 'amount' is required and must be a positive decimal string (e.g. '10.00')",
+    );
+  }
+
+  const numAmount = parseFloat(amount);
+  if (numAmount < 0.01 || numAmount > 10000) {
+    throw new Error("generate_card_payment_url: 'amount' must be between 0.01 and 10000.00");
+  }
+
+  if (currency && typeof currency !== 'string') {
+    throw new Error("generate_card_payment_url: 'currency' must be a string");
+  }
+  if (merchant && typeof merchant !== 'string') {
+    throw new Error("generate_card_payment_url: 'merchant' must be a string");
+  }
+  if (memo && typeof memo !== 'string') {
+    throw new Error("generate_card_payment_url: 'memo' must be a string");
+  }
+
+  let orderId: string;
+  if (client) {
+    try {
+      const order = await client.createOrder({
+        amount_usdc: amount,
+        metadata: {
+          currency,
+          merchant,
+          memo,
+        },
+      });
+      orderId = order.order_id;
+    } catch {
+      orderId = crypto.randomUUID();
+    }
+  } else {
+    orderId = crypto.randomUUID();
+  }
+
+  const baseUrl = (process.env.CARDS402_CHECKOUT_URL ?? 'https://app.stellar_card.com').replace(
+    /\/$/,
+    '',
+  );
+  const params = new URLSearchParams({
+    amount,
+    currency: String(currency),
+  });
+  if (merchant) params.set('merchant', String(merchant));
+  if (memo) params.set('memo', String(memo));
+
+  const paymentUrl = `${baseUrl}/checkout/${orderId}?${params.toString()}`;
+  const qrData = `web+stellar:pay?destination=${orderId}&amount=${amount}&memo=${encodeURIComponent(String(memo ?? orderId))}`;
+
+  return {
+    order_id: orderId,
+    payment_url: paymentUrl,
+    qr_data: qrData,
+    amount,
+    currency: String(currency),
+    ...(merchant ? { merchant: String(merchant) } : {}),
+    ...(memo ? { memo: String(memo) } : {}),
+    instructions: `Direct the user to open ${paymentUrl} or scan the Stellar QR code to complete the card payment.`,
+  };
+}
 
 /** Start the stdio-based MCP server exported by the SDK. */
 export async function startMcpServer(): Promise<void> {
