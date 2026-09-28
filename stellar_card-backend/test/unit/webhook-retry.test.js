@@ -44,4 +44,44 @@ describe('Webhook Retry Logic with Exponential Backoff (Part 3)', () => {
   it('verifies default MAX_WEBHOOK_ATTEMPTS configuration', () => {
     assert.equal(MAX_WEBHOOK_ATTEMPTS, 3);
   });
+
+  // A non-finite delay is not a cosmetic problem. The queue worker does
+  // `new Date(Date.now() + delay).toISOString()` inside its catch block;
+  // that throws RangeError on NaN, so the `UPDATE webhook_queue SET
+  // attempts` never runs, the row stays eligible, and it is retried
+  // forever. The old code let NaN through via
+  // `calculateWebhookBackoff(3, { factor: NaN })`.
+  const nonFinite = [NaN, Infinity, -Infinity, undefined, null, 'x', {}, []];
+
+  it('never returns a non-finite delay from calculateWebhookBackoff', () => {
+    for (const bad of nonFinite) {
+      for (const attempt of [1, 2, 3, 53]) {
+        const d = calculateWebhookBackoff(attempt, { factor: bad });
+        assert.ok(Number.isFinite(d), `factor=${String(bad)} attempt=${attempt} -> ${d}`);
+        assert.ok(d >= 0, `factor=${String(bad)} attempt=${attempt} -> ${d}`);
+      }
+    }
+  });
+
+  it('never returns a non-finite delay from getWebhookRetryDelay', () => {
+    for (const bad of [...nonFinite, -1, 1.5, 1e9]) {
+      const d = getWebhookRetryDelay(bad);
+      assert.ok(Number.isFinite(d), `attempt=${String(bad)} -> ${d}`);
+      assert.ok(d >= 0, `attempt=${String(bad)} -> ${d}`);
+    }
+  });
+
+  it('cannot produce a tight retry loop from a degenerate factor', () => {
+    // factor 0 made every delay 0ms; a negative base made it negative.
+    assert.ok(calculateWebhookBackoff(3, { factor: 0 }) >= 1_000);
+    assert.ok(calculateWebhookBackoff(3, { baseDelayMs: -5000 }) >= 0);
+  });
+
+  it('keeps the delay an integer, so it lands on a valid Date', () => {
+    for (const attempt of [1, 2, 3, 1.5, 2.9]) {
+      const d = calculateWebhookBackoff(attempt);
+      assert.ok(Number.isInteger(d), `attempt=${attempt} -> ${d}`);
+      assert.doesNotThrow(() => new Date(Date.now() + d).toISOString());
+    }
+  });
 });

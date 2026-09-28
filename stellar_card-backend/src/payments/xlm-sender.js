@@ -114,6 +114,11 @@ const server = new Horizon.Server(HORIZON_URL);
 async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
   let lastErr;
   const publicKey = keypair.publicKey();
+  // Total wall-clock for the whole retry ladder, not per attempt. The gap
+  // between wallet.tx_initiated and its terminal event is the number ops
+  // actually needs when a payout is slow: the per-attempt Horizon round trip
+  // is not what the merchant waits for, the ladder is.
+  const startedAt = Date.now();
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const account = await server.loadAccount(publicKey);
     const tx = buildTx(account);
@@ -128,12 +133,14 @@ async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
       tx_hash: hashHex,
       attempt,
       max_attempts: maxAttempts,
+      elapsed_ms: Date.now() - startedAt,
     });
     bizEvent('wallet.tx_initiated', {
       public_key: maskStellarAddress(publicKey),
       tx_hash: hashHex,
       attempt,
       max_attempts: maxAttempts,
+      elapsed_ms: Date.now() - startedAt,
     });
 
     try {
@@ -143,22 +150,32 @@ async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
         public_key: maskStellarAddress(publicKey),
         tx_hash: finalHash,
         attempt,
+        elapsed_ms: Date.now() - startedAt,
       });
       bizEvent('wallet.tx_success', {
         public_key: maskStellarAddress(publicKey),
         tx_hash: finalHash,
         attempt,
+        elapsed_ms: Date.now() - startedAt,
       });
       return finalHash;
     } catch (err) {
       lastErr = err;
       const resultCodes = err?.response?.data?.extras?.result_codes;
       const txCode = resultCodes?.transaction;
+      // Distinguishes "the first submit was rejected" from "we spent the
+      // whole ladder and still failed". Without it, a tx_bad_seq that clears
+      // on the 2nd attempt and one that survives all 3 look identical apart
+      // from the attempt number, and an alert on wallet.tx_failed cannot tell
+      // a transient from a stuck sequence number.
+      const retriesExhausted = attempt >= maxAttempts;
 
       log('error', 'wallet.transaction.failed', {
         public_key: maskStellarAddress(publicKey),
         tx_hash: hashHex,
         attempt,
+        retries_exhausted: retriesExhausted,
+        elapsed_ms: Date.now() - startedAt,
         error: err instanceof Error ? err.message : String(err),
         tx_code: txCode || null,
       });
@@ -166,6 +183,8 @@ async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
         public_key: maskStellarAddress(publicKey),
         tx_hash: hashHex,
         attempt,
+        retries_exhausted: retriesExhausted,
+        elapsed_ms: Date.now() - startedAt,
         error: err instanceof Error ? err.message : String(err),
         tx_code: txCode || null,
       });
@@ -187,10 +206,14 @@ async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
         log('info', 'wallet.transaction.recovered', {
           public_key: maskStellarAddress(publicKey),
           tx_hash: hashHex,
+          attempt,
+          elapsed_ms: Date.now() - startedAt,
         });
         bizEvent('wallet.tx_recovered', {
           public_key: maskStellarAddress(publicKey),
           tx_hash: hashHex,
+          attempt,
+          elapsed_ms: Date.now() - startedAt,
         });
         return hashHex;
       }

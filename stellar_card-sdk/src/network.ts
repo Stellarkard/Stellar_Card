@@ -7,6 +7,7 @@
  */
 
 import { Networks } from '@stellar/stellar-sdk';
+import { AbortError, TimeoutError } from './errors';
 import { calculateExponentialBackoffDelay } from './retry';
 import type { Logger } from './logger';
 
@@ -517,6 +518,46 @@ export function resolveNetworkConfigFromEnv(overrides: NetworkConfig = {}): Reso
   });
 }
 
+/** Default per-request timeout in milliseconds. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/** Per-request cancellation options accepted by every SDK API method. */
+export interface RequestOptions {
+  /** Request timeout in ms. Overrides the client-level `timeout`. */
+  timeout?: number;
+  /** Caller-supplied signal; aborting it cancels the request. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Run `fn` with an `AbortSignal` that fires when either `timeoutMs` elapses
+ * or the caller's `signal` aborts. Rejects with a typed {@link TimeoutError}
+ * or {@link AbortError} respectively.
+ */
+export async function withRequestTimeout<T>(
+  operation: string,
+  fn: (signal: AbortSignal) => Promise<T>,
+  { timeout = DEFAULT_REQUEST_TIMEOUT_MS, signal }: RequestOptions = {},
+): Promise<T> {
+  if (signal?.aborted) throw new AbortError(operation);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeout);
+  const onAbort = (): void => controller.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    return await fn(controller.signal);
+  } catch (err) {
+    if (timedOut) throw new TimeoutError(operation, timeout);
+    if (signal?.aborted) throw new AbortError(operation);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
 /**
  * Normalize a string value, trimming whitespace and converting empty strings to undefined.
  */
