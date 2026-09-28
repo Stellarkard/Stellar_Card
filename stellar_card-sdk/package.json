@@ -29,6 +29,11 @@
       "types": "./dist/mcp.d.ts",
       "import": "./dist/mcp.js",
       "require": "./dist/mcp.js"
+    },
+    "./ows": {
+      "types": "./dist/ows.d.ts",
+      "import": "./dist/esm/ows.js",
+      "require": "./dist/ows.js"
     }
   },
   "browser": {
@@ -99,8 +104,15 @@
   },
   "typesVersions": {
     "*": {
-      "browser": ["./dist/browser.d.ts"],
-      "mcp": ["./dist/mcp.d.ts"]
+      "browser": [
+        "./dist/browser.d.ts"
+      ],
+      "mcp": [
+        "./dist/mcp.d.ts"
+      ],
+      "ows": [
+        "./dist/ows.d.ts"
+      ]
     }
   },
   "react-native": {

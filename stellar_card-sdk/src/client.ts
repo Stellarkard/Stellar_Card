@@ -22,7 +22,13 @@ import {
 } from './errors';
 import { calculateExponentialBackoffDelay, sleep } from './retry';
 import { createLogger, type Logger, type LogLevel } from './logger';
-import { DEFAULT_REQUEST_TIMEOUT_MS, withRequestTimeout, type RequestOptions } from './network';
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  withRequestTimeout,
+  sanitizeHeaders,
+  mergeHeaders,
+  type RequestOptions,
+} from './network';
 import { validateClientOptions, validateCreateOrderInput } from './validation';
 import type { AccountBalances } from './stellar';
 
@@ -204,6 +210,19 @@ export interface StellarCardClientOptions {
   network?: 'mainnet' | 'testnet' | 'futurenet';
   /** Optional Soroban RPC URL override. */
   rpcUrl?: string;
+  /** Custom HTTP headers attached to all outgoing requests. */
+  headers?: Record<string, string>;
+  /** Disable automatic startup SDK version checking. */
+  disableVersionCheck?: boolean;
+}
+
+export interface WaitForOrderFulfillmentOptions extends RequestOptions {
+  /** Polling interval in milliseconds. Defaults to 2000 (2s). */
+  intervalMs?: number;
+  /** Maximum wait timeout in milliseconds. Defaults to 120000 (120s). */
+  timeoutMs?: number;
+  /** Optional callback invoked on order state transitions. */
+  onProgress?: (status: OrderStatus) => void;
 }
 
 // Shared order-ID shape validator. Keeps the client, the MCP tool,
@@ -247,6 +266,7 @@ export class Stellar_CardClient {
   public readonly logger: Logger;
   private timeout: number;
   private network: 'mainnet' | 'testnet' | 'futurenet';
+  private headers: Record<string, string>;
 
   /**
    * Create a client from explicit options, env vars, or on-disk config.
@@ -261,16 +281,27 @@ export class Stellar_CardClient {
    * @param opts.retry - Retry policy applied to transient (429/502/503/504) errors.
    * @param opts.logger - Optional custom logger implementation (Pino, Winston, Console).
    * @param opts.logLevel - Optional log level filter ('debug' | 'info' | 'warn' | 'error' | 'silent').
+   * @param opts.headers - Optional custom HTTP headers to attach to all outgoing requests.
+   * @param opts.disableVersionCheck - Optional boolean to disable SDK version checks on startup.
    * @throws {AuthError} When no API key can be resolved.
    */
-  constructor({ baseUrl, apiKey, retry = {}, logger, logLevel }: StellarCardClientOptions = {}) {
-    this.logger = createLogger({ logger, logLevel });
   constructor(options: StellarCardClientOptions = {}) {
     // Fail fast on malformed options (#700) with every bad field listed.
     validateClientOptions(options);
-    const { baseUrl, apiKey, retry = {} } = options;
+    const {
+      baseUrl,
+      apiKey,
+      retry = {},
+      logger,
+      logLevel,
+      headers,
+      disableVersionCheck: _disableVersionCheck,
+    } = options;
+    this.logger = createLogger({ logger, logLevel });
     this.timeout = options.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.network = options.network ?? 'mainnet';
+    this.headers = sanitizeHeaders(headers);
+
     // Resolve api key + base URL in priority order:
     //   1. Explicit constructor args
     //   2. CARDS402_API_KEY / CARDS402_BASE_URL env vars
@@ -358,26 +389,34 @@ export class Stellar_CardClient {
   private async fetchWithRetry(
     url: string,
     init: RequestInit,
-    { timeout = this.timeout, signal }: RequestOptions = {},
+    { timeout = this.timeout, signal, headers: reqHeaders }: RequestOptions = {},
   ): Promise<Response> {
-    const { attempts, baseDelayMs, maxDelayMs } = this.retry;
-    const operation = `${init.method ?? 'GET'} ${url}`;
-  private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
     const { attempts, baseDelayMs, maxDelayMs, jitter, onRetry } = this.retry;
+    const operation = `${init.method ?? 'GET'} ${url}`;
     let lastErr: unknown;
     this.logger.debug(`HTTP ${init.method ?? 'GET'} ${url}`);
+
+    const baseHeaders = (init.headers as Record<string, string>) ?? {};
+    const finalHeaders = mergeHeaders(baseHeaders, this.headers, reqHeaders);
+    const mergedInit: RequestInit = {
+      ...init,
+      headers: finalHeaders,
+    };
+
     for (let i = 0; i <= attempts; i++) {
       try {
-        const res = await fetch(url, init);
+        const res = await withRequestTimeout(
+          operation,
+          (s) => fetch(url, { ...mergedInit, signal: s }),
+          {
+            timeout,
+            signal,
+          },
+        );
         if (res.ok || !this.shouldRetry(res.status) || i === attempts) {
           this.logger.debug(`HTTP ${res.status} for ${init.method ?? 'GET'} ${url}`);
           return res;
         }
-        const res = await withRequestTimeout(operation, (s) => fetch(url, { ...init, signal: s }), {
-          timeout,
-          signal,
-        });
-        if (res.ok || !this.shouldRetry(res.status) || i === attempts) return res;
         lastErr = new Error(`HTTP ${res.status}`);
         // Enhanced exponential backoff with full jitter and Retry-After header support
         const delayMs = calculateExponentialBackoffDelay({
@@ -397,15 +436,14 @@ export class Stellar_CardClient {
         continue;
       } catch (err) {
         lastErr = err;
+        // Timeouts and caller aborts are final — never retried.
+        if (err instanceof TimeoutError || err instanceof AbortError) throw err;
         if (i === attempts) {
           this.logger.error(`HTTP request to ${url} failed after ${attempts} retries`, {
             error: err,
           });
           throw err;
         }
-        // Timeouts and caller aborts are final — never retried.
-        if (err instanceof TimeoutError || err instanceof AbortError) throw err;
-        if (i === attempts) throw err;
         // Enhanced exponential backoff for network errors
         const delayMs = calculateExponentialBackoffDelay({
           attempt: i,
@@ -530,7 +568,10 @@ export class Stellar_CardClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${this.baseUrl}/orders/${orderId}/stream`, {
-        headers: { 'X-Api-Key': this.apiKey, Accept: 'text/event-stream' },
+        headers: mergeHeaders(
+          { 'X-Api-Key': this.apiKey, Accept: 'text/event-stream' },
+          this.headers,
+        ),
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -648,6 +689,111 @@ export class Stellar_CardClient {
       await new Promise((r) => setTimeout(r, intervalMs));
     }
     throw new WaitTimeoutError(orderId, timeoutMs);
+  }
+
+  /**
+   * Poll an order until its card becomes active or reaches a terminal failure state.
+   *
+   * @param orderId - UUID or identifier of the order.
+   * @param options.intervalMs - Polling interval in milliseconds (defaults to 2000).
+   * @param options.timeoutMs - Maximum timeout in milliseconds (defaults to 120000).
+   * @param options.onProgress - Optional callback invoked whenever the order status transitions.
+   * @returns The fulfilled OrderStatus when status reaches ACTIVE.
+   * @throws {OrderFailedError} If the order reaches a terminal failure state.
+   * @throws {TimeoutError} If polling exceeds timeoutMs.
+   */
+  async waitForOrderFulfillment(
+    orderId: string,
+    options: WaitForOrderFulfillmentOptions = {},
+  ): Promise<OrderStatus> {
+    validateOrderId(orderId);
+    const intervalMs = options.intervalMs ?? 2000;
+    const timeoutMs = options.timeoutMs ?? 120_000;
+    const { onProgress, signal } = options;
+
+    if (signal?.aborted) throw new AbortError(`waitForOrderFulfillment ${orderId}`);
+
+    const startTime = Date.now();
+    const deadline = startTime + timeoutMs;
+    let lastState: string | null = null;
+
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new AbortError(`waitForOrderFulfillment ${orderId}`);
+
+      const order = await this.getOrder(orderId, options);
+      const currentStatus = order.status ? order.status.toUpperCase() : '';
+      const currentPhase = order.phase ? order.phase.toLowerCase() : '';
+      const stateKey = `${currentStatus}:${currentPhase}`;
+
+      // Notify onProgress callback on state transition
+      if (stateKey !== lastState) {
+        lastState = stateKey;
+        if (onProgress) {
+          try {
+            onProgress(order);
+          } catch (callbackErr) {
+            this.logger.warn(`onProgress callback threw for order ${orderId}`, {
+              error: callbackErr,
+            });
+          }
+        }
+      }
+
+      // Check if order is fulfilled / active
+      if (currentStatus === 'ACTIVE' || (order.card && currentPhase === 'ready')) {
+        return order;
+      }
+
+      // Check for terminal failure states
+      if (
+        currentStatus === 'FAILED' ||
+        currentStatus === 'REJECTED' ||
+        currentStatus === 'REFUNDED' ||
+        currentPhase === 'failed' ||
+        currentPhase === 'rejected' ||
+        currentPhase === 'refunded'
+      ) {
+        throw new OrderFailedError(
+          orderId,
+          order.error ?? order.status ?? order.phase,
+          order.refund,
+        );
+      }
+
+      if (currentStatus === 'EXPIRED' || currentPhase === 'expired') {
+        throw new OrderFailedError(
+          orderId,
+          order.error ?? 'Payment window expired — no funds were taken',
+          undefined,
+        );
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+
+      const sleepTime = Math.min(intervalMs, remainingMs);
+      await new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(new AbortError(`waitForOrderFulfillment ${orderId}`));
+          return;
+        }
+        let onAbort: (() => void) | undefined;
+        const timer = setTimeout(() => {
+          if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+          resolve();
+        }, sleepTime);
+
+        if (signal) {
+          onAbort = () => {
+            clearTimeout(timer);
+            reject(new AbortError(`waitForOrderFulfillment ${orderId}`));
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+      });
+    }
+
+    throw new TimeoutError(`waitForOrderFulfillment ${orderId}`, timeoutMs);
   }
 
   /**

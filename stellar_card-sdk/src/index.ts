@@ -12,6 +12,7 @@ export type {
   UsageSummary,
   RetryOptions,
   WaitForCardOptions,
+  WaitForOrderFulfillmentOptions,
   ListOrdersOptions,
   ListOrdersPage,
   IterateOrdersOptions,

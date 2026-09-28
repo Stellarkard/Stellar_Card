@@ -36,6 +36,8 @@ export interface Stellar_CardConfig {
    */
   passphrase_env?: string;
   created_at: string;
+  headers?: Record<string, string>;
+  disable_version_check?: boolean;
 }
 
 function defaultConfigDir(): string {
