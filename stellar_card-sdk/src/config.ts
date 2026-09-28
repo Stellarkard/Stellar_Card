@@ -352,3 +352,6 @@ export async function loadEncryptedConfigKey(
 ): Promise<string> {
   return decrypt({ payload, passphrase, context: 'config-secret' });
 }
+
+export type { Logger, LogLevel, LoggerOptions } from './logger';
+export { SilentLogger, ConsoleLogger, createLogger } from './logger';

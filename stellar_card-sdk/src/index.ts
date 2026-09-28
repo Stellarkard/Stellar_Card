@@ -94,10 +94,26 @@ export {
   wrapSorobanError,
   wrapHorizonError,
   wrapWalletError,
+  ContractExecutionError,
   type ErrorContext,
 } from './errors';
 
-export { InsufficientFeeError } from './soroban';
+export {
+  InsufficientFeeError,
+  parseContractError,
+  extractContractErrorCode,
+  CONTRACT_ERROR_MESSAGES,
+  CONTRACT_ERROR_MAP,
+} from './soroban';
+
+export {
+  createLogger,
+  SilentLogger,
+  ConsoleLogger,
+  type Logger,
+  type LogLevel,
+  type LoggerOptions,
+} from './logger';
 
 export {
   encrypt,
@@ -109,8 +125,21 @@ export {
 } from './encryption';
 export type { EncryptedPayload, EncryptOptions, DecryptOptions } from './encryption';
 
-export { mppCharge } from './mpp';
-export type { MppChargeOpts, MppChargeResult } from './mpp';
+export {
+  mppCharge,
+  generateMppChallenge,
+  serializeMppChallenge,
+  signMppChallenge,
+  verifyMppChallengeSignature,
+  formatMppCredentialHeader,
+} from './mpp';
+export type {
+  MppChargeOpts,
+  MppChargeResult,
+  MppChallenge,
+  MppChallengeSignatureVerificationOptions,
+  MppCredentialHeaderOptions,
+} from './mpp';
 
 export {
   loadStellar_CardConfig,

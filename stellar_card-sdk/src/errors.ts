@@ -608,3 +608,21 @@ export function wrapWalletError(err: unknown, operation?: string): WalletError {
   const message = err instanceof Error ? err.message : String(err);
   return new WalletError(message, operation, err instanceof Error ? err : undefined);
 }
+
+/**
+ * Thrown when a Soroban contract execution fails with a custom contract error code.
+ */
+export class ContractExecutionError extends Stellar_CardError {
+  public override readonly code: any;
+  public readonly contractCode: number;
+  public readonly explanation: string;
+
+  constructor(code: number, explanation: string, raw?: unknown, context?: ErrorContext) {
+    super(`Contract execution error ${code}: ${explanation}`, String(code), 400, raw, context);
+    this.name = 'ContractExecutionError';
+    this.code = code;
+    this.contractCode = code;
+    this.explanation = explanation;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}

@@ -19,6 +19,7 @@ import {
   ValidationError,
 } from './errors';
 import { calculateExponentialBackoffDelay, sleep } from './retry';
+import { createLogger, type Logger, type LogLevel } from './logger';
 
 export interface Budget {
   spent_usdc: string;
@@ -188,6 +189,8 @@ export interface StellarCardClientOptions {
   baseUrl?: string;
   apiKey?: string;
   retry?: RetryOptions;
+  logger?: Logger;
+  logLevel?: LogLevel;
 }
 
 // Shared order-ID shape validator. Keeps the client, the MCP tool,
@@ -228,6 +231,7 @@ export class Stellar_CardClient {
   private baseUrl: string;
   private apiKey: string;
   private retry: Required<RetryOptions>;
+  public readonly logger: Logger;
 
   /**
    * Create a client from explicit options, env vars, or on-disk config.
@@ -240,9 +244,12 @@ export class Stellar_CardClient {
    * @param opts.apiKey - stellar_card API key. Required via one of the sources above.
    * @param opts.baseUrl - API base URL. Defaults to `https://api.stellar_card.com/v1`.
    * @param opts.retry - Retry policy applied to transient (429/502/503/504) errors.
+   * @param opts.logger - Optional custom logger implementation (Pino, Winston, Console).
+   * @param opts.logLevel - Optional log level filter ('debug' | 'info' | 'warn' | 'error' | 'silent').
    * @throws {AuthError} When no API key can be resolved.
    */
-  constructor({ baseUrl, apiKey, retry = {} }: StellarCardClientOptions = {}) {
+  constructor({ baseUrl, apiKey, retry = {}, logger, logLevel }: StellarCardClientOptions = {}) {
+    this.logger = createLogger({ logger, logLevel });
     // Resolve api key + base URL in priority order:
     //   1. Explicit constructor args
     //   2. CARDS402_API_KEY / CARDS402_BASE_URL env vars
@@ -330,10 +337,14 @@ export class Stellar_CardClient {
   private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
     const { attempts, baseDelayMs, maxDelayMs, jitter, onRetry } = this.retry;
     let lastErr: unknown;
+    this.logger.debug(`HTTP ${init.method ?? 'GET'} ${url}`);
     for (let i = 0; i <= attempts; i++) {
       try {
         const res = await fetch(url, init);
-        if (res.ok || !this.shouldRetry(res.status) || i === attempts) return res;
+        if (res.ok || !this.shouldRetry(res.status) || i === attempts) {
+          this.logger.debug(`HTTP ${res.status} for ${init.method ?? 'GET'} ${url}`);
+          return res;
+        }
         lastErr = new Error(`HTTP ${res.status}`);
         // Enhanced exponential backoff with full jitter and Retry-After header support
         const delayMs = calculateExponentialBackoffDelay({
@@ -344,12 +355,21 @@ export class Stellar_CardClient {
           jitter,
           factor: 2, // Standard exponential backoff factor
         });
+        this.logger.info(
+          `Retrying request to ${url} (attempt ${i + 1}/${attempts}) after ${delayMs}ms due to HTTP ${res.status}`,
+          { attempt: i, delayMs, status: res.status },
+        );
         onRetry(lastErr, i, delayMs);
         await sleep(delayMs);
         continue;
       } catch (err) {
         lastErr = err;
-        if (i === attempts) throw err;
+        if (i === attempts) {
+          this.logger.error(`HTTP request to ${url} failed after ${attempts} retries`, {
+            error: err,
+          });
+          throw err;
+        }
         // Enhanced exponential backoff for network errors
         const delayMs = calculateExponentialBackoffDelay({
           attempt: i,
@@ -358,6 +378,10 @@ export class Stellar_CardClient {
           jitter,
           factor: 2,
         });
+        this.logger.info(
+          `Retrying request to ${url} (attempt ${i + 1}/${attempts}) after ${delayMs}ms due to network error`,
+          { attempt: i, delayMs, error: err },
+        );
         onRetry(err, i, delayMs);
         await sleep(delayMs);
       }

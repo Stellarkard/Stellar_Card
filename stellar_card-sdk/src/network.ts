@@ -8,6 +8,7 @@
 
 import { Networks } from '@stellar/stellar-sdk';
 import { calculateExponentialBackoffDelay } from './retry';
+import type { Logger } from './logger';
 
 /** Well-known Soroban RPC endpoints. */
 const MAINNET_RPC = 'https://mainnet.sorobanrpc.com';
@@ -50,6 +51,8 @@ export interface NetworkConfig {
   networkName?: string;
   /** Optional custom user agent for requests */
   customUserAgent?: string;
+  /** Optional logger instance */
+  logger?: Logger;
 }
 
 /**
@@ -353,6 +356,9 @@ export async function resolveNetworkConfigWithRetry(
   const resolved = resolveNetworkConfig(config);
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    config.logger?.debug?.(
+      `Soroban RPC health check attempt ${attempt + 1}/${maxAttempts} for ${resolved.sorobanRpc.url}`,
+    );
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), resolved.sorobanRpc.timeout);
@@ -369,8 +375,14 @@ export async function resolveNetworkConfigWithRetry(
         signal: controller.signal,
       });
       clearTimeout(timeout);
-      if (response.ok) return resolved;
-    } catch {
+      if (response.ok) {
+        config.logger?.debug?.(`Soroban RPC ${resolved.sorobanRpc.url} is healthy`);
+        return resolved;
+      }
+    } catch (err) {
+      config.logger?.debug?.(
+        `Soroban RPC health check attempt ${attempt + 1} failed: ${String(err)}`,
+      );
       // Health check failed — wait before retrying
       if (attempt < maxAttempts - 1) {
         const backoffMs = calculateExponentialBackoffDelay({
