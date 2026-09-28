@@ -120,7 +120,24 @@ async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
   // is not what the merchant waits for, the ladder is.
   const startedAt = Date.now();
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const account = await server.loadAccount(publicKey);
+    let account;
+    try {
+      account = await server.loadAccount(publicKey);
+    } catch (loadErr) {
+      // Horizon unreachable / account missing: nothing has been signed or
+      // submitted yet. Without this line the whole ladder died with no
+      // wallet.* log at all, so a payout outage looked like silence.
+      const loadFields = {
+        public_key: maskStellarAddress(publicKey),
+        attempt,
+        max_attempts: maxAttempts,
+        elapsed_ms: Date.now() - startedAt,
+        error: loadErr instanceof Error ? loadErr.message : String(loadErr),
+      };
+      log('error', 'wallet.transaction.load_account_failed', loadFields);
+      bizEvent('wallet.tx_load_failed', loadFields);
+      throw loadErr;
+    }
     const tx = buildTx(account);
     tx.sign(keypair);
     // Compute the envelope hash BEFORE submission so we can look it up on
@@ -217,6 +234,22 @@ async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
         });
         return hashHex;
       }
+      // Terminal verdict for a lost response. wallet.transaction.failed above
+      // was logged before we knew whether the tx landed; this records the
+      // resolved outcome, and whether a retry is safe (only when Horizon
+      // confirmed the tx never landed; 'unknown' must NOT be auto-retried).
+      const unresolvedFields = {
+        public_key: maskStellarAddress(publicKey),
+        tx_hash: hashHex,
+        attempt,
+        elapsed_ms: Date.now() - startedAt,
+        stellar_status: resolution.reason,
+        retry_safe: resolution.reason === 'not_landed',
+        result_code: resolution.resultCode ?? null,
+        lookup_error: resolution.lookupError ?? null,
+      };
+      log('error', 'wallet.transaction.unresolved', unresolvedFields);
+      bizEvent('wallet.tx_unresolved', unresolvedFields);
       // Re-throw with a clearer message and a machine-readable marker so
       // the caller can decide whether a retry is safe.
       throw annotateSubmitError(err, hashHex, resolution);
