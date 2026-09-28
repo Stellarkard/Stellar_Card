@@ -116,6 +116,26 @@
           },
           "400": {
             "description": "Bad request - invalid parameters"
+          },
+          "429": {
+            "description": "Rate limit exceeded - default 60 order creations per hour per API key, overridable per key via rate_limit_rpm. Applies before request body validation, so malformed requests count against the budget too. Includes RateLimit (IETF draft-7) and Retry-After response headers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": ["rate_limit_exceeded"]
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable message pointing at the per-key rate_limit_rpm setting"
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       },
