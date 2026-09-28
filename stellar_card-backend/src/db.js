@@ -954,7 +954,10 @@ applyMigration(30, () => {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_orders_api_key_updated_at
       ON orders(api_key_id, updated_at);
-// Migration 30: composite index for the status-filtered order list.
+  `);
+});
+
+// Migration 31: composite index for the status-filtered order list.
 //
 // GET /v1/orders (src/api/orders.js) filters on api_key_id, optionally on
 // status, and orders by created_at DESC. Migrations 1 and 24 left the
@@ -1010,7 +1013,7 @@ applyMigration(30, () => {
 //                                     unusable as a range because
 //                                     SQLite applies only one range
 //                                     constraint per index.
-applyMigration(30, () => {
+applyMigration(31, () => {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_orders_list_status
       ON orders(api_key_id, status, created_at DESC);
@@ -1019,7 +1022,7 @@ applyMigration(30, () => {
 
 // EXPECTED_SCHEMA_VERSION must match the last `applyMigration(N)` call
 // above. Bump it in lock-step with any new migration.
-const EXPECTED_SCHEMA_VERSION = 30;
+const EXPECTED_SCHEMA_VERSION = 31;
 const actualVersion = getSchemaVersion();
 if (actualVersion > EXPECTED_SCHEMA_VERSION) {
   console.error(
