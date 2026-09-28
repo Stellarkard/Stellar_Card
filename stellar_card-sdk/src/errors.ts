@@ -296,6 +296,35 @@ export class TimeoutError extends Stellar_CardError {
   }
 }
 
+/** Request was cancelled through a caller-supplied `AbortSignal`. */
+export class AbortError extends Stellar_CardError {
+  constructor(operation: string, context?: ErrorContext) {
+    super(`Operation "${operation}" was aborted by the caller.`, 'aborted', 0, undefined, context);
+    this.name = 'AbortError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/** A single field-level configuration problem. */
+export interface ConfigurationIssue {
+  field: string;
+  message: string;
+}
+
+/** Invalid client configuration (bad apiKey, baseUrl, timeout, ...). */
+export class ConfigurationError extends Stellar_CardError {
+  constructor(public readonly issues: ConfigurationIssue[]) {
+    super(
+      `Invalid Stellar_Card configuration: ${issues.map((i) => `${i.field}: ${i.message}`).join('; ')}`,
+      'configuration_error',
+      0,
+      { issues },
+    );
+    this.name = 'ConfigurationError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 /** Validation error — invalid input parameters. */
 export class ValidationError extends Stellar_CardError {
   constructor(
@@ -607,4 +636,22 @@ export function wrapHorizonError(
 export function wrapWalletError(err: unknown, operation?: string): WalletError {
   const message = err instanceof Error ? err.message : String(err);
   return new WalletError(message, operation, err instanceof Error ? err : undefined);
+}
+
+/**
+ * Thrown when a Soroban contract execution fails with a custom contract error code.
+ */
+export class ContractExecutionError extends Stellar_CardError {
+  public override readonly code: any;
+  public readonly contractCode: number;
+  public readonly explanation: string;
+
+  constructor(code: number, explanation: string, raw?: unknown, context?: ErrorContext) {
+    super(`Contract execution error ${code}: ${explanation}`, String(code), 400, raw, context);
+    this.name = 'ContractExecutionError';
+    this.code = code;
+    this.contractCode = code;
+    this.explanation = explanation;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
 }

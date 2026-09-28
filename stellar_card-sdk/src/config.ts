@@ -325,6 +325,12 @@ export function resolveCredentials(
   return { apiKey, baseUrl };
 }
 
+export {
+  clientOptionsSchema,
+  createOrderSchema,
+  validateClientOptions,
+  validateCreateOrderInput,
+} from './validation';
 /**
  * Encrypt a configuration key or sensitive value before storing it.
  *
@@ -453,3 +459,5 @@ export function detectNetworkFromPassphrase(
   };
 }
 
+export type { Logger, LogLevel, LoggerOptions } from './logger';
+export { SilentLogger, ConsoleLogger, createLogger } from './logger';

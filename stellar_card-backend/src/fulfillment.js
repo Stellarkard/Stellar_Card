@@ -51,30 +51,54 @@ const WEBHOOK_RETRY_DELAYS_MS = [30_000, 60_000, 120_000];
 const MAX_WEBHOOK_ATTEMPTS = 3;
 
 /**
+ * Finite-number guard. Every delay below lands in
+ * `new Date(Date.now() + delay).toISOString()`, which throws RangeError on a
+ * non-finite offset — and that throw happens inside the queue worker's catch,
+ * so the `UPDATE webhook_queue SET attempts` never runs and the row retries
+ * forever. A bad delay is therefore a hot loop, not a graceful failure.
+ *
+ * @param {unknown} value
+ * @param {number} fallback
+ * @returns {number}
+ */
+function finiteOr(value, fallback) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/**
  * Calculates exponential backoff delay for webhook retries.
  *
  * @param {number} attempt - Current attempt count (1-indexed).
  * @param {{ baseDelayMs?: number, factor?: number, maxDelayMs?: number }} [options]
- * @returns {number} Delay in milliseconds.
+ * @returns {number} Delay in ms, always a finite non-negative integer.
  */
 function calculateWebhookBackoff(attempt, options = {}) {
-  const baseDelayMs = options.baseDelayMs ?? 30_000;
-  const factor = options.factor ?? 2;
-  const maxDelayMs = options.maxDelayMs ?? 3_600_000; // 1 hour cap
+  const base = Math.max(0, finiteOr(options.baseDelayMs, 30_000));
+  // factor < 1 would collapse the delay towards 0 — a tight retry loop.
+  const factor = Math.max(1, finiteOr(options.factor, 2));
+  const max = Math.max(0, finiteOr(options.maxDelayMs, 3_600_000)); // 1 hour cap
+  // `attempt` comes off a SQL column and may be float or NULL.
+  const n = Number.isFinite(attempt) ? Math.max(1, Math.floor(attempt)) : 1;
 
-  if (attempt < 1) return baseDelayMs;
-  const delay = baseDelayMs * Math.pow(factor, attempt - 1);
-  return Math.min(delay, maxDelayMs);
+  const delay = base * Math.pow(factor, n - 1);
+  // Math.min(NaN, x) is NaN, so the inputs above must be guarded, not just
+  // the result.
+  if (!Number.isFinite(delay)) return max;
+
+  return Math.min(Math.max(0, Math.round(delay)), max);
 }
 
 /**
  * Get retry delay in milliseconds for a specific attempt number.
  *
- * @param {number} attempt - Attempt index (0-indexed or 1-indexed depending on usage)
- * @returns {number}
+ * @param {number} attempt - Zero-indexed, i.e. the row's current `attempts`
+ *   count. 0 is the first retry after the initial send.
+ * @returns {number} Finite, non-negative delay. `null` once
+ *   MAX_WEBHOOK_ATTEMPTS is reached, meaning abandon — never NaN, which
+ *   would throw in the caller and strand the queue row.
  */
 function getWebhookRetryDelay(attempt) {
-  const index = typeof attempt === 'number' && attempt >= 0 ? attempt : 0;
+  const index = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
   if (index < WEBHOOK_RETRY_DELAYS_MS.length) {
     return WEBHOOK_RETRY_DELAYS_MS[index];
   }

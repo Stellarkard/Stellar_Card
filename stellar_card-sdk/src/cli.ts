@@ -7,6 +7,8 @@
 //   mcp        Start the MCP server over stdio (default when no
 //              subcommand is given, so `npx stellar_card` in an MCP
 //              client's config "just works").
+//   status     List orders (or one with --order) as a colorized table.
+//   balance    Show the api key's budget / spend summary.
 //   version    Print the installed SDK version and exit.
 //
 // Each subcommand lives in its own module and is imported dynamically
@@ -46,6 +48,8 @@ Usage:
   stellar_card wallet balance            Print XLM + USDC balances from Horizon
   stellar_card wallet trustline          Open the USDC trustline (required before
                                      the wallet can receive USDC)
+  stellar_card status [--order <id>]     Show orders as a table (--json for raw JSON)
+  stellar_card balance                   Show the api key's spend budget (--json)
   stellar_card mcp                       Start the MCP server over stdio (default)
   stellar_card version                   Print the SDK version
   stellar_card --help                    Show this message
@@ -74,6 +78,16 @@ Onboarding guide for agents: https://stellar_card.com/skill.md
   if (cmd === 'purchase' || cmd === 'buy') {
     const { purchaseCommand } = await import('./commands/purchase');
     return purchaseCommand(rest);
+  }
+
+  if (cmd === 'status') {
+    const { statusCommand } = await import('./commands/status');
+    return statusCommand(rest);
+  }
+
+  if (cmd === 'balance') {
+    const { balanceCommand } = await import('./commands/status');
+    return balanceCommand(rest);
   }
 
   if (cmd === 'wallet') {

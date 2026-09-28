@@ -48,6 +48,8 @@ export {
 } from './stellar';
 export type { WalletInfo, PayOpts, EstimateXlmOptions, XlmEstimateResult } from './stellar';
 
+export { getAccountBalances, clearBalanceCache, BALANCE_CACHE_TTL_MS } from './stellar';
+export type { WalletInfo, PayOpts, AccountBalances, AssetBalance } from './stellar';
 
 export {
   createOWSWallet,
@@ -91,6 +93,8 @@ export {
   ResumableError,
   NetworkError,
   TimeoutError,
+  AbortError,
+  ConfigurationError,
   ValidationError,
   SorobanRpcError,
   HorizonError,
@@ -105,10 +109,27 @@ export {
   wrapSorobanError,
   wrapHorizonError,
   wrapWalletError,
+  ContractExecutionError,
   type ErrorContext,
+  type ConfigurationIssue,
 } from './errors';
 
-export { InsufficientFeeError } from './soroban';
+export {
+  InsufficientFeeError,
+  parseContractError,
+  extractContractErrorCode,
+  CONTRACT_ERROR_MESSAGES,
+  CONTRACT_ERROR_MAP,
+} from './soroban';
+
+export {
+  createLogger,
+  SilentLogger,
+  ConsoleLogger,
+  type Logger,
+  type LogLevel,
+  type LoggerOptions,
+} from './logger';
 
 export {
   encrypt,
@@ -120,8 +141,21 @@ export {
 } from './encryption';
 export type { EncryptedPayload, EncryptOptions, DecryptOptions } from './encryption';
 
-export { mppCharge } from './mpp';
-export type { MppChargeOpts, MppChargeResult } from './mpp';
+export {
+  mppCharge,
+  generateMppChallenge,
+  serializeMppChallenge,
+  signMppChallenge,
+  verifyMppChallengeSignature,
+  formatMppCredentialHeader,
+} from './mpp';
+export type {
+  MppChargeOpts,
+  MppChargeResult,
+  MppChallenge,
+  MppChallengeSignatureVerificationOptions,
+  MppCredentialHeaderOptions,
+} from './mpp';
 
 export {
   loadStellar_CardConfig,
@@ -166,6 +200,8 @@ export {
   validateRpcEndpoint,
   validateNetworkConfig,
   NETWORK_ENV_VARS,
+  withRequestTimeout,
+  DEFAULT_REQUEST_TIMEOUT_MS,
 } from './network';
 export type {
   NetworkConfig,
@@ -174,7 +210,15 @@ export type {
   ExtendedRpcEndpointConfig,
   ResolvedRpcEndpoint,
   ResolvedNetworkConfig,
+  RequestOptions,
 } from './network';
+
+export {
+  clientOptionsSchema,
+  createOrderSchema,
+  validateClientOptions,
+  validateCreateOrderInput,
+} from './validation';
 
 // Export comprehensive type definitions
 export type {

@@ -19,6 +19,7 @@ import {
   selectContractCall,
   InsufficientFeeError,
 } from './soroban';
+import type { Logger } from './logger';
 
 const USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
 const HORIZON_TIMEOUT_MS = 15000;
@@ -218,6 +219,96 @@ export async function getBalance(
   return { xlm, usdc };
 }
 
+/** One balance line from a Stellar account. */
+export interface AssetBalance {
+  /** `"XLM"` for the native asset, otherwise the asset code. */
+  code: string;
+  /** Issuer G-address; `null` for native XLM. */
+  issuer: string | null;
+  /** Horizon asset type, e.g. `native`, `credit_alphanum4`. */
+  assetType: string;
+  /** Decimal balance string. */
+  balance: string;
+}
+
+/** Result of {@link getAccountBalances}. */
+export interface AccountBalances {
+  xlm: string;
+  usdc: string;
+  balances: AssetBalance[];
+  /** `false` when the account does not exist on-chain yet. */
+  funded: boolean;
+}
+
+/** How long balance lookups are cached, in ms. */
+export const BALANCE_CACHE_TTL_MS = 3000;
+const balanceCache = new Map<string, { expires: number; value: Promise<AccountBalances> }>();
+
+/** Clear the {@link getAccountBalances} cache (mainly for tests). */
+export function clearBalanceCache(): void {
+  balanceCache.clear();
+}
+
+function isNotFound(err: unknown): boolean {
+  const e = err as { response?: { status?: number }; name?: string };
+  return e?.response?.status === 404 || e?.name === 'NotFoundError';
+}
+
+/**
+ * Fetch XLM, USDC and every trustline balance in one Horizon call.
+ *
+ * Unfunded accounts (Horizon 404) resolve to zero balances instead of
+ * throwing. Results are cached per network + account for
+ * {@link BALANCE_CACHE_TTL_MS} so tight polling loops don't spam Horizon.
+ *
+ * @param publicKey - Stellar G-address to inspect
+ * @param networkPassphrase - Optional network passphrase (defaults to mainnet)
+ */
+export function getAccountBalances(
+  publicKey: string,
+  networkPassphrase?: string,
+): Promise<AccountBalances> {
+  if (!StrKey.isValidEd25519PublicKey(publicKey)) {
+    return Promise.reject(new Error(`Invalid Stellar public key: ${publicKey}`));
+  }
+  const key = `${getHorizonUrl(networkPassphrase)}|${publicKey}`;
+  const now = Date.now();
+  const cached = balanceCache.get(key);
+  if (cached && cached.expires > now) return cached.value;
+
+  const value = (async (): Promise<AccountBalances> => {
+    try {
+      const account = await withTimeout(getServer(networkPassphrase).loadAccount(publicKey));
+      const balances: AssetBalance[] = account.balances.map((b) => {
+        const line = b as {
+          asset_type: string;
+          balance: string;
+          asset_code?: string;
+          asset_issuer?: string;
+        };
+        return line.asset_type === 'native'
+          ? { code: 'XLM', issuer: null, assetType: 'native', balance: line.balance }
+          : {
+              code: line.asset_code ?? line.asset_type,
+              issuer: line.asset_issuer ?? null,
+              assetType: line.asset_type,
+              balance: line.balance,
+            };
+      });
+      const xlm = balances.find((b) => b.assetType === 'native')?.balance ?? '0';
+      const usdc =
+        balances.find((b) => b.code === 'USDC' && b.issuer === USDC_ISSUER)?.balance ?? '0';
+      return { xlm, usdc, balances, funded: true };
+    } catch (err) {
+      if (isNotFound(err)) return { xlm: '0', usdc: '0', balances: [], funded: false };
+      balanceCache.delete(key); // never cache failures
+      throw err;
+    }
+  })();
+  balanceCache.set(key, { expires: now + BALANCE_CACHE_TTL_MS, value });
+  return value;
+}
+
 /**
  * Add a USDC trustline to a Stellar account.
  *
@@ -269,6 +360,8 @@ export interface PayOpts {
   sorobanRpcUrl?: string;
   /** Override the Horizon REST API URL. Defaults to the public endpoint for the selected network. */
   horizonUrl?: string;
+  /** Optional logger instance */
+  logger?: Logger;
 }
 
 /**
@@ -303,6 +396,7 @@ export async function payViaContract(opts: PayOpts): Promise<string> {
     networkPassphrase = Networks.PUBLIC,
     sorobanRpcUrl,
     horizonUrl,
+    logger,
   } = opts;
 
   if (!StrKey.isValidContract(payment.contract_id)) {
@@ -313,6 +407,11 @@ export async function payViaContract(opts: PayOpts): Promise<string> {
   const { fn, amountDecimal } = selectContractCall(payment, paymentAsset);
   const amountStroops = decimalToStroops(amountDecimal);
   const resolvedHorizonUrl = horizonUrl ?? getHorizonUrl(networkPassphrase);
+
+  logger?.info?.(
+    `Submitting Soroban contract payment for order ${payment.order_id} (${fn}: ${amountDecimal} ${paymentAsset.toUpperCase()})`,
+    { orderId: payment.order_id, contractId: payment.contract_id, fn, amountDecimal },
+  );
 
   // Fee retry: if the network rejects the fee, rebuild with the
   // required fee as the floor. At most one retry — the network's
@@ -331,12 +430,17 @@ export async function payViaContract(opts: PayOpts): Promise<string> {
     });
     tx.sign(keypair);
     try {
-      return await submitSorobanTx(tx, server, resolvedHorizonUrl);
+      logger?.debug?.(`Submitting Soroban transaction (attempt ${attempt + 1}) to RPC`);
+      const txHash = await submitSorobanTx(tx, server, resolvedHorizonUrl);
+      logger?.info?.(`Soroban transaction submitted successfully: ${txHash}`);
+      return txHash;
     } catch (err) {
       if (err instanceof InsufficientFeeError && attempt === 0) {
         fee = err.requiredFee;
+        logger?.info?.(`Soroban transaction fee insufficient, bumping fee to ${fee} and retrying`);
         continue;
       }
+      logger?.error?.(`Soroban transaction submission failed: ${String(err)}`, { error: err });
       throw err;
     }
   }
