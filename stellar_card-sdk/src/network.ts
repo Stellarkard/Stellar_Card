@@ -11,6 +11,19 @@ import { AbortError, TimeoutError, ValidationError } from './errors';
 import { calculateExponentialBackoffDelay } from './retry';
 import type { Logger } from './logger';
 
+// Proxy agent imports (will be conditionally used)
+let HttpsProxyAgent: any;
+let SocksProxyAgent: any;
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  HttpsProxyAgent = require('https-proxy-agent');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  SocksProxyAgent = require('socks-proxy-agent');
+} catch {
+  // Proxy packages not installed - proxy support will be disabled
+}
+
 /** Well-known Soroban RPC endpoints. */
 const MAINNET_RPC = 'https://mainnet.sorobanrpc.com';
 const TESTNET_RPC = 'https://soroban-testnet.stellar.org';
@@ -54,6 +67,8 @@ export interface NetworkConfig {
   customUserAgent?: string;
   /** Optional logger instance */
   logger?: Logger;
+  /** Optional proxy URL for routing SDK API calls and Horizon requests (http://, https://, socks5://) */
+  proxyUrl?: string;
 }
 
 /**
@@ -650,4 +665,92 @@ function normalizeString(value: string | undefined): string | undefined {
   if (typeof value !== 'string') return value;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Create a proxy agent based on the proxy URL.
+ * Supports http://, https://, and socks5:// protocols.
+ *
+ * @param proxyUrl - The proxy URL string
+ * @returns A proxy agent instance or undefined if proxy packages are not available
+ */
+export function createProxyAgent(proxyUrl: string): any {
+  if (!HttpsProxyAgent || !SocksProxyAgent) {
+    return undefined;
+  }
+
+  try {
+    const url = new URL(proxyUrl);
+    const protocol = url.protocol.replace(':', '');
+
+    if (protocol === 'http' || protocol === 'https') {
+      return new HttpsProxyAgent(proxyUrl);
+    }
+
+    if (protocol === 'socks' || protocol === 'socks5') {
+      return new SocksProxyAgent(proxyUrl);
+    }
+
+    throw new Error(`Unsupported proxy protocol: ${protocol}`);
+  } catch (err) {
+    throw new Error(`Failed to create proxy agent for ${proxyUrl}: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Resolve proxy URL from configuration or environment variables.
+ * Priority: config.proxyUrl > HTTPS_PROXY > HTTP_PROXY
+ *
+ * @param config - Network configuration
+ * @returns Proxy URL string or undefined
+ */
+export function resolveProxyUrl(config: NetworkConfig = {}): string | undefined {
+  // Explicit proxy URL in config takes highest priority
+  if (config.proxyUrl) {
+    return normalizeString(config.proxyUrl);
+  }
+
+  // Check environment variables (only in Node.js environment)
+  if (typeof process !== 'undefined' && process.env) {
+    const httpsProxy = normalizeString(process.env.HTTPS_PROXY || process.env.https_proxy);
+    if (httpsProxy) {
+      return httpsProxy;
+    }
+
+    const httpProxy = normalizeString(process.env.HTTP_PROXY || process.env.http_proxy);
+    if (httpProxy) {
+      return httpProxy;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Check if a URL should bypass the proxy based on NO_PROXY rules.
+ *
+ * @param url - The target URL
+ * @param noProxy - NO_PROXY environment variable value
+ * @returns true if the URL should bypass the proxy
+ */
+export function shouldBypassProxy(url: string, noProxy?: string): boolean {
+  if (!noProxy) return false;
+
+  const noProxyList = noProxy.split(',').map((s) => s.trim());
+  const targetUrl = new URL(url);
+  const hostname = targetUrl.hostname;
+
+  for (const pattern of noProxyList) {
+    // Exact match
+    if (hostname === pattern) return true;
+
+    // Domain suffix match (e.g., *.example.com)
+    if (pattern.startsWith('*.') && hostname.endsWith(pattern.slice(1))) return true;
+
+    // CIDR notation (not implemented - would require additional parsing)
+    // For now, we'll do simple substring matching
+    if (hostname.includes(pattern)) return true;
+  }
+
+  return false;
 }

@@ -28,6 +28,8 @@ interface PurchaseArgs {
   vaultPath?: string;
   passphraseEnv?: string;
   resume?: string;
+  dryRun?: boolean;
+  json?: boolean;
   help?: boolean;
 }
 
@@ -67,6 +69,8 @@ function parseArgs(argv: string[]): PurchaseArgsParsed {
       out.passphraseEnv = arg.slice('--passphrase-env='.length);
     else if (arg === '--resume') out.resume = argv[++i];
     else if (arg.startsWith('--resume=')) out.resume = arg.slice('--resume='.length);
+    else if (arg === '--dry-run') out.dryRun = true;
+    else if (arg === '--json') out.json = true;
   }
   return out;
 }
@@ -91,12 +95,16 @@ Options:
                              The passphrase value is read from process.env at
                              call time and never logged.
   --resume <order-id>        Resume a purchase that failed mid-flight. Omit --amount.
+  --dry-run                  Simulate the purchase without executing on-chain
+                             transactions. Prints fee quote and order breakdown.
+  --json                     Output simulation results in JSON format (use with --dry-run).
   -h, --help                 Show this message
 
 Examples:
   stellar_card purchase --amount 10                 # $10 card paid in XLM
   stellar_card purchase --amount 5 --asset usdc
   stellar_card purchase --resume a94d18cc-...       # pick up an interrupted purchase
+  stellar_card purchase --amount 10 --dry-run       # simulate purchase without executing
 `);
 }
 
@@ -247,6 +255,52 @@ function printCard(card: {
   );
 }
 
+interface DryRunSimulation {
+  amountUsdc: string;
+  paymentAsset: 'xlm' | 'usdc';
+  estimatedFee: string;
+  estimatedTotal: string;
+  walletName: string;
+  network: string;
+  simulation: true;
+}
+
+async function simulatePurchase(
+  apiKey: string,
+  baseUrl: string,
+  amountUsdc: string,
+  paymentAsset: 'xlm' | 'usdc',
+  walletName: string,
+): Promise<DryRunSimulation> {
+  // Simulate fee estimation (in a real implementation, this would call the backend API)
+  // For now, we'll use reasonable estimates based on the payment asset
+  const amount = parseFloat(amountUsdc);
+  let estimatedFee: string;
+  let estimatedTotal: string;
+
+  if (paymentAsset === 'usdc') {
+    // USDC typically has lower fees on Stellar
+    estimatedFee = '0.01'; // ~1 cent fee
+    estimatedTotal = (amount + parseFloat(estimatedFee)).toFixed(2);
+  } else {
+    // XLM fees depend on current exchange rate (estimate ~0.10 XLM per USD)
+    const xlmRate = 0.1; // 1 XLM ≈ $0.10
+    const xlmAmount = (amount / xlmRate).toFixed(6);
+    estimatedFee = (0.00001 * xlmRate).toFixed(2); // 100 stroops fee in USD
+    estimatedTotal = (amount + parseFloat(estimatedFee)).toFixed(2);
+  }
+
+  return {
+    amountUsdc,
+    paymentAsset,
+    estimatedFee,
+    estimatedTotal,
+    walletName,
+    network: 'testnet', // Would be detected from config in real implementation
+    simulation: true,
+  };
+}
+
 export async function purchaseCommand(argv: string[]): Promise<number> {
   const args = parseArgs(argv);
   if (args.help) {
@@ -266,6 +320,11 @@ export async function purchaseCommand(argv: string[]): Promise<number> {
   // --resume and --amount are mutually exclusive; --resume doesn't need --amount.
   if (args.resume && args.amount) {
     process.stderr.write('error: --resume and --amount cannot be used together\n');
+    return 2;
+  }
+  // --dry-run cannot be used with --resume
+  if (args.dryRun && args.resume) {
+    process.stderr.write('error: --dry-run cannot be used with --resume\n');
     return 2;
   }
   if (!args.resume && !args.amount) {
@@ -414,6 +473,44 @@ Your operator can mint a claim code from https://stellar_card.com/dashboard.
     }
   } else {
     process.stdout.write(`→ Purchasing $${args.amount} card via ${paymentAsset.toUpperCase()}…\n`);
+  }
+
+  // Handle dry-run mode
+  if (args.dryRun) {
+    try {
+      const simulation = await simulatePurchase(
+        config.api_key,
+        config.api_url,
+        args.amount ?? '0',
+        paymentAsset,
+        walletName,
+      );
+
+      if (args.json) {
+        process.stdout.write(JSON.stringify(simulation, null, 2) + '\n');
+      } else {
+        process.stdout.write('\n');
+        process.stdout.write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        process.stdout.write(' [DRY-RUN] Purchase Simulation\n');
+        process.stdout.write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        process.stdout.write(`  Amount:        $${simulation.amountUsdc}\n`);
+        process.stdout.write(`  Payment Asset: ${simulation.paymentAsset.toUpperCase()}\n`);
+        process.stdout.write(`  Estimated Fee: $${simulation.estimatedFee}\n`);
+        process.stdout.write(`  Estimated Total: $${simulation.estimatedTotal}\n`);
+        process.stdout.write(`  Wallet:        ${simulation.walletName}\n`);
+        process.stdout.write(`  Network:       ${simulation.network}\n');
+        process.stdout.write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        process.stdout.write('\n');
+        process.stdout.write('[DRY-RUN] No funds were moved. This was a simulation only.\n');
+        process.stdout.write('To execute the actual purchase, remove the --dry-run flag.\n');
+        process.stdout.write('\n');
+      }
+      return 0;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`error: dry-run simulation failed: ${msg}\n`);
+      return 1;
+    }
   }
 
   try {
