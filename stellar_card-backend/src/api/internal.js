@@ -19,6 +19,10 @@ const requireCardReveal = require('../middleware/requireCardReveal');
 const { recordAudit } = require('../lib/audit');
 // scheduleRefund import removed along with the manual refund endpoint — see below
 const { getOrderStats } = require('../lib/stats');
+const {
+  validateInternalOrdersQuery,
+  validateCardRevealParam,
+} = require('../lib/validate');
 
 const router = Router();
 
@@ -28,26 +32,14 @@ router.use(requireInternal);
 // GET /internal/orders — all orders, NO raw card data.
 // card_number/cvv/expiry are NOT returned here. Use /internal/orders/:id/card
 // for an audited single-order reveal.
-router.get('/orders', (req, res) => {
-  const { status, limit = 100, api_key_id } = req.query;
-
-  // F3-internal adversarial audit (2026-04-15): reject non-string
-  // query params instead of letting them reach the SQLite bind layer.
-  // `?status=a&status=b` parses into an array which better-sqlite3
-  // rejects at bind time with an opaque 500. Clear 400 keeps ops
-  // tooling out of the unknown-error bucket.
-  if (status !== undefined && typeof status !== 'string') {
-    return res.status(400).json({
-      error: 'invalid_query_param',
-      message: 'status must be a single string (no repeated ?status=... params).',
-    });
-  }
-  if (api_key_id !== undefined && typeof api_key_id !== 'string') {
-    return res.status(400).json({
-      error: 'invalid_query_param',
-      message: 'api_key_id must be a single string.',
-    });
-  }
+//
+// Part 3: query params are now validated by validateInternalOrdersQuery (Zod),
+// which replaces the hand-written typeof checks and parseInt clamp inline
+// below. The Zod middleware emits the same {error, message} shape as every
+// other validation failure in this codebase and enforces the status
+// whitelist explicitly (unknown status → 400 instead of silent empty list).
+router.get('/orders', validateInternalOrdersQuery, (req, res) => {
+  const { status, limit, api_key_id } = req.query;
 
   let query = `
     SELECT o.id, o.status, o.amount_usdc, o.payment_asset,
@@ -71,26 +63,9 @@ router.get('/orders', (req, res) => {
     params.push(api_key_id);
   }
   query += ` ORDER BY o.created_at DESC LIMIT ?`;
-  // F2-internal adversarial audit (2026-04-15): clamp LIMIT into [1, 1000].
-  // The previous formula was `Math.min(parseInt(...) || 100, 1000)`, which
-  // has two holes:
-  //
-  //   - `parseInt('-5') || 100 === -5` — -5 is truthy so the fallback is
-  //     skipped. Math.min(-5, 1000) is -5. SQLite treats LIMIT -5 as
-  //     "no upper bound" and returns the full orders table.
-  //   - `parseInt('0') || 100 === 100` — 0 quietly maps to 100 (OK but
-  //     inconsistent).
-  //
-  // Wrap Math.min in Math.max(1, ...) so any value below 1 rounds up to
-  // 1 (including NaN via the final || 100 fallback). The authenticated
-  // internal caller is trusted, but the fix bounds the worst-case
-  // SELECT for ops tooling that accidentally sends ?limit=-1.
-  const rawLimit = parseInt(String(limit), 10);
-  const clampedLimit = Math.max(
-    1,
-    Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 100, 1000),
-  );
-  params.push(/** @type {any} */ (clampedLimit));
+  // `limit` is already a validated, clamped integer from validateInternalOrdersQuery
+  // (bounded to [1, 1000] by boundedIntQuery). No further clamp needed.
+  params.push(/** @type {any} */ (limit));
   res.json(db.prepare(query).all(...params));
 });
 
@@ -114,7 +89,7 @@ router.get('/orders', (req, res) => {
 //   2. Write the audit row synchronously. On ANY failure, return 503
 //      immediately and do NOT ship the card.
 //   3. Only after the audit is durable, return the card JSON.
-router.get('/orders/:id/card', requireCardReveal, (req, res) => {
+router.get('/orders/:id/card', requireCardReveal, validateCardRevealParam, (req, res) => {
   const order = db
     .prepare(
       `SELECT id, card_number, card_cvv, card_expiry, card_brand, api_key_id
