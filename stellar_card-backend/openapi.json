@@ -2,8 +2,11 @@
   "openapi": "3.0.0",
   "info": {
     "title": "Stellar Card Backend API",
-    "description": "API endpoints for the Stellar Card platform",
-    "version": "1.0.0"
+    "description": "API endpoints for the Stellar Card platform. The agent surface (/v1/*) requires an X-Api-Key header. The operator surface (/dashboard/*, /auth/*, /internal/*) uses session-cookie auth. The VCC callback endpoint (/vcc-callback) is HMAC-authenticated.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Stellar Card Engineering"
+    }
   },
   "servers": [
     {
@@ -19,39 +22,35 @@
     "/status": {
       "get": {
         "summary": "System health check",
-        "description": "Check system status, order metrics, and Stellar watcher freshness",
+        "description": "Returns system health including order pipeline metrics, Stellar watcher freshness, open SSE stream count, and webhook delivery health. Unauthenticated. Rate-limited to 180 req/min per IP.",
         "tags": ["System"],
         "responses": {
           "200": {
             "description": "System status",
             "content": {
               "application/json": {
+                "schema": { "$ref": "#/components/schemas/SystemStatus" }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/version": {
+      "get": {
+        "summary": "API version",
+        "description": "Returns the deployed version string. Unauthenticated.",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "Version info",
+            "content": {
+              "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "description": "Overall system health"
-                    },
-                    "frozen": {
-                      "type": "boolean",
-                      "description": "Emergency freeze status"
-                    },
-                    "orders": {
-                      "type": "object",
-                      "properties": {
-                        "pending_payment": {"type": "integer"},
-                        "in_progress": {"type": "integer"},
-                        "refund_pending": {"type": "integer"}
-                      }
-                    },
-                    "stellar_watcher": {
-                      "type": "object",
-                      "properties": {
-                        "stalled": {"type": "boolean"},
-                        "age_seconds": {"type": "integer"}
-                      }
-                    }
+                    "version": { "type": "string", "example": "0.1.0" }
                   }
                 }
               }
@@ -63,7 +62,7 @@
     "/v1/agent/claim": {
       "post": {
         "summary": "Claim an agent code",
-        "description": "Exchange a dashboard-minted code for an API key",
+        "description": "Exchange a one-time claim code (minted on the dashboard) for a permanent API key. Unauthenticated. Rate-limited per IP. The returned `api_key` must be kept secret — it is the credential for all subsequent /v1/* calls.",
         "tags": ["Agent"],
         "requestBody": {
           "required": true,
@@ -71,20 +70,21 @@
             "application/json": {
               "schema": {
                 "type": "object",
+                "required": ["code"],
                 "properties": {
                   "code": {
                     "type": "string",
-                    "description": "The claim code issued by the dashboard"
+                    "description": "One-time claim code from the dashboard",
+                    "example": "abc123xyz"
                   }
-                },
-                "required": ["code"]
+                }
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "API key generated successfully",
+            "description": "API key issued",
             "content": {
               "application/json": {
                 "schema": {
@@ -92,328 +92,283 @@
                   "properties": {
                     "api_key": {
                       "type": "string",
-                      "description": "The generated API key for future requests"
+                      "description": "Permanent API key for /v1/* requests. Store securely.",
+                      "example": "stellar_card_a1b2c3d4e5f6..."
                     }
                   }
                 }
               }
             }
           },
-          "400": {
-            "description": "Invalid or expired code"
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": {
+            "description": "Code not found or already used",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/v1/agent/status": {
+      "post": {
+        "summary": "Report agent lifecycle state",
+        "description": "Agent posts its current onboarding state so the dashboard can show a live status pill. Idempotent — posting the same state repeatedly has no side-effects. Rate-limited to 60 req/min per API key.",
+        "tags": ["Agent"],
+        "security": [{ "apiKey": [] }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AgentStatusUpdate" }
+            }
           }
+        },
+        "responses": {
+          "200": {
+            "description": "State recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "ok": { "type": "boolean", "example": true } }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "get": {
+        "summary": "Get agent status",
+        "description": "Returns the authenticated agent's current onboarding state and key metadata.",
+        "tags": ["Agent"],
+        "security": [{ "apiKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Agent metadata",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AgentInfo" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
         }
       }
     },
     "/v1/orders": {
       "post": {
-        "summary": "Create a payment order",
-        "description": "Create a new card top-up order",
+        "summary": "Create a card fulfillment order",
+        "description": "Creates a new order and returns Soroban contract payment instructions. The agent must send the specified USDC (or XLM) to the contract to trigger fulfillment. Supports `Idempotency-Key` header for safe retries. Rate-limited to 60 orders/hour per key by default (configurable per key via `rate_limit_rpm`).",
         "tags": ["Orders"],
-        "security": [
+        "security": [{ "apiKey": [] }],
+        "parameters": [
           {
-            "apiKey": []
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 255 },
+            "description": "Optional idempotency key (max 255 chars). A retry with the same key and identical body returns the cached response without creating a duplicate order."
           }
         ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "amount": {
-                    "type": "number",
-                    "description": "Order amount in USD"
-                  },
-                  "currency": {
-                    "type": "string",
-                    "enum": ["USD", "XLM", "USDC"],
-                    "description": "Payment currency"
-                  }
-                },
-                "required": ["amount", "currency"]
-              }
+              "schema": { "$ref": "#/components/schemas/CreateOrderRequest" }
             }
           }
         },
         "responses": {
           "201": {
-            "description": "Order created successfully",
+            "description": "Order created — payment instructions returned",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "order_id": {
-                      "type": "string",
-                      "description": "Unique order identifier"
-                    },
-                    "status": {
-                      "type": "string",
-                      "enum": ["pending", "processing", "completed"],
-                      "description": "Current order status"
-                    }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/CreateOrderResponse" }
               }
             }
           },
-          "401": {
-            "description": "Unauthorized - invalid or missing API key"
-          },
-          "400": {
-            "description": "Bad request - invalid parameters"
-          },
-          "429": {
-            "description": "Rate limit exceeded - default 60 order creations per hour per API key, overridable per key via rate_limit_rpm. Applies before request body validation, so malformed requests count against the budget too. Includes RateLimit (IETF draft-7) and Retry-After response headers.",
+          "202": {
+            "description": "Order queued for owner approval (policy threshold exceeded)",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string",
-                      "enum": ["rate_limit_exceeded"]
-                    },
-                    "message": {
-                      "type": "string",
-                      "description": "Human-readable message pointing at the per-key rate_limit_rpm setting"
-                    }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/ApprovalPendingResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "Spend limit exceeded or policy blocked",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyBlockedResponse" }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency key reused with a different request body",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": {
+            "description": "Card fulfillment temporarily suspended (system frozen)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
               }
             }
           }
         }
       },
       "get": {
-        "summary": "List orders",
-        "description": "Retrieve paginated list of orders for the authenticated agent",
+        "summary": "List agent's orders",
+        "description": "Returns the authenticated agent's orders, newest first. Supports filtering by status, ISO-8601 `since_created_at`/`since_updated_at` cursors, and `limit`/`offset` pagination.",
         "tags": ["Orders"],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
+        "security": [{ "apiKey": [] }],
         "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/OrderStatus" },
+            "description": "Filter by order status"
+          },
+          {
+            "name": "since_created_at",
+            "in": "query",
+            "schema": { "type": "string", "format": "date-time" },
+            "description": "Return only orders created at or after this ISO-8601 timestamp"
+          },
+          {
+            "name": "since_updated_at",
+            "in": "query",
+            "schema": { "type": "string", "format": "date-time" },
+            "description": "Return only orders last updated at or after this ISO-8601 timestamp"
+          },
           {
             "name": "limit",
             "in": "query",
-            "schema": {
-              "type": "integer",
-              "default": 50
-            },
-            "description": "Number of orders to return"
+            "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20 },
+            "description": "Max number of orders to return"
           },
           {
             "name": "offset",
             "in": "query",
-            "schema": {
-              "type": "integer",
-              "default": 0
-            },
+            "schema": { "type": "integer", "minimum": 0, "default": 0 },
             "description": "Number of orders to skip"
           }
         ],
         "responses": {
           "200": {
-            "description": "List of orders",
+            "description": "Paginated order list",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "orders": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "order_id": {
-                            "type": "string"
-                          },
-                          "amount": {
-                            "type": "number"
-                          },
-                          "status": {
-                            "type": "string"
-                          },
-                          "created_at": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        }
-                      }
-                    }
-                  }
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/OrderSummary" }
                 }
               }
             }
           },
-          "401": {
-            "description": "Unauthorized"
-          }
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
         }
       }
     },
-    "/v1/agent/status": {
+    "/v1/orders/{orderId}": {
       "get": {
-        "summary": "Get agent status",
-        "description": "Retrieve authentication status and configuration for the authenticated agent",
-        "tags": ["Agent"],
-        "security": [
-          {
-            "apiKey": []
-          }
+        "summary": "Get order details",
+        "description": "Returns full order details including card data (when `phase: ready`) or error info (when `phase: failed`). Poll this endpoint or open the SSE stream (`/v1/orders/{orderId}/stream`) to track fulfillment progress.",
+        "tags": ["Orders"],
+        "security": [{ "apiKey": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrderId" }
         ],
         "responses": {
           "200": {
-            "description": "Agent status",
+            "description": "Order detail",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "authenticated": {
-                      "type": "boolean"
-                    },
-                    "agent_id": {
-                      "type": "string"
-                    },
-                    "created_at": {
-                      "type": "string",
-                      "format": "date-time"
-                    }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/OrderDetail" }
               }
             }
           },
-          "401": {
-            "description": "Unauthorized"
-          }
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
         }
-      },
-      "post": {
-        "summary": "Update agent status",
-        "description": "Report agent lifecycle transitions (initializing, awaiting_funding, funded)",
-        "tags": ["Agent"],
-        "security": [
-          {
-            "apiKey": []
-          }
+      }
+    },
+    "/v1/orders/{orderId}/stream": {
+      "get": {
+        "summary": "Stream order phase transitions (SSE)",
+        "description": "Opens a Server-Sent Events stream that pushes an `event: phase` message on every state transition until the order reaches a terminal phase (`ready`, `failed`, `refunded`, `expired`, `rejected`, `pending_recovery`). Each event carries the full order payload identical to `GET /v1/orders/{orderId}` so a reconnect always gets current state from the first message.\n\nThe stream closes server-side on terminal status. Keepalive comments (`: keepalive`) are sent every 15 seconds to prevent proxy idle-kill.\n\nConcurrent stream limit: 20 per API key, 1000 total. Exceeding either returns 429.",
+        "tags": ["Orders"],
+        "security": [{ "apiKey": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrderId" }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "type": "string",
-                    "enum": ["initializing", "awaiting_funding", "funded"],
-                    "description": "Agent onboarding state"
-                  },
-                  "wallet_public_key": {
-                    "type": "string",
-                    "description": "Stellar G-address for agent funding"
-                  },
-                  "detail": {
-                    "type": "string",
-                    "description": "Additional state details"
-                  }
-                }
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
-            "description": "Status updated successfully",
+            "description": "SSE stream of phase events",
             "content": {
-              "application/json": {
+              "text/event-stream": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {"type": "boolean"}
-                  }
+                  "type": "string",
+                  "description": "Stream of `id: <ms>\\nevent: phase\\ndata: <OrderDetail JSON>\\n\\n` messages"
                 }
               }
             }
           },
-          "400": {
-            "description": "Invalid state or parameters"
-          },
-          "401": {
-            "description": "Unauthorized"
-          }
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
         }
       }
     },
     "/v1/usage": {
       "get": {
-        "summary": "Get agent usage",
-        "description": "Retrieve spend summary and order counts for the authenticated agent",
+        "summary": "Get agent spend summary",
+        "description": "Returns order counts by status and a budget breakdown (settled spend, in-flight spend, limit, remaining). The `remaining_usdc` field accounts for both settled and in-flight amounts, matching what the next `POST /v1/orders` spend check will see.",
         "tags": ["Orders"],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
+        "security": [{ "apiKey": [] }],
         "responses": {
           "200": {
-            "description": "Agent usage metrics",
+            "description": "Usage summary",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "api_key_id": {
-                      "type": "string"
-                    },
-                    "label": {
-                      "type": "string"
-                    },
-                    "orders": {
-                      "type": "object",
-                      "properties": {
-                        "total": {"type": "integer"},
-                        "delivered": {"type": "integer"},
-                        "failed": {"type": "integer"},
-                        "in_progress": {"type": "integer"}
-                      }
-                    }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/UsageResponse" }
               }
             }
           },
-          "401": {
-            "description": "Unauthorized"
-          }
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
         }
       }
     },
     "/v1/policy/check": {
       "get": {
-        "summary": "Check spending policy",
-        "description": "Dry-run policy check for a given amount without creating an order",
+        "summary": "Dry-run policy check",
+        "description": "Evaluates spend policy for a given amount without creating an order. Returns the policy decision and remaining daily budget. Does not persist a policy decision row.",
         "tags": ["Orders"],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
+        "security": [{ "apiKey": [] }],
         "parameters": [
           {
             "name": "amount",
             "in": "query",
             "required": true,
-            "schema": {
-              "type": "number",
-              "example": 100.00
-            },
-            "description": "Amount in USD to check against policy"
+            "schema": { "type": "number", "example": 50.00 },
+            "description": "Amount in USDC to check against policy"
           }
         ],
         "responses": {
@@ -421,80 +376,20 @@
             "description": "Policy check result",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "allowed": {
-                      "type": "boolean"
-                    },
-                    "reason": {
-                      "type": "string"
-                    }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/PolicyCheckResponse" }
               }
             }
           },
-          "400": {
-            "description": "Invalid amount parameter"
-          },
-          "401": {
-            "description": "Unauthorized"
-          }
-        }
-      }
-    },
-    "/v1/orders/{orderId}": {
-      "get": {
-        "summary": "Get order details",
-        "description": "Retrieve details for a specific order",
-        "tags": ["Orders"],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "orderId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Order ID"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Order details",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "order_id": {"type": "string"},
-                    "status": {"type": "string"},
-                    "amount": {"type": "number"},
-                    "created_at": {"type": "string", "format": "date-time"}
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "404": {
-            "description": "Order not found"
-          }
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
         }
       }
     },
     "/auth/login": {
       "post": {
-        "summary": "Dashboard login",
-        "description": "Authenticate as an operator with email and password",
+        "summary": "Dashboard operator login (step 1)",
+        "description": "Initiates login with email. A one-time passcode (OTP) is sent to the email address. Follow up with `POST /auth/verify` to complete login and receive a session cookie.",
         "tags": ["Authentication"],
         "requestBody": {
           "required": true,
@@ -502,81 +397,237 @@
             "application/json": {
               "schema": {
                 "type": "object",
+                "required": ["email"],
                 "properties": {
-                  "email": {
-                    "type": "string",
-                    "format": "email"
-                  },
-                  "password": {
-                    "type": "string",
-                    "format": "password"
-                  }
-                },
-                "required": ["email", "password"]
+                  "email": { "type": "string", "format": "email", "example": "ops@example.com" }
+                }
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Login successful - session established",
-            "headers": {
-              "Set-Cookie": {
+            "description": "OTP sent to the provided email address",
+            "content": {
+              "application/json": {
                 "schema": {
-                  "type": "string",
-                  "example": "session_id=abcd1234; Path=/; HttpOnly"
+                  "type": "object",
+                  "properties": { "ok": { "type": "boolean" } }
                 }
               }
             }
           },
-          "401": {
-            "description": "Invalid credentials"
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/auth/verify": {
+      "post": {
+        "summary": "Dashboard operator login (step 2)",
+        "description": "Verifies the OTP sent by `POST /auth/login`. On success, sets a `session` HttpOnly cookie valid for 24 hours.",
+        "tags": ["Authentication"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "code"],
+                "properties": {
+                  "email": { "type": "string", "format": "email" },
+                  "code": { "type": "string", "description": "6-digit OTP from email", "example": "123456" }
+                }
+              }
+            }
           }
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful — session cookie set",
+            "headers": {
+              "Set-Cookie": {
+                "schema": { "type": "string", "example": "session=<token>; Path=/; HttpOnly; Secure; SameSite=Strict" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "ok": { "type": "boolean" } }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": {
+            "description": "Invalid or expired OTP",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "summary": "Dashboard operator logout",
+        "description": "Invalidates the session cookie.",
+        "tags": ["Authentication"],
+        "security": [{ "sessionAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Logged out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "ok": { "type": "boolean" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "summary": "Get current session user",
+        "description": "Returns the authenticated operator's profile.",
+        "tags": ["Authentication"],
+        "security": [{ "sessionAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Current user",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionUser" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
         }
       }
     },
     "/dashboard/platform/accounts": {
       "get": {
-        "summary": "List platform accounts",
-        "description": "Retrieve all accounts (platform-owner only)",
+        "summary": "List all platform accounts",
+        "description": "Returns all dashboard accounts across tenants. Platform-owner only.",
         "tags": ["Dashboard"],
-        "security": [
-          {
-            "sessionAuth": []
-          }
-        ],
+        "security": [{ "sessionAuth": [] }],
         "responses": {
           "200": {
             "description": "List of accounts",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "accounts": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "account_id": {
-                            "type": "string"
-                          },
-                          "name": {
-                            "type": "string"
-                          },
-                          "email": {
-                            "type": "string"
-                          }
-                        }
-                      }
-                    }
-                  }
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/DashboardAccount" }
                 }
               }
             }
           },
-          "403": {
-            "description": "Forbidden - requires platform owner role"
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/internal/orders": {
+      "get": {
+        "summary": "List all orders (internal ops)",
+        "description": "Returns all orders across all tenants. No PAN/CVV/expiry — use `GET /internal/orders/{id}/card` for a privileged single-order reveal. Internal ops only (`@stellar_card.com` or `INTERNAL_EMAILS`).",
+        "tags": ["Internal"],
+        "security": [{ "sessionAuth": [] }],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/OrderStatus" },
+            "description": "Filter by order status"
+          },
+          {
+            "name": "api_key_id",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Filter by API key ID"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
+            "description": "Max orders to return"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order list (no card PAN)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/InternalOrderSummary" }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/internal/orders/{id}/card": {
+      "get": {
+        "summary": "Reveal raw card data (privileged)",
+        "description": "Returns decrypted PAN, CVV, and expiry for a delivered order. Every call writes an audit_log entry — the reveal is blocked if the audit write fails. Requires `CARDS402_CARD_REVEAL_EMAILS` to list the caller's email. Rate-limited to 100 req/15min per IP.",
+        "tags": ["Internal"],
+        "security": [{ "sessionAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "maxLength": 256 },
+            "description": "Order ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Decrypted card data",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CardRevealResponse" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "Order has no card data (not yet delivered)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "Card vault decryption failure",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "Audit log write failed — reveal blocked to maintain audit trail",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
           }
         }
       }
@@ -584,97 +635,542 @@
     "/vcc-callback": {
       "post": {
         "summary": "VCC fulfillment callback",
-        "description": "Webhook endpoint for VCC provider status updates",
+        "description": "Inbound webhook from the VCC provider signalling that a card fulfillment job completed (fulfilled or failed). HMAC-SHA256 authenticated via `X-VCC-Signature` / `X-VCC-Timestamp` headers. Accepts `X-Webhook-Signature` and `X-Signature` as aliases of `X-VCC-Signature`. Rate-limited to 120 req/min per IP.",
         "tags": ["Webhooks"],
-        "security": [
+        "security": [{ "hmacSignature": [] }],
+        "parameters": [
           {
-            "hmacSignature": []
+            "name": "X-VCC-Signature",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "example": "sha256=abcdef1234..." },
+            "description": "HMAC-SHA256 signature of the raw request body. Format: `sha256=<hex>`."
+          },
+          {
+            "name": "X-VCC-Timestamp",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "example": "1714000000000" },
+            "description": "Unix timestamp in milliseconds. Rejected if older than 10 minutes (replay protection)."
+          },
+          {
+            "name": "X-VCC-Order-Id",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Order ID echoed by VCC (v2+). Must match `order_id` in the body when present."
+          },
+          {
+            "name": "X-VCC-Nonce",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Per-job nonce (v3). Mandatory when the order was minted with a `callback_nonce`."
           }
         ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "order_id": {
-                    "type": "string"
-                  },
-                  "status": {
-                    "type": "string",
-                    "enum": ["fulfilled", "failed", "expired"]
-                  },
-                  "card_number": {
-                    "type": "string",
-                    "description": "Last 4 digits of the virtual card (masked)"
-                  }
-                },
-                "required": ["order_id", "status"]
-              }
+              "schema": { "$ref": "#/components/schemas/VccCallbackRequest" }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Callback processed successfully"
+            "description": "Callback processed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "note": { "type": "string", "description": "Present when the order was already terminal (idempotent replay)" }
+                  }
+                }
+              }
+            }
           },
+          "400": { "$ref": "#/components/responses/BadRequest" },
           "401": {
-            "description": "Invalid HMAC signature"
+            "description": "Missing or invalid HMAC signature / expired timestamp / nonce mismatch",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
           },
-          "400": {
-            "description": "Invalid callback data"
-          }
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
         }
       }
     }
   },
   "components": {
+    "parameters": {
+      "OrderId": {
+        "name": "orderId",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "maxLength": 256 },
+        "description": "Order ID (UUID v4 or VCC-supplied identifier)"
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string", "description": "Machine-readable error code" },
+          "message": { "type": "string", "description": "Human-readable description" }
+        }
+      },
+      "OrderStatus": {
+        "type": "string",
+        "enum": [
+          "pending_payment",
+          "awaiting_approval",
+          "payment_confirmed",
+          "claim_received",
+          "stage1_done",
+          "ordering",
+          "delivered",
+          "failed",
+          "refund_pending",
+          "refunded",
+          "expired",
+          "rejected",
+          "pending_manual_recovery"
+        ]
+      },
+      "OrderPhase": {
+        "type": "string",
+        "enum": [
+          "awaiting_payment",
+          "awaiting_approval",
+          "processing",
+          "ready",
+          "failed",
+          "refunded",
+          "expired",
+          "rejected",
+          "pending_recovery"
+        ],
+        "description": "Stable agent-facing phase derived from internal status"
+      },
+      "CardData": {
+        "type": "object",
+        "properties": {
+          "number": { "type": "string", "description": "Full card number (PAN)" },
+          "cvv": { "type": "string" },
+          "expiry": { "type": "string", "example": "12/26" },
+          "brand": { "type": "string", "example": "USD Visa Card" }
+        }
+      },
+      "CreateOrderRequest": {
+        "type": "object",
+        "required": ["amount_usdc"],
+        "properties": {
+          "amount_usdc": {
+            "type": "string",
+            "pattern": "^\\d+(\\.\\d{1,2})?$",
+            "description": "Amount in USDC, as a decimal string with at most 2 decimal places. Min $0.01, max $10000.00.",
+            "example": "50.00"
+          },
+          "webhook_url": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 2048,
+            "description": "URL to receive delivery/failure webhooks. Must be publicly reachable and not target a private IP range.",
+            "example": "https://my-agent.example.com/webhooks/card"
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Arbitrary JSON object (max 8KB serialised) stored with the order and echoed in webhooks.",
+            "additionalProperties": true
+          }
+        }
+      },
+      "CreateOrderResponse": {
+        "type": "object",
+        "properties": {
+          "order_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "example": "pending_payment" },
+          "phase": { "$ref": "#/components/schemas/OrderPhase" },
+          "amount_usdc": { "type": "string", "example": "50.00" },
+          "payment": {
+            "type": "object",
+            "description": "Soroban contract payment instructions",
+            "properties": {
+              "type": { "type": "string", "example": "soroban_contract" },
+              "contract_id": { "type": "string" },
+              "order_id": { "type": "string" },
+              "usdc": {
+                "type": "object",
+                "properties": {
+                  "amount": { "type": "string" },
+                  "asset": { "type": "string", "example": "USDC:GA5ZS..." }
+                }
+              },
+              "xlm": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "amount": { "type": "string", "description": "Equivalent XLM amount (if price oracle available)" }
+                }
+              }
+            }
+          },
+          "poll_url": { "type": "string", "example": "/v1/orders/uuid-here" },
+          "budget": { "$ref": "#/components/schemas/Budget" }
+        }
+      },
+      "ApprovalPendingResponse": {
+        "type": "object",
+        "properties": {
+          "order_id": { "type": "string", "format": "uuid" },
+          "phase": { "type": "string", "example": "awaiting_approval" },
+          "approval_request_id": { "type": "string", "format": "uuid" },
+          "amount_usdc": { "type": "string" },
+          "message": { "type": "string" },
+          "note": { "type": "string" },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "PolicyBlockedResponse": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string", "enum": ["spend_limit_exceeded", "policy_blocked"] },
+          "rule": { "type": "string" },
+          "message": { "type": "string" },
+          "limit": { "type": "string", "nullable": true },
+          "spent": { "type": "string", "nullable": true }
+        }
+      },
+      "OrderSummary": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "status": { "$ref": "#/components/schemas/OrderStatus" },
+          "amount_usdc": { "type": "string" },
+          "payment_asset": { "type": "string", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "OrderDetail": {
+        "allOf": [
+          { "$ref": "#/components/schemas/OrderSummary" },
+          {
+            "type": "object",
+            "properties": {
+              "order_id": { "type": "string" },
+              "phase": { "$ref": "#/components/schemas/OrderPhase" },
+              "payment": {
+                "type": "object",
+                "nullable": true,
+                "description": "Payment instructions (only present in `pending_payment` phase)"
+              },
+              "card": {
+                "$ref": "#/components/schemas/CardData",
+                "nullable": true,
+                "description": "Decrypted card (only present in `delivered` phase)"
+              },
+              "error": { "type": "string", "nullable": true },
+              "refund": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "stellar_txid": { "type": "string", "nullable": true }
+                }
+              },
+              "metadata": { "type": "object", "nullable": true },
+              "note": { "type": "string", "nullable": true },
+              "approval_request_id": { "type": "string", "nullable": true },
+              "expires_at": { "type": "string", "format": "date-time", "nullable": true }
+            }
+          }
+        ]
+      },
+      "InternalOrderSummary": {
+        "type": "object",
+        "description": "Order row with no PAN/CVV/expiry. `has_card` indicates whether sealed card data exists.",
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/OrderStatus" },
+          "amount_usdc": { "type": "string" },
+          "payment_asset": { "type": "string", "nullable": true },
+          "stellar_txid": { "type": "string", "nullable": true },
+          "sender_address": { "type": "string", "nullable": true },
+          "refund_stellar_txid": { "type": "string", "nullable": true },
+          "card_brand": { "type": "string", "nullable": true },
+          "error": { "type": "string", "nullable": true },
+          "has_card": { "type": "integer", "enum": [0, 1] },
+          "api_key_label": { "type": "string", "nullable": true },
+          "api_key_id": { "type": "string", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CardRevealResponse": {
+        "type": "object",
+        "properties": {
+          "order_id": { "type": "string" },
+          "card": { "$ref": "#/components/schemas/CardData" }
+        }
+      },
+      "VccCallbackRequest": {
+        "type": "object",
+        "required": ["order_id", "status"],
+        "properties": {
+          "order_id": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["fulfilled", "failed"],
+            "description": "`fulfilled` triggers card sealing and agent webhook delivery. `failed` triggers refund-or-quarantine."
+          },
+          "card": {
+            "type": "object",
+            "nullable": true,
+            "description": "Required when `status` is `fulfilled`",
+            "required": ["number", "cvv", "expiry"],
+            "properties": {
+              "number": { "type": "string", "maxLength": 32 },
+              "cvv": { "type": "string", "maxLength": 8 },
+              "expiry": { "type": "string", "maxLength": 16, "example": "12/26" },
+              "brand": { "type": "string", "maxLength": 128, "example": "Visa Reward Card" }
+            }
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "description": "Provider error message when `status` is `failed`. Sanitised before storage."
+          }
+        }
+      },
+      "Budget": {
+        "type": "object",
+        "properties": {
+          "spent_usdc": { "type": "string", "description": "Total settled spend" },
+          "in_flight_usdc": { "type": "string", "description": "Sum of pending/in-progress orders" },
+          "committed_usdc": { "type": "string", "description": "settled + in-flight" },
+          "limit_usdc": { "type": "string", "nullable": true },
+          "remaining_usdc": { "type": "string", "nullable": true, "description": "limit − committed" }
+        }
+      },
+      "UsageResponse": {
+        "type": "object",
+        "properties": {
+          "api_key_id": { "type": "string" },
+          "label": { "type": "string", "nullable": true },
+          "budget": { "$ref": "#/components/schemas/Budget" },
+          "orders": {
+            "type": "object",
+            "properties": {
+              "total": { "type": "integer" },
+              "delivered": { "type": "integer" },
+              "failed": { "type": "integer" },
+              "refunded": { "type": "integer" },
+              "expired": { "type": "integer" },
+              "rejected": { "type": "integer" },
+              "in_progress": { "type": "integer" }
+            }
+          }
+        }
+      },
+      "PolicyCheckResponse": {
+        "type": "object",
+        "properties": {
+          "decision": { "type": "string", "enum": ["allowed", "blocked", "pending_approval"] },
+          "rule": { "type": "string", "nullable": true },
+          "reason": { "type": "string", "nullable": true },
+          "remaining_daily": { "type": "string", "nullable": true, "description": "Remaining daily budget in USDC, or null if no daily limit is set" }
+        }
+      },
+      "AgentStatusUpdate": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": ["initializing", "awaiting_funding", "funded"],
+            "description": "Onboarding state. `minted` and `active` are derived automatically."
+          },
+          "wallet_public_key": {
+            "type": "string",
+            "nullable": true,
+            "description": "Stellar Ed25519 G-address (56 chars, base32 + checksum)"
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500,
+            "description": "Freeform state detail for dashboard display"
+          }
+        }
+      },
+      "AgentInfo": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string", "nullable": true },
+          "mode": { "type": "string", "enum": ["live", "sandbox"] },
+          "agent_state": { "type": "string", "nullable": true },
+          "wallet_public_key": { "type": "string", "nullable": true },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "SessionUser": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "email": { "type": "string", "format": "email" },
+          "role": { "type": "string" },
+          "is_platform_owner": { "type": "boolean" }
+        }
+      },
+      "DashboardAccount": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "email": { "type": "string", "format": "email" }
+        }
+      },
+      "SystemStatus": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "frozen": { "type": "boolean" },
+          "consecutive_failures": { "type": "integer" },
+          "orders": {
+            "type": "object",
+            "properties": {
+              "pending_payment": { "type": "integer" },
+              "in_progress": { "type": "integer" },
+              "refund_pending": { "type": "integer" }
+            }
+          },
+          "last_24h": {
+            "type": "object",
+            "properties": {
+              "total": { "type": "integer" },
+              "delivered": { "type": "integer" },
+              "failed": { "type": "integer" },
+              "refunded": { "type": "integer" },
+              "expired": { "type": "integer" },
+              "success_rate": { "type": "number", "nullable": true, "description": "0..1 or null when no terminal orders in window" }
+            }
+          },
+          "stellar_watcher": {
+            "type": "object",
+            "properties": {
+              "last_ledger": { "type": "integer", "nullable": true },
+              "last_ledger_at": { "type": "string", "format": "date-time", "nullable": true },
+              "age_seconds": { "type": "integer", "nullable": true },
+              "stalled": { "type": "boolean" },
+              "max_age_seconds": { "type": "integer" },
+              "dead_letter_24h": { "type": "integer" }
+            }
+          },
+          "webhooks": {
+            "type": "object",
+            "properties": {
+              "failed_permanent_24h": { "type": "integer" }
+            }
+          },
+          "sse": {
+            "type": "object",
+            "properties": {
+              "total": { "type": "integer" },
+              "unique_keys": { "type": "integer" }
+            }
+          },
+          "process": {
+            "type": "object",
+            "properties": {
+              "uptime_seconds": { "type": "integer" },
+              "started_at": { "type": "string", "format": "date-time" }
+            }
+          },
+          "generated_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid request parameters or body",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid credentials",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Authenticated but not authorised for this operation",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Too many requests — check `RateLimit-*` response headers for the reset window",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "error": { "type": "string", "example": "too_many_requests" }
+              }
+            }
+          }
+        }
+      }
+    },
     "securitySchemes": {
       "apiKey": {
         "type": "apiKey",
         "in": "header",
         "name": "X-Api-Key",
-        "description": "Agent API key"
+        "description": "Agent API key (format: `stellar_card_<48 hex chars>`). Obtained via `POST /v1/agent/claim`."
       },
       "sessionAuth": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "session_id",
-        "description": "Operator session cookie"
+        "name": "session",
+        "description": "Operator session cookie set by `POST /auth/verify`."
       },
       "hmacSignature": {
         "type": "apiKey",
         "in": "header",
-        "name": "X-Signature",
-        "description": "HMAC-SHA256 signature of the request body"
+        "name": "X-VCC-Signature",
+        "description": "HMAC-SHA256 signature of the raw request body. Format: `sha256=<hex>`."
       }
     }
   },
   "tags": [
-    {
-      "name": "System",
-      "description": "System health and status endpoints"
-    },
-    {
-      "name": "Orders",
-      "description": "Card top-up order operations"
-    },
-    {
-      "name": "Agent",
-      "description": "Agent authentication and status"
-    },
-    {
-      "name": "Authentication",
-      "description": "Operator authentication"
-    },
-    {
-      "name": "Dashboard",
-      "description": "Dashboard operator endpoints"
-    },
-    {
-      "name": "Webhooks",
-      "description": "Webhook endpoints for external services"
-    }
+    { "name": "System", "description": "Health and version endpoints" },
+    { "name": "Orders", "description": "Card fulfillment order lifecycle" },
+    { "name": "Agent", "description": "Agent authentication and state reporting" },
+    { "name": "Authentication", "description": "Operator dashboard login (OTP flow)" },
+    { "name": "Dashboard", "description": "Operator/tenant dashboard endpoints" },
+    { "name": "Internal", "description": "Internal ops endpoints (stellar_card staff only)" },
+    { "name": "Webhooks", "description": "Inbound webhook callbacks from external services" }
   ]
 }
