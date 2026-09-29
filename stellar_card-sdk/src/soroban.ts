@@ -17,6 +17,9 @@ import {
 } from '@stellar/stellar-sdk';
 import { ContractExecutionError } from './errors';
 import type { Logger } from './logger';
+import type { ContractPaymentResult, TransactionResult } from './types';
+
+export type { ContractPaymentResult, TransactionResult };
 
 export { ContractExecutionError };
 
@@ -302,6 +305,83 @@ export class InsufficientFeeError extends Error {
   }
 }
 
+/**
+ * Calculate the fee refunded by the network after a Soroban transaction
+ * completes (`maxFee − feeCharged`). Negative results (should never happen
+ * on a well-formed ledger) are clamped to `"0"`.
+ *
+ * @param maxFee - Fee allocated on the transaction envelope (stroops)
+ * @param feeCharged - Fee actually consumed (stroops)
+ */
+export function computeFeeRefund(
+  maxFee: string | number | bigint,
+  feeCharged: string | number | bigint,
+): { maxFee: string; feeCharged: string; feeRefunded: string } {
+  const max = BigInt(maxFee);
+  const charged = BigInt(feeCharged);
+  const refunded = max - charged;
+  return {
+    maxFee: max.toString(),
+    feeCharged: charged.toString(),
+    feeRefunded: (refunded < 0n ? 0n : refunded).toString(),
+  };
+}
+
+/**
+ * Extract fee_charged / max_fee from a Horizon transaction JSON body and
+ * compute the refund. Falls back to `fallbackMaxFee` when Horizon omits
+ * `max_fee` (some older responses).
+ */
+export function extractFeeMetricsFromHorizon(
+  horizonTx: { fee_charged?: string | number; max_fee?: string | number },
+  fallbackMaxFee: string,
+): { maxFee: string; feeCharged: string; feeRefunded: string } {
+  const feeCharged = String(horizonTx.fee_charged ?? fallbackMaxFee);
+  const maxFee = String(horizonTx.max_fee ?? fallbackMaxFee);
+  return computeFeeRefund(maxFee, feeCharged);
+}
+
+function logGasEfficiency(
+  logger: Logger | undefined,
+  metrics: { maxFee: string; feeCharged: string; feeRefunded: string },
+  txHash: string,
+): void {
+  const max = Number(metrics.maxFee);
+  const efficiency = max > 0 ? ((1 - Number(metrics.feeCharged) / max) * 100).toFixed(1) : '0.0';
+  logger?.debug?.(
+    `Soroban gas refund for ${txHash}: charged=${metrics.feeCharged} max=${metrics.maxFee} refunded=${metrics.feeRefunded} (${efficiency}% unused)`,
+    metrics,
+  );
+}
+
+async function resolveFeeMetrics(
+  txHash: string,
+  maxFee: string,
+  horizonUrl: string,
+  logger?: Logger,
+  feeChargedHint?: string,
+): Promise<{ maxFee: string; feeCharged: string; feeRefunded: string }> {
+  // Prefer an authoritative Horizon reading when available.
+  try {
+    const horizonResp = await fetch(`${horizonUrl}/transactions/${txHash}`);
+    if (horizonResp.ok) {
+      const data = (await horizonResp.json()) as {
+        fee_charged?: string | number;
+        max_fee?: string | number;
+      };
+      const metrics = extractFeeMetricsFromHorizon(data, maxFee);
+      logGasEfficiency(logger, metrics, txHash);
+      return metrics;
+    }
+  } catch {
+    /* Horizon unreachable — fall through to hint / allocated fee */
+  }
+
+  const metrics = computeFeeRefund(maxFee, feeChargedHint ?? maxFee);
+  logGasEfficiency(logger, metrics, txHash);
+  return metrics;
+}
+
 export type PaymentFn = 'pay_usdc' | 'pay_xlm';
 
 export interface BuildContractTxOpts {
@@ -429,7 +509,7 @@ export async function buildContractPaymentTx(
  * @param server - Soroban RPC server instance (returned by `buildContractPaymentTx`)
  * @param horizonUrl - Horizon base URL used as a fallback when Soroban RPC returns
  *   an XDR mismatch or becomes unreachable. Defaults to mainnet for backward compatibility.
- * @returns The transaction hash (64-char hex string) once the transaction is confirmed on-chain
+ * @returns A {@link TransactionResult} including the hash and fee refund metrics
  * @throws {InsufficientFeeError} When the network rejects the tx due to an insufficient fee
  * @throws {Error} When the transaction fails on-chain (no recovery possible)
  * @throws {Error & \{ txHash: string; dropped: true \}} When the tx was accepted by the RPC
@@ -439,8 +519,8 @@ export async function buildContractPaymentTx(
  *
  * @example
  * ```typescript
- * const txHash = await submitSorobanTx(tx, server, getHorizonUrl(networkPassphrase));
- * console.log('Transaction confirmed:', txHash);
+ * const result = await submitSorobanTx(tx, server, getHorizonUrl(networkPassphrase));
+ * console.log('Transaction confirmed:', result.hash, 'refunded:', result.feeRefunded);
  * ```
  */
 export async function submitSorobanTx(
@@ -453,7 +533,8 @@ export async function submitSorobanTx(
   // same behaviour as before.
   horizonUrl: string = MAINNET_HORIZON,
   logger?: Logger,
-): Promise<string> {
+): Promise<TransactionResult> {
+  const maxFee = String(tx.fee ?? BASE_FEE);
   logger?.debug?.(`Submitting transaction to Soroban RPC`);
   // sendTransaction is idempotent for the same envelope. Three cases we
   // retry explicitly:
@@ -529,6 +610,20 @@ export async function submitSorobanTx(
     );
   }
 
+  const buildResult = async (
+    hash: string,
+    ledger: number,
+    feeChargedHint?: string,
+  ): Promise<TransactionResult> => {
+    const fees = await resolveFeeMetrics(hash, maxFee, horizonUrl, logger, feeChargedHint);
+    return {
+      hash,
+      ledger,
+      successful: true,
+      ...fees,
+    };
+  };
+
   // Poll for finalization. 120s deadline (was 60s) so we don't bail on
   // mainnet RPC under modest backpressure. Each poll is cheap; the cost
   // of a longer wait is much less than the cost of a stranded order.
@@ -556,7 +651,14 @@ export async function submitSorobanTx(
   while (Date.now() < deadline) {
     try {
       const status = await server.getTransaction(send.hash);
-      if (status.status === 'SUCCESS') return send.hash;
+      if (status.status === 'SUCCESS') {
+        const hint =
+          typeof (status as { feeCharged?: unknown }).feeCharged === 'string' ||
+          typeof (status as { feeCharged?: unknown }).feeCharged === 'number'
+            ? String((status as { feeCharged: string | number }).feeCharged)
+            : undefined;
+        return await buildResult(send.hash, status.ledger ?? 0, hint);
+      }
       if (status.status === 'FAILED') {
         const contractCode = extractContractErrorCode(status);
         if (contractCode !== null) {
@@ -582,8 +684,22 @@ export async function submitSorobanTx(
         try {
           const horizonResp = await fetch(`${horizonUrl}/transactions/${send.hash}`);
           if (horizonResp.ok) {
-            const horizonData = (await horizonResp.json()) as { successful: boolean };
-            if (horizonData.successful) return send.hash;
+            const horizonData = (await horizonResp.json()) as {
+              successful: boolean;
+              ledger?: number;
+              fee_charged?: string | number;
+              max_fee?: string | number;
+            };
+            if (horizonData.successful) {
+              const fees = extractFeeMetricsFromHorizon(horizonData, maxFee);
+              logGasEfficiency(logger, fees, send.hash);
+              return {
+                hash: send.hash,
+                ledger: horizonData.ledger ?? 0,
+                successful: true,
+                ...fees,
+              };
+            }
             // Horizon can see it and it failed — terminal, no recovery.
             throw new Error(`Soroban transaction ${send.hash} failed on-chain (Horizon)`);
           }
@@ -609,8 +725,22 @@ export async function submitSorobanTx(
   try {
     const horizonResp = await fetch(`${horizonUrl}/transactions/${send.hash}`);
     if (horizonResp.ok) {
-      const horizonData = (await horizonResp.json()) as { successful: boolean };
-      if (horizonData.successful) return send.hash;
+      const horizonData = (await horizonResp.json()) as {
+        successful: boolean;
+        ledger?: number;
+        fee_charged?: string | number;
+        max_fee?: string | number;
+      };
+      if (horizonData.successful) {
+        const fees = extractFeeMetricsFromHorizon(horizonData, maxFee);
+        logGasEfficiency(logger, fees, send.hash);
+        return {
+          hash: send.hash,
+          ledger: horizonData.ledger ?? 0,
+          successful: true,
+          ...fees,
+        };
+      }
       // Tx landed and failed. No recovery path — throw without txHash
       // so the caller propagates the error instead of waiting on a card
       // that will never come.

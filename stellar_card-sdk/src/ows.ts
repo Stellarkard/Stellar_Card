@@ -40,6 +40,7 @@ import {
   getHorizonUrl,
   InsufficientFeeError,
 } from './soroban';
+import type { ContractPaymentResult } from './types';
 
 const USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
 const STELLAR_CHAIN = 'stellar';
@@ -429,7 +430,14 @@ export interface PayViaContractOwsOpts {
  */
 export interface PayViaContractOwsDeps {
   buildContractPaymentTx?: typeof buildContractPaymentTx;
-  submitSorobanTx?: typeof submitSorobanTx;
+  /**
+   * Injectable submit. Production uses {@link submitSorobanTx}.
+   * Tests may return a bare hash string for convenience — payViaContractOWS
+   * normalises both shapes into {@link ContractPaymentResult}.
+   */
+  submitSorobanTx?: (
+    ...args: Parameters<typeof submitSorobanTx>
+  ) => Promise<Awaited<ReturnType<typeof submitSorobanTx>> | string>;
   owsSignTx?: (
     tx: Transaction,
     walletName: string,
@@ -466,12 +474,12 @@ const PAY_VIA_CONTRACT_RETRY_DELAY_MS = 6_000;
  *
  * @param opts - Options including the wallet name, payment instructions, and network config.
  * @param deps - Optional injectable dependencies for testing (defaults to real implementations).
- * @returns The resulting transaction hash as a string.
+ * @returns A {@link ContractPaymentResult} with the transaction hash and fee refund metrics.
  */
 export async function payViaContractOWS(
   opts: PayViaContractOwsOpts,
   deps: PayViaContractOwsDeps = {},
-): Promise<string> {
+): Promise<ContractPaymentResult> {
   const {
     walletName,
     payment,
@@ -536,7 +544,24 @@ export async function payViaContractOWS(
 
     const resolvedHorizonUrl = horizonUrl ?? getHorizonUrl(networkPassphrase);
     try {
-      return await submitTx(tx, server, resolvedHorizonUrl);
+      const submitted = await submitTx(tx, server, resolvedHorizonUrl);
+      // Tests historically mocked submitSorobanTx to return a bare hash
+      // string — accept both shapes so existing stubs keep working.
+      const fallbackFee = String(tx.fee ?? '100');
+      if (typeof submitted === 'string') {
+        return {
+          hash: submitted,
+          feeCharged: fallbackFee,
+          feeRefunded: '0',
+          maxFee: fallbackFee,
+        };
+      }
+      return {
+        hash: submitted.hash,
+        feeCharged: submitted.feeCharged ?? fallbackFee,
+        feeRefunded: submitted.feeRefunded ?? '0',
+        maxFee: submitted.maxFee ?? fallbackFee,
+      };
     } catch (err) {
       lastErr = err;
       // Fee too low — retry with the network's required fee as floor.

@@ -48,8 +48,20 @@ export {
   // internal module boundaries change later.
   // Back-compat alias for payViaContract.
   payVCC,
+  // SEP-0007 deep-link helpers (#772)
+  buildSep7PayUri,
+  buildSep7TxUri,
+  parseSep7Uri,
 } from './stellar';
-export type { WalletInfo, PayOpts, EstimateXlmOptions, XlmEstimateResult } from './stellar';
+export type {
+  WalletInfo,
+  PayOpts,
+  EstimateXlmOptions,
+  XlmEstimateResult,
+  Sep7PayParams,
+  Sep7TxParams,
+  Sep7ParsedUri,
+} from './stellar';
 
 export { getAccountBalances, clearBalanceCache, BALANCE_CACHE_TTL_MS } from './stellar';
 export type { WalletInfo, PayOpts, AccountBalances, AssetBalance } from './stellar';
@@ -121,9 +133,12 @@ export {
   InsufficientFeeError,
   parseContractError,
   extractContractErrorCode,
+  computeFeeRefund,
+  extractFeeMetricsFromHorizon,
   CONTRACT_ERROR_MESSAGES,
   CONTRACT_ERROR_MAP,
 } from './soroban';
+export type { ContractPaymentResult } from './types';
 
 export {
   createLogger,
