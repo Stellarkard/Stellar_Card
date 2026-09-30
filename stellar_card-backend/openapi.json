@@ -219,7 +219,26 @@
               }
             }
           },
-          "429": { "$ref": "#/components/responses/RateLimited" },
+          "429": {
+            "description": "Order creation rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error", "message"],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": ["rate_limit_exceeded"]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
           "503": {
             "description": "Card fulfillment temporarily suspended (system frozen)",
             "content": {
