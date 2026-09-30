@@ -840,24 +840,15 @@ router.post('/', orderCreateLimiter, validateCreateOrder, async (req, res) => {
 // nothing.
 router.get('/', orderPollLimiter, validateListOrders, (req, res) => {
   const { status, limit, offset, since_created_at, since_updated_at } = req.query;
-  let query = `SELECT id, status, amount_usdc, payment_asset, created_at, updated_at FROM orders WHERE api_key_id = ?`;
-  const params = [req.apiKey.id];
-  if (status) {
-    query += ` AND status = ?`;
-    params.push(status);
-  }
-  if (since_created_at) {
-    query += ` AND created_at >= ?`;
-    params.push(since_created_at);
-  }
-  if (since_updated_at) {
-    query += ` AND updated_at >= ?`;
-    params.push(since_updated_at);
-  }
-  query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-  params.push(limit);
-  params.push(offset);
-  res.json(db.prepare(query).all(...params));
+  const orders = db.listOrders({
+    apiKeyId: req.apiKey.id,
+    status,
+    limit,
+    offset,
+    sinceCreatedAt: since_created_at,
+    sinceUpdatedAt: since_updated_at,
+  });
+  res.json(orders);
 });
 
 // Map internal pipeline statuses → stable agent-facing phase
