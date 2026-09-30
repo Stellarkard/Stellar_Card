@@ -9,6 +9,7 @@
 //              client's config "just works").
 //   status     List orders (or one with --order) as a colorized table.
 //   balance    Show the api key's budget / spend summary.
+//   verify-tx  Cryptographically verify an on-chain payment proof.
 //   version    Print the installed SDK version and exit.
 //
 // Each subcommand lives in its own module and is imported dynamically
@@ -51,6 +52,8 @@ Usage:
                                      the wallet can receive USDC)
   stellar_card status [--order <id>]     Show orders as a table (--json for raw JSON)
   stellar_card balance                   Show the api key's spend budget (--json)
+  stellar_card verify-tx <hash> --treasury <G…>
+                                     Cryptographically verify an on-chain payment proof
   stellar_card logout                    Clear cached session tokens and api keys
   stellar_card cache clear               Clear local cached state (same as logout)
   stellar_card mcp                       Start the MCP server over stdio (default)
@@ -97,6 +100,11 @@ Onboarding guide for agents: https://stellar_card.com/skill.md
   if (cmd === 'balance') {
     const { balanceCommand } = await import('./commands/status');
     return balanceCommand(rest);
+  }
+
+  if (cmd === 'verify-tx' || cmd === 'verify') {
+    const { verifyTxCommand } = await import('./commands/verify');
+    return verifyTxCommand(rest);
   }
 
   if (cmd === 'wallet') {
