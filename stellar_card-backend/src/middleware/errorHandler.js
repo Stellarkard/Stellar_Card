@@ -6,6 +6,7 @@
 
 const { event: bizEvent } = require('../lib/logger');
 const { formatRejection } = require('../lib/process-handlers');
+const { captureException } = require('../lib/sentry-config');
 
 /**
  * Express error handling middleware.
@@ -17,14 +18,27 @@ const { formatRejection } = require('../lib/process-handlers');
  * @param {import('express').NextFunction} _next
  */
 function errorHandler(err, req, res, _next) {
+  if (res.headersSent) {
+    return _next(err);
+  }
+
   // CORS structured denial from the cors() middleware.
-  if (err && err.message && err.message.startsWith('CORS:')) {
+  if (err && err.message && typeof err.message === 'string' && err.message.startsWith('CORS:')) {
     return res.status(403).json({ error: 'forbidden', message: 'Origin not allowed' });
+  }
+
+  // Handle explicit 4xx client errors (e.g. body-parser SyntaxError 400 or PayloadTooLargeError 413)
+  const status = Number(err?.status || err?.statusCode);
+  if (status >= 400 && status < 500) {
+    return res.status(status).json({
+      error: err?.type || 'bad_request',
+      message: err?.message || 'The request could not be processed.',
+    });
   }
 
   // Use the formatter from process-handlers to handle exotic thrown values safely
   const payload = formatRejection(err);
-  
+
   // Expose stack trace in logs (not client response)
   const logMessage = `[app] unhandled error on ${req.method} ${req.originalUrl || req.path}: ${payload.name}: ${payload.message}${payload.stack ? `\n${payload.stack}` : ''}`;
   console.error(logMessage);
@@ -39,6 +53,15 @@ function errorHandler(err, req, res, _next) {
     });
   } catch {
     /* observability must never crash the error handler itself */
+  }
+
+  try {
+    captureException(err, {
+      tags: { req_id: req.id },
+      extra: { path: req.originalUrl || req.path, method: req.method },
+    });
+  } catch {
+    /* observability fallback */
   }
 
   // Ensure safe fallback response to the client.
