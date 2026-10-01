@@ -277,6 +277,65 @@ app.use(
 // and the reasoning is documented there rather than here, so the answer to
 // "which paths require an api key" lives in exactly one place.
 registerRoutes(app);
+
+// ── Swagger UI (Part 2 of #docs) ─────────────────────────────────────────────
+//
+// Mounted at /docs. On by default in development and test; off in production
+// unless SWAGGER_ENABLED=true is explicitly set. The spec lives at
+// openapi.json in the project root and is loaded once at startup — a process
+// restart picks up any edits.
+//
+// The UI endpoint is intentionally unauthenticated so ops tooling and local
+// development can access it without a session cookie. In production,
+// SWAGGER_ENABLED should be left unset (default off) unless the deployment
+// sits behind a network-level access control.
+//
+// Mounted AFTER registerRoutes so /docs doesn't shadow any API path (no
+// existing path starts with /docs).
+(function mountSwaggerUi() {
+  const swaggerEnabled =
+    process.env.SWAGGER_ENABLED === 'true' ||
+    (process.env.NODE_ENV !== 'production' && process.env.SWAGGER_ENABLED !== 'false');
+
+  if (!swaggerEnabled) return;
+
+  try {
+    const swaggerUi = require('swagger-ui-express');
+    const swaggerDocument = require('../../openapi.json');
+
+    // Serve the raw spec at /docs/openapi.json so automated tooling
+    // (contract tests, code generators) can fetch it without a browser.
+    app.get('/docs/openapi.json', (_req, res) => {
+      res.json(swaggerDocument);
+    });
+
+    app.use(
+      '/docs',
+      swaggerUi.serve,
+      swaggerUi.setup(swaggerDocument, {
+        customSiteTitle: 'Stellar Card API Docs',
+        swaggerOptions: {
+          // Persist auth across page reloads in the browser
+          persistAuthorization: true,
+          // Show request duration
+          displayRequestDuration: true,
+          // Expand operations by tag by default
+          docExpansion: 'list',
+          // Hide the models section by default (keeps the UI compact)
+          defaultModelsExpandDepth: -1,
+        },
+      }),
+    );
+
+    console.log(
+      `[app] Swagger UI mounted at /docs (NODE_ENV=${process.env.NODE_ENV || 'development'})`,
+    );
+  } catch (err) {
+    // swagger-ui-express is a dev/ops convenience; a missing package or a
+    // broken spec must not crash the API process. Log and continue.
+    console.warn(`[app] Swagger UI could not be mounted: ${err.message}`);
+  }
+})();
 // Still wants a per-IP limiter so an attacker can't turn the public
 // /status endpoint into a cheap SQLite thrasher — the handler runs
 // six COUNT/SUM queries on every hit and is unauthenticated. 180/min

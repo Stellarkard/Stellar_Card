@@ -421,7 +421,7 @@ describe('payViaContractOWS', () => {
       },
     });
 
-    expect(result).toBe('soroban_tx_hash');
+    expect(result.hash).toBe('soroban_tx_hash');
   });
 
   it('retries on dropped transaction', async () => {
@@ -441,7 +441,7 @@ describe('payViaContractOWS', () => {
       },
     });
 
-    expect(result).toBe('retry_success_hash');
+    expect(result.hash).toBe('retry_success_hash');
     expect(submitSorobanTx).toHaveBeenCalledTimes(2);
   });
 

@@ -1,25 +1,67 @@
 // @ts-check
 // Security headers middleware using Helmet.
 //
-// Part 1 of #341. The API is JSON-only (see src/middleware/notFound.js for
-// why no route here ever returns an HTML body), so the header set is
-// Helmet's defaults plus an explicit, deliberately *narrow* set of
-// overrides. Two properties matter more than the individual headers:
+// Part 1 (#341): core Helmet integration — HSTS, Frameguard, noSniff,
+// Referrer-Policy, with fail-closed boot-time assertions and env-tunable
+// HSTS max-age.
 //
-//   1. Fail closed at boot. Helmet is permissive: a misconfigured option
-//      is silently ignored rather than rejected, so a typo ships a weaker
-//      header set and nothing logs. `assertHelmetOptions` below turns
-//      that into a throw at process start, where it is caught in review
-//      rather than by an incident.
+// Part 2 (#341): Content-Security-Policy (CSP) support.
 //
-//   2. HSTS is the one header here that is effectively irreversible.
-//      `includeSubDomains` + `preload` are honoured by the browser for
-//      `maxAge` seconds, and a user cannot be talked out of it early, so
-//      hardcoding 2 years means a bad deploy locks every subdomain of the
-//      registrable domain into HTTPS-only for 63072000s. That is why the
-//      values are env-tunable and why the production floor is enforced.
+//   The API is JSON-only, so the broadest attack surface for CSP — inline
+//   scripts injected via XSS into an HTML response — doesn't apply here.
+//   That doesn't mean CSP is useless: a fetch() or XMLHttpRequest issued
+//   by a hijacked browser extension or service-worker context will still
+//   be governed by the API's own response headers if the response is ever
+//   displayed in a browser. The policy below closes that gap without
+//   breaking the expected JSON-only consumers:
+//
+//     default-src 'none'  — nothing loads by default.
+//     script-src  'none'  — no scripts, ever. The API never serves JS.
+//     connect-src 'self'  — fetch/XHR back to the same origin is fine.
+//     frame-ancestors 'none' — equivalent to X-Frame-Options: DENY but
+//                              covers the broader CSP framing surface.
+//
+//   Two properties preserved from Part 1:
+//
+//   1. Fail closed at boot. `assertHelmetOptions` now covers the
+//      `contentSecurityPolicy` key as well, so a mis-typed directive name
+//      throws at process start rather than silently shipping a header with
+//      a wrong directive.
+//
+//   2. Env-tunability. `SECURITY_CSP_REPORT_URI` can point at a CSP
+//      violation collector endpoint; when unset the report-uri directive is
+//      omitted entirely. The empty-string case is explicitly rejected
+//      (same pattern as SECURITY_HSTS_MAX_AGE) so a cleared env var doesn't
+//      send violation reports to a blank URL.
 
+const crypto = require('crypto');
 const helmet = require('helmet');
+
+// ── Default CSP directive set ─────────────────────────────────────────────
+//
+// Locked-down policy for a JSON API. Every directive that is not listed
+// falls back to the `default-src 'none'` anchor.
+//
+// `frame-ancestors 'none'` is kept here (in addition to Helmet's own
+// `frameguard` header) because some browsers only honour the CSP version
+// and older agents may not send the separate X-Frame-Options header at all.
+//
+// The directives are expressed as an object whose values are arrays, which
+// is the shape Helmet 8's `contentSecurityPolicy.directives` expects. An
+// empty array maps to a bare directive with no value (e.g. `upgrade-insecure-requests`).
+const DEFAULT_CSP_DIRECTIVES = {
+  'default-src': ["'none'"],
+  'script-src': ["'none'"],
+  'connect-src': ["'self'"],
+  'img-src': ["'none'"],
+  'style-src': ["'none'"],
+  'font-src': ["'none'"],
+  'object-src': ["'none'"],
+  'media-src': ["'none'"],
+  'frame-ancestors': ["'none'"],
+  'form-action': ["'none'"],
+  'base-uri': ["'none'"],
+};
 
 /** @type {import('helmet').HelmetOptions} */
 const DEFAULT_OPTIONS = {
@@ -35,6 +77,11 @@ const DEFAULT_OPTIONS = {
   referrerPolicy: {
     policy: 'strict-origin-when-cross-origin',
   },
+  // CSP is opt-in at boot: `contentSecurityPolicy` is assembled by
+  // createSecurityHeadersMiddleware from DEFAULT_CSP_DIRECTIVES and the
+  // SECURITY_CSP_REPORT_URI env var, then merged into the options passed
+  // to helmet(). Keeping it out of DEFAULT_OPTIONS here means the static
+  // object stays serialisable and unit-testable independently of env state.
 };
 
 /** `frameguard.action` values Helmet accepts; anything else is dropped silently. */
@@ -52,6 +99,12 @@ const REFERRER_POLICIES = new Set([
   'unsafe-url',
 ]);
 
+// Valid top-level CSP directive name pattern. Directive names are ASCII
+// lowercase with optional hyphens. We don't enumerate them because the
+// set grows across CSP levels, but we can at least reject obviously
+// wrong keys (camelCase leakage, empty strings, leading hyphens).
+const CSP_DIRECTIVE_NAME_RE = /^[a-z][a-z0-9-]*$/;
+
 /**
  * Rejects a Helmet option bag that Helmet itself would silently ignore.
  *
@@ -59,6 +112,10 @@ const REFERRER_POLICIES = new Set([
  * values by falling back to its own default. Both failure modes land the
  * same way: the process boots, the header looks "configured" in review,
  * and the browser receives something weaker than the author intended.
+ *
+ * Part 2 addition: validates `contentSecurityPolicy.directives` when
+ * present, ensuring directive names match the expected kebab-case pattern
+ * and that each value is an array of strings.
  *
  * @param {import('helmet').HelmetOptions} [options]
  * @returns {void}
@@ -114,6 +171,52 @@ function assertHelmetOptions(options = {}) {
       );
     }
   }
+
+  // Part 2: validate contentSecurityPolicy when supplied.
+  if (
+    options.contentSecurityPolicy !== undefined &&
+    options.contentSecurityPolicy !== false
+  ) {
+    const csp = /** @type {Record<string, unknown>} */ (options.contentSecurityPolicy);
+    if (typeof csp !== 'object' || csp === null) {
+      throw new TypeError(
+        'security headers: `contentSecurityPolicy` must be an object or false',
+      );
+    }
+    if (csp.directives !== undefined) {
+      const directives = /** @type {Record<string, unknown>} */ (csp.directives);
+      if (typeof directives !== 'object' || directives === null || Array.isArray(directives)) {
+        throw new TypeError(
+          'security headers: `contentSecurityPolicy.directives` must be a plain object',
+        );
+      }
+      for (const [name, value] of Object.entries(directives)) {
+        if (!CSP_DIRECTIVE_NAME_RE.test(name)) {
+          throw new TypeError(
+            `security headers: CSP directive name ${JSON.stringify(name)} is not valid kebab-case`,
+          );
+        }
+        if (!Array.isArray(value)) {
+          throw new TypeError(
+            `security headers: CSP directive ${JSON.stringify(name)} value must be an array`,
+          );
+        }
+        for (const token of value) {
+          if (typeof token !== 'string') {
+            throw new TypeError(
+              `security headers: CSP directive ${JSON.stringify(name)} contains a non-string token`,
+            );
+          }
+        }
+      }
+    }
+    // `reportOnly` is the only other documented key we care about validating.
+    if (csp.reportOnly !== undefined && typeof csp.reportOnly !== 'boolean') {
+      throw new TypeError(
+        'security headers: `contentSecurityPolicy.reportOnly` must be a boolean',
+      );
+    }
+  }
 }
 
 /**
@@ -155,7 +258,113 @@ function hstsFromEnv() {
 }
 
 /**
- * Creates and returns the security headers middleware configured for Stellar_Card backend API.
+ * Reads the CSP report-uri from the environment.
+ *
+ * When `SECURITY_CSP_REPORT_URI` is set to a non-empty string, the value
+ * is appended as a `report-uri` directive in the CSP header. The empty
+ * string is explicitly rejected (unlike `undefined`, which means "not
+ * configured") so an operator who clears the var doesn't accidentally send
+ * violation reports to `report-uri ` (bare space).
+ *
+ * @returns {string | null} URI string, or null when the directive should
+ *   be omitted.
+ */
+function cspReportUriFromEnv() {
+  const raw = process.env.SECURITY_CSP_REPORT_URI;
+  if (raw === undefined) return null;
+  if (raw.trim() === '') {
+    // Whitespace-only is almost certainly an operator mistake — a report-uri
+    // pointing at nothing. Fail closed rather than silently dropping it.
+    throw new TypeError(
+      'security headers: SECURITY_CSP_REPORT_URI is set but empty. ' +
+        'Unset the variable entirely to disable violation reporting.',
+    );
+  }
+  // Minimal sanity check: must look like an absolute URL.
+  try {
+    const parsed = new URL(raw.trim());
+    if (!/^https?:$/.test(parsed.protocol)) {
+      throw new Error('only http(s) schemes are accepted');
+    }
+  } catch (err) {
+    throw new TypeError(
+      `security headers: SECURITY_CSP_REPORT_URI must be a valid https:// URL (got ${JSON.stringify(raw)}): ${err.message}`,
+    );
+  }
+  return raw.trim();
+}
+
+/**
+ * Assembles the `contentSecurityPolicy` option for Helmet from the default
+ * directive set, the optional report-uri, and any caller overrides.
+ *
+ * @param {import('helmet').HelmetOptions['contentSecurityPolicy']} [customCsp]
+ * @returns {import('helmet').HelmetOptions['contentSecurityPolicy']}
+ */
+function buildCspOption(customCsp) {
+  // Caller explicitly disabled CSP — honour it without reading the env.
+  if (customCsp === false) return false;
+
+  const reportUri = cspReportUriFromEnv();
+
+  // Build the merged directive set:
+  //   1. Start with our locked-down defaults.
+  //   2. Apply any caller-supplied directive overrides.
+  //   3. Append the env report-uri if configured (only when the caller
+  //      hasn't already included one).
+  const callerDirectives =
+    customCsp && typeof customCsp === 'object' && customCsp.directives
+      ? /** @type {Record<string, string[]>} */ (customCsp.directives)
+      : {};
+
+  const mergedDirectives = {
+    ...DEFAULT_CSP_DIRECTIVES,
+    ...callerDirectives,
+  };
+
+  if (reportUri && !mergedDirectives['report-uri']) {
+    mergedDirectives['report-uri'] = [reportUri];
+  }
+
+  return {
+    directives: mergedDirectives,
+    // Respect caller-supplied reportOnly; default false (enforce, don't report-only).
+    reportOnly:
+      customCsp && typeof customCsp === 'object' && typeof customCsp.reportOnly === 'boolean'
+        ? customCsp.reportOnly
+        : false,
+  };
+}
+
+/**
+ * Generates a cryptographically random nonce for use in CSP `script-src`
+ * or `style-src` directives.
+ *
+ * Usage (per-request):
+ *
+ *   const nonce = generateCspNonce();
+ *   res.locals.cspNonce = nonce;
+ *   // ... mount middleware that adds `'nonce-<value>'` to script-src
+ *
+ * The API is currently JSON-only and never serves inline scripts, so this
+ * function is exported for completeness and future use — e.g., an admin
+ * dashboard that embeds a small inline script tag to bootstrap state.
+ *
+ * @returns {string} Base64-encoded 16-byte random nonce (22 chars, no padding).
+ */
+function generateCspNonce() {
+  // 16 bytes = 128 bits of entropy, matching the OWASP recommended minimum.
+  // base64url avoids `+` and `/` which need quoting inside CSP header values.
+  return crypto.randomBytes(16).toString('base64url');
+}
+
+/**
+ * Creates and returns the security headers middleware configured for the
+ * Stellar_Card backend API.
+ *
+ * Part 2: now also configures Content-Security-Policy via Helmet, merging
+ * the locked-down default directive set with any caller overrides and the
+ * env-configured report-uri.
  *
  * @param {import('helmet').HelmetOptions} [customOptions] - Optional Helmet configuration overrides for testing/environments.
  * @returns {import('express').RequestHandler}
@@ -180,10 +389,18 @@ function createSecurityHeadersMiddleware(customOptions = {}) {
           }
         : false;
 
+  // Part 2: assemble the CSP option. Caller may supply `contentSecurityPolicy`
+  // as an override (or `false` to disable); when absent we build from defaults.
+  const contentSecurityPolicy = buildCspOption(
+    /** @type {import('helmet').HelmetOptions['contentSecurityPolicy']} */
+    (customOptions.contentSecurityPolicy),
+  );
+
   return helmet({
     ...DEFAULT_OPTIONS,
     ...customOptions,
     hsts,
+    contentSecurityPolicy,
   });
 }
 
@@ -193,5 +410,8 @@ module.exports = {
   createSecurityHeadersMiddleware,
   securityHeaders,
   assertHelmetOptions,
+  generateCspNonce,
+  buildCspOption,
   DEFAULT_OPTIONS,
+  DEFAULT_CSP_DIRECTIVES,
 };

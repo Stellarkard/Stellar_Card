@@ -11,6 +11,8 @@ const {
   fireWebhook,
   getWebhookMaxAttempts,
   getWebhookRetryDelay,
+  MAX_WEBHOOK_ATTEMPTS,
+  DEFAULT_RETRY_CONFIG,
   refundOrQuarantine,
 } = require('./fulfillment');
 const vccClient = require('./vcc-client');
@@ -829,6 +831,7 @@ async function retryWebhooks() {
         // then abandoned.
         const delayMs =
           nextAttempts > getWebhookMaxAttempts() ? null : getWebhookRetryDelay(row.attempts);
+          nextAttempts > MAX_WEBHOOK_ATTEMPTS ? null : getWebhookRetryDelay(row.attempts, DEFAULT_RETRY_CONFIG);
         if (delayMs === null) {
           db.prepare(
             `

@@ -21,21 +21,36 @@ import { loadStellar_CardConfig } from '../config';
 import { purchaseCardOWS, getOWSBalance } from '../ows';
 import { ResumableError, OrderFailedError } from '../errors';
 
-interface PurchaseArgs {
+export interface PurchaseArgs {
   amount?: string;
   asset?: 'xlm' | 'usdc';
   walletName?: string;
   vaultPath?: string;
   passphraseEnv?: string;
   resume?: string;
+  merchant?: string;
+  memo?: string;
+  json?: boolean;
+  dryRun?: boolean;
+  yes?: boolean;
   help?: boolean;
 }
 
-interface PurchaseArgsParsed extends PurchaseArgs {
+export interface PurchaseArgsParsed extends PurchaseArgs {
   assetInvalid?: string;
 }
 
-function parseArgs(argv: string[]): PurchaseArgsParsed {
+/** Injectable deps so unit tests can drive confirmation / purchase without I/O. */
+export interface PurchaseDeps {
+  loadConfig?: typeof loadStellar_CardConfig;
+  getBalance?: typeof getOWSBalance;
+  purchase?: typeof purchaseCardOWS;
+  confirm?: (prompt: string) => Promise<boolean>;
+  out?: (text: string) => void;
+  err?: (text: string) => void;
+}
+
+export function parsePurchaseArgs(argv: string[]): PurchaseArgsParsed {
   const out: PurchaseArgsParsed = {};
   const takeAsset = (v: string | undefined): void => {
     if (v === undefined) return;
@@ -67,12 +82,22 @@ function parseArgs(argv: string[]): PurchaseArgsParsed {
       out.passphraseEnv = arg.slice('--passphrase-env='.length);
     else if (arg === '--resume') out.resume = argv[++i];
     else if (arg.startsWith('--resume=')) out.resume = arg.slice('--resume='.length);
+    else if (arg === '--merchant') out.merchant = argv[++i];
+    else if (arg.startsWith('--merchant=')) out.merchant = arg.slice('--merchant='.length);
+    else if (arg === '--memo') out.memo = argv[++i];
+    else if (arg.startsWith('--memo=')) out.memo = arg.slice('--memo='.length);
+    else if (arg === '--json') out.json = true;
+    else if (arg === '--dry-run') out.dryRun = true;
+    else if (arg === '-y' || arg === '--yes') out.yes = true;
   }
   return out;
 }
 
-function usage(): void {
-  process.stderr.write(`Usage: stellar_card purchase --amount <USDC> [--asset xlm|usdc]
+/** @deprecated Use {@link parsePurchaseArgs}. */
+const parseArgs = parsePurchaseArgs;
+
+function usage(errWrite: (t: string) => void = (t) => process.stderr.write(t)): void {
+  errWrite(`Usage: stellar_card purchase --amount <USDC> [--asset xlm|usdc]
        stellar_card purchase --resume <order-id>
 
 Buys a virtual Visa card for the given USD value using the credentials
@@ -85,6 +110,11 @@ Options:
                              USDC if the wallet has enough USDC to cover the
                              order, otherwise pays in XLM. Pass an explicit
                              value to force one.
+  --merchant <name>          Optional merchant label stored on the order.
+  --memo <text>              Optional memo attached to the order metadata.
+  --json                     Emit machine-readable JSON on success.
+  --dry-run                  Validate flags and balances without purchasing.
+  -y, --yes                  Skip the interactive confirmation prompt.
   --wallet-name <name>       Override the wallet name from config.json
   --vault-path <path>        Override the vault path from config.json
   --passphrase-env <ENVNAME> Override the passphrase env var from config.json.
@@ -96,8 +126,21 @@ Options:
 Examples:
   stellar_card purchase --amount 10                 # $10 card paid in XLM
   stellar_card purchase --amount 5 --asset usdc
+  stellar_card purchase --amount 10 --dry-run --json
   stellar_card purchase --resume a94d18cc-...       # pick up an interrupted purchase
 `);
+}
+
+async function defaultConfirm(prompt: string): Promise<boolean> {
+  const readline = await import('readline');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(prompt, (answer) => {
+      rl.close();
+      const a = answer.trim().toLowerCase();
+      resolve(a === 'y' || a === 'yes');
+    });
+  });
 }
 
 function lastOrderFile(): string {
@@ -225,52 +268,60 @@ function clearLastOrder(): void {
   }
 }
 
-function printCard(card: {
-  number: string;
-  cvv: string;
-  expiry: string;
-  brand: string | null;
-  order_id: string;
-}): void {
-  process.stdout.write('\n');
-  process.stdout.write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-  process.stdout.write(' Card delivered\n');
-  process.stdout.write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-  process.stdout.write(`  Number: ${card.number}\n`);
-  process.stdout.write(`  CVV:    ${card.cvv}\n`);
-  process.stdout.write(`  Expiry: ${card.expiry}\n`);
-  if (card.brand) process.stdout.write(`  Brand:  ${card.brand}\n`);
-  process.stdout.write(`  Order:  ${card.order_id}\n`);
-  process.stdout.write('\n');
-  process.stdout.write(
+function printCard(
+  card: {
+    number: string;
+    cvv: string;
+    expiry: string;
+    brand: string | null;
+    order_id: string;
+  },
+  write: (text: string) => void = (t) => process.stdout.write(t),
+): void {
+  write('\n');
+  write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+  write(' Card delivered\n');
+  write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+  write(`  Number: ${card.number}\n`);
+  write(`  CVV:    ${card.cvv}\n`);
+  write(`  Expiry: ${card.expiry}\n`);
+  if (card.brand) write(`  Brand:  ${card.brand}\n`);
+  write(`  Order:  ${card.order_id}\n`);
+  write('\n');
+  write(
     'The card details above are sensitive — save them to a secrets store immediately and do not log them.\n',
   );
 }
 
-export async function purchaseCommand(argv: string[]): Promise<number> {
+export async function purchaseCommand(argv: string[], deps: PurchaseDeps = {}): Promise<number> {
+  const out = deps.out ?? ((t) => process.stdout.write(t));
+  const err = deps.err ?? ((t) => process.stderr.write(t));
+  const loadConfig = deps.loadConfig ?? loadStellar_CardConfig;
+  const getBalance = deps.getBalance ?? getOWSBalance;
+  const purchase = deps.purchase ?? purchaseCardOWS;
+  const confirm = deps.confirm ?? defaultConfirm;
+
   const args = parseArgs(argv);
   if (args.help) {
-    usage();
+    usage(err);
     return 0;
   }
 
   // Reject unknown --asset values up front so `--asset usd` doesn't
   // silently fall through to the auto-pick path.
   if (args.assetInvalid) {
-    process.stderr.write(
-      `error: --asset must be 'xlm', 'usdc', or 'auto' (got: ${args.assetInvalid})\n`,
-    );
+    err(`error: --asset must be 'xlm', 'usdc', or 'auto' (got: ${args.assetInvalid})\n`);
     return 2;
   }
 
   // --resume and --amount are mutually exclusive; --resume doesn't need --amount.
   if (args.resume && args.amount) {
-    process.stderr.write('error: --resume and --amount cannot be used together\n');
+    err('error: --resume and --amount cannot be used together\n');
     return 2;
   }
   if (!args.resume && !args.amount) {
-    process.stderr.write('error: --amount <USDC> is required (or --resume <order-id>)\n\n');
-    usage();
+    err('error: --amount <USDC> is required (or --resume <order-id>)\n\n');
+    usage(err);
     return 2;
   }
   if (args.amount) {
@@ -278,27 +329,27 @@ export async function purchaseCommand(argv: string[]): Promise<number> {
     // string with ≤2 fractional digits, min $0.01, max $10,000. Fail
     // locally so the CLI gives a specific error instead of a backend 400.
     if (!/^\d+(\.\d{1,2})?$/.test(args.amount)) {
-      process.stderr.write(
+      err(
         `error: --amount must be a decimal string with up to 2 decimal places (got: ${args.amount})\n`,
       );
       return 2;
     }
     const amt = parseFloat(args.amount);
     if (amt < 0.01) {
-      process.stderr.write('error: --amount must be at least 0.01 (one US cent)\n');
+      err('error: --amount must be at least 0.01 (one US cent)\n');
       return 2;
     }
     if (amt > 10000) {
-      process.stderr.write(
+      err(
         "error: --amount cannot exceed 10000 (Pathward's per-card balance ceiling). Issue multiple cards for larger spends.\n",
       );
       return 2;
     }
   }
 
-  const config = loadStellar_CardConfig();
+  const config = loadConfig();
   if (!config) {
-    process.stderr.write(
+    err(
       `error: no stellar_card config found at ~/.stellar_card/config.json
 
 Run 'stellar_card onboard --claim <code>' first to set up credentials.
@@ -316,7 +367,7 @@ Your operator can mint a claim code from https://stellar_card.com/dashboard.
   // we refuse to proceed rather than silently colliding.
   const walletName = args.walletName || config.wallet_name;
   if (!walletName) {
-    process.stderr.write(
+    err(
       'error: no wallet_name in ~/.stellar_card/config.json and no --wallet-name passed.\n' +
         "Either pass --wallet-name <name>, or re-run 'stellar_card onboard --claim <code>'\n" +
         'to write a fresh config with a unique wallet name.\n',
@@ -331,7 +382,7 @@ Your operator can mint a claim code from https://stellar_card.com/dashboard.
   const passphraseEnv = args.passphraseEnv ?? config.passphrase_env;
   const passphrase = passphraseEnv ? process.env[passphraseEnv] : undefined;
   if (passphraseEnv && !passphrase) {
-    process.stderr.write(
+    err(
       `error: --passphrase-env ${passphraseEnv} is set in config but the env var is empty.\n` +
         `Set ${passphraseEnv} to your wallet passphrase before running purchase.\n`,
     );
@@ -348,28 +399,29 @@ Your operator can mint a claim code from https://stellar_card.com/dashboard.
   //   - otherwise: pick USDC if the wallet has enough USDC to cover the
   //     order, else pick XLM
   let paymentAsset: 'xlm' | 'usdc';
+  let balance: { xlm: string; usdc: string } | null = null;
   if (args.asset) {
     paymentAsset = args.asset;
   } else if (args.resume) {
     paymentAsset = 'xlm'; // unused on resume, any value is fine
   } else {
     try {
-      const bal = await getOWSBalance(walletName, vaultPath);
-      const usdcBal = parseFloat(bal.usdc || '0');
+      balance = await getBalance(walletName, vaultPath);
+      const usdcBal = parseFloat(balance.usdc || '0');
       const wantUsdc = parseFloat(args.amount || '0');
       if (usdcBal >= wantUsdc && wantUsdc > 0) {
         paymentAsset = 'usdc';
-        process.stdout.write(
+        out(
           `→ Auto-picked USDC (wallet has ${usdcBal.toFixed(2)} USDC; covers $${wantUsdc.toFixed(2)})\n`,
         );
       } else {
         paymentAsset = 'xlm';
         if (usdcBal > 0) {
-          process.stdout.write(
+          out(
             `→ Auto-picked XLM (wallet has only ${usdcBal.toFixed(2)} USDC; needs $${wantUsdc.toFixed(2)})\n`,
           );
         } else {
-          process.stdout.write(`→ Auto-picked XLM (no USDC in wallet)\n`);
+          out(`→ Auto-picked XLM (no USDC in wallet)\n`);
         }
       }
     } catch {
@@ -377,9 +429,75 @@ Your operator can mint a claim code from https://stellar_card.com/dashboard.
       // trustline required) and let payViaContractOWS surface the real
       // error if the wallet really has nothing.
       paymentAsset = 'xlm';
-      process.stdout.write(
+      out(
         `→ Could not read balance from Horizon — defaulting to XLM. Pass --asset usdc to override.\n`,
       );
+    }
+  }
+
+  // Insufficient-balance guard for explicit asset selection / dry-run.
+  if (!args.resume && args.amount) {
+    try {
+      if (!balance) balance = await getBalance(walletName, vaultPath);
+      const want = parseFloat(args.amount);
+      if (paymentAsset === 'usdc') {
+        const usdcBal = parseFloat(balance.usdc || '0');
+        if (usdcBal < want) {
+          err(
+            `error: insufficient USDC balance (have ${usdcBal.toFixed(2)}, need ${want.toFixed(2)})\n`,
+          );
+          return 1;
+        }
+      } else if (paymentAsset === 'xlm') {
+        const xlmBal = parseFloat(balance.xlm || '0');
+        // XLM amount is DEX-quoted later; only block obviously empty wallets.
+        if (xlmBal <= 0) {
+          err('error: insufficient XLM balance (wallet has 0 XLM)\n');
+          return 1;
+        }
+      }
+    } catch {
+      // Balance check is best-effort when Horizon is down; dry-run still reports.
+      if (args.dryRun) {
+        err('error: could not read wallet balance for --dry-run\n');
+        return 1;
+      }
+    }
+  }
+
+  // Dry-run: validate and report the plan without purchasing.
+  if (args.dryRun) {
+    const plan = {
+      ok: true,
+      dry_run: true,
+      amount_usdc: args.amount ?? null,
+      payment_asset: paymentAsset,
+      wallet_name: walletName,
+      merchant: args.merchant ?? null,
+      memo: args.memo ?? null,
+      resume: args.resume ?? null,
+    };
+    if (args.json) {
+      out(JSON.stringify(plan, null, 2) + '\n');
+    } else {
+      out(
+        `Dry run OK — would purchase $${args.amount} via ${paymentAsset.toUpperCase()}` +
+          (args.merchant ? ` (merchant: ${args.merchant})` : '') +
+          (args.memo ? ` (memo: ${args.memo})` : '') +
+          `\n`,
+      );
+    }
+    return 0;
+  }
+
+  // Interactive confirmation unless --yes / --json / --resume.
+  if (!args.yes && !args.json && !args.resume && args.amount) {
+    const ok = await confirm(
+      `Purchase $${args.amount} card paying with ${paymentAsset.toUpperCase()}? [y/N] `,
+    );
+    if (!ok) {
+      err('Purchase cancelled.\n');
+      return 0;
     }
   }
 
@@ -391,7 +509,9 @@ Your operator can mint a claim code from https://stellar_card.com/dashboard.
   // --resume defaulted to "wait the full timeout" even when the
   // original tx was provably dropped pre-apply.
   let resumeArg:
-    string | { orderId: string; txHash?: string; phase?: 'unpaid' | 'paid' } | undefined;
+    | string
+    | { orderId: string; txHash?: string; phase?: 'unpaid' | 'paid' }
+    | undefined;
   if (args.resume) {
     const saved = loadLastOrder();
     if (saved && saved.orderId === args.resume) {
@@ -400,7 +520,7 @@ Your operator can mint a claim code from https://stellar_card.com/dashboard.
         txHash: saved.txHash,
         phase: saved.phase,
       };
-      process.stdout.write(
+      out(
         `→ Resuming order ${args.resume}` +
           (saved.txHash ? ` (prior tx: ${saved.txHash.slice(0, 8)}…)` : '') +
           `…\n`,
@@ -410,14 +530,14 @@ Your operator can mint a claim code from https://stellar_card.com/dashboard.
       // there is no last-order. Fall back to the bare-string form —
       // conservative "wait for backend" behavior.
       resumeArg = args.resume;
-      process.stdout.write(`→ Resuming order ${args.resume}…\n`);
+      out(`→ Resuming order ${args.resume}…\n`);
     }
-  } else {
-    process.stdout.write(`→ Purchasing $${args.amount} card via ${paymentAsset.toUpperCase()}…\n`);
+  } else if (!args.json) {
+    out(`→ Purchasing $${args.amount} card via ${paymentAsset.toUpperCase()}…\n`);
   }
 
   try {
-    const card = await purchaseCardOWS({
+    const card = await purchase({
       apiKey: config.api_key,
       baseUrl: config.api_url,
       walletName,
@@ -429,33 +549,52 @@ Your operator can mint a claim code from https://stellar_card.com/dashboard.
       ...(resumeArg ? { resume: resumeArg } : {}),
     });
     clearLastOrder();
-    printCard(card);
+    if (args.json) {
+      out(
+        JSON.stringify(
+          {
+            ok: true,
+            order_id: card.order_id,
+            number: card.number,
+            cvv: card.cvv,
+            expiry: card.expiry,
+            brand: card.brand,
+            merchant: args.merchant ?? null,
+            memo: args.memo ?? null,
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+    } else {
+      printCard(card, out);
+    }
     return 0;
-  } catch (err) {
-    if (err instanceof OrderFailedError) {
-      process.stderr.write(`\nerror: ${err.message}\n`);
+  } catch (e) {
+    if (e instanceof OrderFailedError) {
+      err(`\nerror: ${e.message}\n`);
       clearLastOrder();
       return 1;
     }
-    if (err instanceof ResumableError) {
+    if (e instanceof ResumableError) {
       // Preserve the full context — txHash + phase — so the next
       // --resume run can decide whether the prior submit landed.
       saveLastOrder({
-        orderId: err.orderId,
-        txHash: err.txHash,
-        phase: err.phase,
+        orderId: e.orderId,
+        txHash: e.txHash,
+        phase: e.phase,
       });
-      process.stderr.write(`\nerror: ${err.message}\n`);
-      process.stderr.write(
+      err(`\nerror: ${e.message}\n`);
+      err(
         `\nYour payment may still be processing on-chain. The stellar_card backend will\n` +
           `credit the order if the transaction finalizes. Resume with:\n\n` +
-          `  stellar_card purchase --resume ${err.orderId}\n\n` +
+          `  stellar_card purchase --resume ${e.orderId}\n\n` +
           `(saved to ~/.stellar_card/last-order)\n`,
       );
       return 1;
     }
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`error: purchase failed: ${msg}\n`);
+    const msg = e instanceof Error ? e.message : String(e);
+    err(`error: purchase failed: ${msg}\n`);
     return 1;
   }
 }

@@ -19,6 +19,7 @@ import {
   selectContractCall,
   InsufficientFeeError,
 } from './soroban';
+import type { ContractPaymentResult } from './types';
 import type { Logger } from './logger';
 
 const USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
@@ -374,21 +375,23 @@ export interface PayOpts {
  *
  * @param opts - Payment options including the wallet secret, payment instructions,
  *   and optional network / RPC overrides.
- * @returns Promise resolving to the Stellar transaction hash.
+ * @returns Promise resolving to a {@link ContractPaymentResult} with the
+ *   transaction hash and Soroban fee refund metrics (`feeCharged`, `feeRefunded`, `maxFee`).
  * @throws {Error} When `payment.contract_id` is not a valid Soroban contract address.
  * @throws {InsufficientFeeError} When the fee is still insufficient after the retry.
  * @throws {Error} When the Soroban transaction fails on-chain or times out.
  *
  * @example
  * ```typescript
- * const txHash = await payViaContract({
+ * const result = await payViaContract({
  *   walletSecret: process.env.STELLAR_SECRET!,
  *   payment: order.payment,
  *   paymentAsset: 'usdc',
  * });
+ * console.log(result.hash, result.feeRefunded);
  * ```
  */
-export async function payViaContract(opts: PayOpts): Promise<string> {
+export async function payViaContract(opts: PayOpts): Promise<ContractPaymentResult> {
   const {
     walletSecret,
     payment,
@@ -431,9 +434,14 @@ export async function payViaContract(opts: PayOpts): Promise<string> {
     tx.sign(keypair);
     try {
       logger?.debug?.(`Submitting Soroban transaction (attempt ${attempt + 1}) to RPC`);
-      const txHash = await submitSorobanTx(tx, server, resolvedHorizonUrl);
-      logger?.info?.(`Soroban transaction submitted successfully: ${txHash}`);
-      return txHash;
+      const result = await submitSorobanTx(tx, server, resolvedHorizonUrl, logger);
+      logger?.info?.(`Soroban transaction submitted successfully: ${result.hash}`);
+      return {
+        hash: result.hash,
+        feeCharged: result.feeCharged ?? result.maxFee ?? tx.fee,
+        feeRefunded: result.feeRefunded ?? '0',
+        maxFee: result.maxFee ?? tx.fee,
+      };
     } catch (err) {
       if (err instanceof InsufficientFeeError && attempt === 0) {
         fee = err.requiredFee;
@@ -584,6 +592,18 @@ export function verifyMessage(
     return false;
   }
 }
+
+// ── SEP-0007 deep-link helpers (#772) ────────────────────────────────────────
+// Re-exported here so consumers can `import { buildSep7PayUri } from 'stellar_card'`
+// without reaching into the utils/ path.
+export {
+  buildSep7PayUri,
+  buildSep7TxUri,
+  parseSep7Uri,
+  type Sep7PayParams,
+  type Sep7TxParams,
+  type Sep7ParsedUri,
+} from './utils/sep7';
 
 // Back-compat aliases — the pre-V3 SDK exposed these names. Keep them around
 // as deprecated exports so existing imports don't break on upgrade.
