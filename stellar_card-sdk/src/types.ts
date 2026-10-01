@@ -115,6 +115,24 @@ export interface TransactionResult {
   successful: boolean;
   /** Result XDR */
   resultXdr?: string;
+  /** Fee actually charged by the network, in stroops */
+  feeCharged?: string;
+  /** Fee refunded (maxFee − feeCharged), in stroops */
+  feeRefunded?: string;
+  /** Maximum fee allocated when the transaction was built, in stroops */
+  maxFee?: string;
+}
+
+/** Result of a Soroban contract payment (pay_usdc / pay_xlm). */
+export interface ContractPaymentResult {
+  /** Transaction hash (64-char hex) */
+  hash: string;
+  /** Fee actually charged, in stroops */
+  feeCharged: string;
+  /** Fee refunded (maxFee − feeCharged), in stroops */
+  feeRefunded: string;
+  /** Max fee allocated on the envelope, in stroops */
+  maxFee: string;
 }
 
 // ============================================================================

@@ -345,7 +345,7 @@ describe('Soroban integration', () => {
       } as any;
 
       const hash = await submitSorobanTx(tx as any, server);
-      expect(hash).toBe('a'.repeat(64));
+      expect(hash.hash).toBe('a'.repeat(64));
       expect(server.sendTransaction).toHaveBeenCalledOnce();
     });
 
@@ -374,7 +374,7 @@ describe('Soroban integration', () => {
       // Advance past the 1500ms retry delay
       await vi.advanceTimersByTimeAsync(2000);
       const hash = await promise;
-      expect(hash).toBe('b'.repeat(64));
+      expect(hash.hash).toBe('b'.repeat(64));
       expect(server.sendTransaction).toHaveBeenCalledTimes(2);
       vi.useRealTimers();
     });
@@ -400,7 +400,7 @@ describe('Soroban integration', () => {
       } as any;
 
       const hash = await submitSorobanTx(tx as any, server);
-      expect(hash).toBe('c'.repeat(64));
+      expect(hash.hash).toBe('c'.repeat(64));
     });
 
     it('throws InsufficientFeeError when txInsufficientFee is returned', async () => {
@@ -517,7 +517,7 @@ describe('Soroban integration', () => {
         server,
         'https://horizon-testnet.stellar.org',
       );
-      expect(hash).toBe(txHash);
+      expect(hash.hash).toBe(txHash);
       expect(fetchMock).toHaveBeenCalledWith(
         `https://horizon-testnet.stellar.org/transactions/${txHash}`,
       );
@@ -571,7 +571,7 @@ describe('Soroban integration', () => {
       // Advance past the 2000ms poll delay so the second getTransaction fires
       await vi.advanceTimersByTimeAsync(3000);
       const hash = await promise;
-      expect(hash).toBe(txHash);
+      expect(hash.hash).toBe(txHash);
       expect(pollCount).toBe(2);
 
       vi.useRealTimers();

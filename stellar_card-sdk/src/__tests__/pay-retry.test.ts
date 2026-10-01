@@ -116,7 +116,7 @@ describe('payViaContractOWS — retry on dropped Soroban tx', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     const result = await promise;
 
-    expect(result).toBe('FAKE_SUCCESS_HASH');
+    expect(result.hash).toBe('FAKE_SUCCESS_HASH');
     expect(buildSpy).toHaveBeenCalledTimes(2);
     // First build: no preservedSequence (fresh fetch from chain)
     expect(buildSpy.mock.calls[0][0].preservedSequence).toBeUndefined();
@@ -195,7 +195,7 @@ describe('payViaContractOWS — retry on dropped Soroban tx', () => {
       deps,
     );
 
-    expect(result).toBe('FIRST_ATTEMPT_HASH');
+    expect(result.hash).toBe('FIRST_ATTEMPT_HASH');
     expect(submitSpy).toHaveBeenCalledTimes(1);
     expect(buildSpy).toHaveBeenCalledTimes(1);
   });

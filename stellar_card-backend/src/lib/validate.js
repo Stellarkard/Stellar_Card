@@ -405,6 +405,135 @@ const FulfillmentCard = z.object({
   ).optional(),
 });
 
+// ── Card fulfillment endpoint validation (Part 3) ─────────────────────────
+//
+// Prior to Part 3, the query-parameter and path-parameter guards on the
+// internal card-management endpoints were hand-written type checks
+// (`typeof status !== 'string'`, `parseInt(limit) || 100`). These work
+// but have two weaknesses relative to Zod-based validation:
+//
+//   1. They return different error shapes than the rest of the API —
+//      `{error: 'invalid_query_param'}` from internal.js vs
+//      `{error: 'invalid_request'}` from validate() everywhere else.
+//      Consumers (ops tooling, dashboards) have to handle two error
+//      codes for the same class of mistake.
+//
+//   2. The limit clamp logic is duplicated: once in the hand-written
+//      check and once in `boundedIntQuery`. A future change to one
+//      copy won't automatically apply to the other.
+//
+// The schemas below feed into the `validate()` factory, which produces
+// a middleware that sets the same `{error, message}` shape as every
+// other validation failure in this codebase.
+
+// Whitelisted order statuses for the internal list endpoint. Kept as an
+// explicit set rather than a free-form string so an unknown status
+// returns 400 instead of silently returning an empty list.
+const INTERNAL_ORDER_STATUSES = new Set([
+  'pending_payment',
+  'awaiting_approval',
+  'payment_confirmed',
+  'claim_received',
+  'stage1_done',
+  'ordering',
+  'delivered',
+  'failed',
+  'refund_pending',
+  'refunded',
+  'expired',
+  'rejected',
+  'pending_manual_recovery',
+]);
+
+/**
+ * Query-parameter schema for `GET /internal/orders`.
+ *
+ * Three queryable axes: status (whitelist), limit (bounded int), and
+ * api_key_id (bounded string). Declaring them here rather than inline
+ * in the route handler makes the input contract auditable and eliminates
+ * the dual error-shape problem described above.
+ */
+const InternalOrdersQuery = z
+  .object({
+    status: z
+      .unknown()
+      .optional()
+      .superRefine((value, ctx) => {
+        if (value === undefined || value === '') return;
+        // Reject arrays (duplicated ?status= params) with a clear message
+        // rather than letting them reach SQLite's bind layer.
+        if (Array.isArray(value)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'status must be a single string (no repeated ?status=... params)',
+          });
+          return;
+        }
+        if (typeof value !== 'string' || !INTERNAL_ORDER_STATUSES.has(value)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `status must be one of: ${[...INTERNAL_ORDER_STATUSES].join(', ')}`,
+          });
+        }
+      })
+      .transform((v) => (v === undefined || v === '' ? undefined : String(v))),
+
+    // api_key_id is an opaque string from the DB — length-bound only.
+    api_key_id: z
+      .unknown()
+      .optional()
+      .superRefine((value, ctx) => {
+        if (value === undefined || value === '') return;
+        if (Array.isArray(value)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'api_key_id must be a single string',
+          });
+          return;
+        }
+        if (typeof value !== 'string') {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'api_key_id must be a string' });
+          return;
+        }
+        if (value.length > 256) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'api_key_id is too long' });
+        }
+      })
+      .transform((v) => (v === undefined || v === '' ? undefined : String(v))),
+
+    // Bounded integer, same pattern as orders.js. Default 100, max 1000.
+    limit: boundedIntQuery({ default: 100, min: 1, max: 1000 }),
+  })
+  .passthrough();
+
+const InternalOrdersQueryErrorCodes = {
+  status: 'invalid_query_param',
+  api_key_id: 'invalid_query_param',
+  limit: 'invalid_query_param',
+};
+
+/**
+ * Middleware that validates the query params for `GET /internal/orders`.
+ * Replaces the hand-written type checks in internal.js.
+ */
+const validateInternalOrdersQuery = validate({
+  query: InternalOrdersQuery,
+  errorCodes: InternalOrdersQueryErrorCodes,
+  defaultErrorCode: 'invalid_query_param',
+});
+
+/**
+ * Middleware that validates the `:id` path param for the card-reveal
+ * endpoint (`GET /internal/orders/:id/card`).
+ *
+ * Uses the same `orderIdParam()` primitive as the agent-facing order
+ * endpoints so the length cap is consistent across the codebase.
+ */
+const validateCardRevealParam = validate({
+  params: z.object({ id: orderIdParam('order id') }).passthrough(),
+  defaultErrorCode: 'invalid_order_id',
+});
+
 module.exports = {
   validate,
   patternString,
@@ -415,5 +544,8 @@ module.exports = {
   optionalIsoTimestamp,
   orderIdParam,
   FulfillmentCard,
+  InternalOrdersQuery,
+  validateInternalOrdersQuery,
+  validateCardRevealParam,
   NON_OBJECT_BODY_MESSAGE,
 };

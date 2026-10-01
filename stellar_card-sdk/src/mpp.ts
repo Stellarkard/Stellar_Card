@@ -160,7 +160,7 @@ export async function mppCharge(opts: MppChargeOpts): Promise<MppChargeResult> {
     ...(paymentAsset === 'xlm' && { xlm: { amount: method.amount } }),
   };
 
-  const txHash = await payFn(
+  const txResult = await payFn(
     {
       walletName: opts.walletName,
       payment: paymentInstructions,
@@ -172,6 +172,7 @@ export async function mppCharge(opts: MppChargeOpts): Promise<MppChargeResult> {
     },
     opts._deps?.payViaContractOwsDeps ?? {},
   );
+  const txHash = typeof txResult === 'string' ? txResult : txResult.hash;
 
   // ── Step 4: retry the resource with Authorization: Payment. ─────────
   const authHeader = `Payment scheme="stellar", challenge="${challenge.challenge_id}", tx_hash="${txHash}"`;
