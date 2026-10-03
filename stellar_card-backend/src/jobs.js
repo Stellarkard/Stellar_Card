@@ -9,6 +9,7 @@ const db = require('./db');
 const logger = require('./lib/logger');
 const {
   fireWebhook,
+  getWebhookMaxAttempts,
   getWebhookRetryDelay,
   MAX_WEBHOOK_ATTEMPTS,
   DEFAULT_RETRY_CONFIG,
@@ -724,7 +725,8 @@ async function reconcileRefundQuarantine() {
 }
 
 // Retry pending webhook deliveries with exponential backoff.
-// Picks up rows where next_attempt <= now, attempts < MAX_WEBHOOK_ATTEMPTS, delivered = 0.
+// Picks up rows where next_attempt <= now, attempts <= WEBHOOK_MAX_ATTEMPTS
+// (env-tunable, default 3), delivered = 0.
 async function retryWebhooks() {
   const now = new Date().toISOString();
   const rows = /** @type {any[]} */ (
@@ -737,7 +739,7 @@ async function retryWebhooks() {
       AND next_attempt <= ?
   `,
       )
-      .all(MAX_WEBHOOK_ATTEMPTS, now)
+      .all(getWebhookMaxAttempts(), now)
   );
 
   if (rows.length === 0) return;
@@ -803,7 +805,7 @@ async function retryWebhooks() {
                 `UPDATE webhook_queue
                  SET attempts = ?, last_error = ?, next_attempt = ?
                  WHERE id = ?`,
-              ).run(MAX_WEBHOOK_ATTEMPTS + 1, `vault_open_failed: ${vaultMsg}`, now, row.id);
+              ).run(getWebhookMaxAttempts() + 1, `vault_open_failed: ${vaultMsg}`, now, row.id);
               return; // Skip the fire, skip the delivery catch path.
             }
           }
@@ -819,11 +821,16 @@ async function retryWebhooks() {
         // .toISOString()` throws, and that throw is inside this catch — so the
         // UPDATE below would never run and the row would retry forever.
         //
+        // The abandon ceiling comes from getWebhookMaxAttempts() (the same
+        // env-tunable config the delays read), so the ladder length and its
+        // delays can never disagree.
+        //
         // The previous comment here claimed "attempts=1→5m, attempts=2→30m",
         // which has not matched WEBHOOK_RETRY_DELAYS_MS ([30s, 60s, 120s])
-        // for some time. Actual schedule: attempts=1→60s, 2→120s, then
-        // abandoned.
+        // for some time. Actual default schedule: attempts=1→60s, 2→120s,
+        // then abandoned.
         const delayMs =
+          nextAttempts > getWebhookMaxAttempts() ? null : getWebhookRetryDelay(row.attempts);
           nextAttempts > MAX_WEBHOOK_ATTEMPTS ? null : getWebhookRetryDelay(row.attempts, DEFAULT_RETRY_CONFIG);
         if (delayMs === null) {
           db.prepare(
