@@ -212,6 +212,53 @@ describe('errorHandler', () => {
     assert.equal(res.statusCode, 500);
   });
 
+  it('forwards to next(err) when headers are already sent (SSE contract)', () => {
+    // SSE routes (GET /v1/orders/:id/stream) write headers immediately;
+    // an error thrown mid-stream must delegate to Express's default
+    // handler instead of throwing ERR_HTTP_HEADERS_SENT on a second write.
+    const res = makeRes();
+    res.headersSent = true;
+    const original = new Error('boom after stream started');
+    let forwarded = null;
+    errorHandler(original, makeReq(), res, (e) => {
+      forwarded = e;
+    });
+
+    assert.equal(forwarded, original);
+    assert.equal(res.body, undefined, 'must not attempt a second write');
+  });
+
+  it('passes an explicit 4xx through instead of collapsing it to 500', () => {
+    // express.json() throws SyntaxError with .status = 400 for malformed
+    // JSON and PayloadTooLargeError with .status = 413 for oversized
+    // bodies. Reporting client mistakes as 500 misleads the caller.
+    const err = new Error('Unexpected token } in JSON');
+    err.status = 400;
+    err.type = 'entity.parse.failed';
+
+    const res = makeRes();
+    errorHandler(err, makeReq(), res, () => {});
+
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(res.body, {
+      error: 'entity.parse.failed',
+      message: 'Unexpected token } in JSON',
+    });
+  });
+
+  it('does not 404-ify an explicit server-side status like 503', () => {
+    // Only 400–499 is treated as a client error; an upstream 5xx still
+    // lands on the safe internal_error body, not on a 4xx response.
+    const err = new Error('upstream unavailable');
+    err.status = 503;
+
+    const res = makeRes();
+    errorHandler(err, makeReq(), res, () => {});
+
+    assert.equal(res.statusCode, 500);
+    assert.equal(res.body.error, 'internal_error');
+  });
+
   // errorHandler keeps its own CORS branch as defence in depth for the
   // case where corsDenial is not mounted. Both must produce the identical
   // body, or the fallback silently becomes a second wire contract.
