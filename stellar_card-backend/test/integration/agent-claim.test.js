@@ -146,6 +146,14 @@ describe('POST /v1/agent/claim — rejection buckets', () => {
     assert.equal(res.status, 400);
     assert.equal(res.body.error, 'missing_code');
   });
+
+  it('rejects a whitespace-only code with 400 missing_code', async () => {
+    // The hand-written guard trimmed before checking, so "   " was an
+    // empty code. The Zod schema validates the trimmed form to match.
+    const res = await request.post('/v1/agent/claim').send({ code: '   ' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'missing_code');
+  });
 });
 
 // ── F1-claim: decrypt failure must NOT burn the claim ────────────────
