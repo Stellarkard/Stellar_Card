@@ -13,26 +13,33 @@
 //   src/routes/index.js  — the mount table, including the order-sensitive
 //                         /v1 auth boundary.
 //
-// Issue #377 (Part 5). This file used to interleave three concerns:
-// application middleware, route mounting, and ~400 lines of inline
-// handler bodies for /status, /v1/agent/status, /v1/usage and
-// /v1/policy/check. Every one of those handlers had already been
-// extracted into src/api/ as a Router, but the inline copies were left
-// behind and mounted a second time. A bad merge (4d104a6) then spliced
-// the two worlds together and dropped a closing brace, leaving app.js
-// with a syntax error — which meant *every* test in the suite failed at
-// import, because test/helpers/app.js requires this file. Both problems
-// are fixed here:
+// Issue #377: how this file got to its current shape. It used to
+// interleave three concerns — application middleware, route mounting,
+// and ~400 lines of inline handler bodies for /status,
+// /v1/agent/status, /v1/usage, /v1/policy/check and more. Every one of
+// those handlers had already been extracted into src/api/ as a Router,
+// but the inline copies were left behind and mounted a second time,
+// shadowing the routers registered by routes/index.js. A bad merge
+// (4d104a6) then spliced the two worlds together and dropped the
+// imports a live app.js needed (auth, ordersRouter, policyCheck,
+// orderPollLimiter, …), leaving app.js unable to load at all — which
+// meant *every* test in the suite failed at import, because
+// test/helpers/app.js requires this file. The refactor completed here
+// removes the last of that debris:
 //
-//   1. The duplicated inline handlers are gone. The api/ modules are the
-//      single definition of those routes, so a fix to a rate limit or a
-//      status query can no longer be silently reverted by editing one
-//      copy and not the other.
-//   2. The CORS-denial shim, the JSON 404 and the legacy inline error
-//      handler are extracted into src/middleware/. They were three
-//      separate `app.use` blocks with overlapping responsibilities, one
-//      of which (the inline error handler) duplicated
-//      src/middleware/errorHandler.js and would have shadowed it.
+//   1. The duplicated inline handlers, rate limiters and route mounts
+//      are gone. The api/ modules (registered by routes/index.js) are
+//      the single definition of those routes, so a fix to a rate limit
+//      or a status query can no longer be silently reverted by editing
+//      one copy and not the other.
+//   2. The inline CORS-denial shim, the inline JSON 404 and the inline
+//      centralized error handler are gone. corsDenial, notFound and
+//      errorHandler in src/middleware/ are the single source of truth,
+//      mounted below. The inline error handler used to shadow
+//      errorHandler.js with a *different* response shape (a bare
+//      { error: 'internal_error' } with no req_id) — see the module
+//      header of src/middleware/errorHandler.js for the merged
+//      behaviour that replaced it.
 //
 // See the module headers of src/middleware/notFound.js,
 // src/middleware/corsDenial.js and src/middleware/errorHandler.js for
@@ -40,17 +47,13 @@
 
 const crypto = require('crypto');
 const express = require('express');
-const helmet = require('helmet');
 const cors = require('cors');
-const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
-const db = require('./db');
 const { log } = require('./lib/logger');
 const {
   sentryRequestHandler,
   sentryErrorHandler,
   setRequestId: setSentryRequestId,
 } = require('./lib/sentry-config');
-const { captureException } = require('./lib/sentry-config');
 const { registerRoutes } = require('./routes');
 const corsDenial = require('./middleware/corsDenial');
 const notFound = require('./middleware/notFound');
@@ -278,7 +281,6 @@ app.use(
 // and the reasoning is documented there rather than here, so the answer to
 // "which paths require an api key" lives in exactly one place.
 registerRoutes(app);
-
 // ── Swagger UI (Part 2 of #docs) ─────────────────────────────────────────────
 //
 // Mounted at /docs. On by default in development and test; off in production
@@ -522,6 +524,11 @@ app.get('/status', statusLimiter, (req, res) => {
 
 // Register all application routes via the route registry (src/routes/index.js)
 registerRoutes(app);
+
+// The error-handling middleware above owns every request globally; the
+// route mounting that used to sit between registerRoutes() and this
+// terminal section is gone — it duplicated routes/index.js, and the
+// inline handlers it carried referenced imports a bad merge had dropped.
 
 // ── Terminal middleware ─────────────────────────────────────────────────
 //

@@ -7,7 +7,9 @@
 // routes/index.js for the mount ordering that makes that safe.
 
 const { Router } = require('express');
+const { z } = require('zod');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+const { validate, patternString } = require('../lib/validate');
 const db = require('../db');
 
 const router = Router();
@@ -28,15 +30,31 @@ const claimLimiter = rateLimit({
       message: 'Too many claim attempts. Wait a minute and try again.',
     }),
 });
-router.post('/agent/claim', claimLimiter, (req, res) => {
+
+// ── Request schema ──────────────────────────────────────────────────────────
+//
+// A single `code` field. The handler trims the value before hashing, and
+// the schema validates the trimmed form without rewriting the request, so
+// a code like " c402_abc " passes the schema and is trimmed at the
+// hashing site. Missing, non-string, or whitespace-only all collapse to
+// missing_code, exactly as the hand-written guard returned them.
+const ClaimBody = z
+  .object({
+    code: patternString(/^.+/, 'code is required', { trim: true }),
+  })
+  .passthrough();
+
+const validateClaimBody = validate({
+  body: ClaimBody,
+  errorCodes: { code: 'missing_code' },
+});
+
+router.post('/agent/claim', claimLimiter, validateClaimBody, (req, res) => {
   const { event: bizEvent } = require('../lib/logger');
   const secretBox = require('../lib/secret-box');
   const { hashClaimCode } = require('../lib/claim-hash');
   const { recordAudit } = require('../lib/audit');
-  const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
-  if (!code) {
-    return res.status(400).json({ error: 'missing_code', message: 'code is required' });
-  }
+  const code = req.body.code.trim();
 
   // F1: the DB stores SHA256(code), not the code itself. Hash before
   // lookup so the UNIQUE constraint still matches the mint path.
