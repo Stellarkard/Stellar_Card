@@ -46,6 +46,22 @@ const { captureException } = require('../lib/sentry-config');
  * @param {import('express').Response} res
  * @param {import('express').NextFunction} next
  */
+function errorHandler(err, req, res, _next) {
+  if (res.headersSent) {
+    return _next(err);
+  }
+
+  // CORS structured denial from the cors() middleware.
+  if (err && err.message && typeof err.message === 'string' && err.message.startsWith('CORS:')) {
+    return res.status(403).json({ error: 'forbidden', message: 'Origin not allowed' });
+  }
+
+  // Handle explicit 4xx client errors (e.g. body-parser SyntaxError 400 or PayloadTooLargeError 413)
+  const status = Number(err?.status || err?.statusCode);
+  if (status >= 400 && status < 500) {
+    return res.status(status).json({
+      error: err?.type || 'bad_request',
+      message: err?.message || 'The request could not be processed.',
 function errorHandler(err, req, res, next) {
   // Once the response has started, writing again would throw
   // ERR_HTTP_HEADERS_SENT. Delegate to Express's built-in default.
@@ -107,6 +123,15 @@ function errorHandler(err, req, res, next) {
     });
   } catch {
     /* observability must never crash the error handler itself */
+  }
+
+  try {
+    captureException(err, {
+      tags: { req_id: req.id },
+      extra: { path: req.originalUrl || req.path, method: req.method },
+    });
+  } catch {
+    /* observability fallback */
   }
 
   // Ensure safe fallback response to the client.

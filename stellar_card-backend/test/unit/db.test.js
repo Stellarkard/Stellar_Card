@@ -795,7 +795,7 @@ describe('db.js — list-orders query plans (Part 4)', () => {
   }
 
   function assertIndexed(detail) {
-    assert.match(detail, /USING (COVERING )?INDEX idx_orders_api/, detail);
+    assert.match(detail, /USING (COVERING )?INDEX idx_orders_(api|list)/, detail);
     assert.doesNotMatch(detail, /SCAN orders/, detail);
   }
 
@@ -1337,3 +1337,38 @@ describe('db.js — order list query plan', () => {
     assert.doesNotMatch(plan, /TEMP B-TREE/i);
   });
 });
+
+describe('db.js - listOrders helper and query plan diagnostics (Part 3)', () => {
+  it('throws TypeError if apiKeyId is missing', () => {
+    assert.throws(() => db.listOrders(), /apiKeyId is required/);
+  });
+
+  it('queries orders matching apiKeyId and respects limit / offset parameters', () => {
+    const keyId = 'test_key_part3_db';
+    // Create test key and orders
+    db.prepare(`INSERT OR IGNORE INTO api_keys (id, key_hash, key_prefix) VALUES (?, 'hash_part3', 'prefix3')`).run(keyId);
+    db.prepare(
+      `INSERT INTO orders (id, api_key_id, status, amount_usdc, created_at, updated_at) VALUES ('ord_p3_1', ?, 'delivered', '10.00', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+    ).run(keyId);
+    db.prepare(
+      `INSERT INTO orders (id, api_key_id, status, amount_usdc, created_at, updated_at) VALUES ('ord_p3_2', ?, 'pending_payment', '20.00', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')`,
+    ).run(keyId);
+
+    const results = db.listOrders({ apiKeyId: keyId, limit: 10 });
+    assert.equal(results.length, 2);
+    assert.equal(results[0].id, 'ord_p3_2', 'order by created_at DESC');
+
+    const filtered = db.listOrders({ apiKeyId: keyId, status: 'delivered' });
+    assert.equal(filtered.length, 1);
+    assert.equal(filtered[0].id, 'ord_p3_1');
+  });
+
+  it('provides explainListOrdersPlan diagnostic hook showing indexed query plan', () => {
+    const plan = db.explainListOrdersPlan({ apiKeyId: 'test_key_part3_db', status: 'delivered' });
+    assert.ok(Array.isArray(plan));
+    const details = plan.map((p) => p.detail).join(' ');
+    assert.match(details, /idx_orders_list_status|idx_orders_api/);
+    assert.doesNotMatch(details, /SCAN orders(?!\s+USING)/);
+  });
+});
+

@@ -1046,4 +1046,86 @@ if (!consecutiveFailures) {
   db.prepare(`INSERT INTO system_state (key, value) VALUES ('consecutive_failures', '0')`).run();
 }
 
+/**
+ * Optimized database query helper for listing orders (Part 3).
+ * Utilizes composite indexes (idx_orders_list_status, idx_orders_api_key_updated_at)
+ * to bound performance to O(log N + limit).
+ *
+ * @param {Object} opts
+ * @param {string} opts.apiKeyId - Required API key identifier
+ * @param {string} [opts.status] - Optional status filter
+ * @param {string} [opts.sinceCreatedAt] - Optional ISO timestamp filter for created_at
+ * @param {string} [opts.sinceUpdatedAt] - Optional ISO timestamp filter for updated_at
+ * @param {number} [opts.limit=50] - Result limit (max 200)
+ * @param {number} [opts.offset=0] - Result offset
+ * @returns {Array<Object>} List of matching order records
+ */
+function listOrders({ apiKeyId, status, sinceCreatedAt, sinceUpdatedAt, limit = 50, offset = 0 } = {}) {
+  if (!apiKeyId) {
+    throw new TypeError('listOrders: apiKeyId is required');
+  }
+  const safeLimit = Math.min(Math.max(1, Number(limit) || 50), 200);
+  const safeOffset = Math.max(0, Number(offset) || 0);
+
+  let query = `SELECT id, status, amount_usdc, payment_asset, created_at, updated_at FROM orders WHERE api_key_id = ?`;
+  const params = [apiKeyId];
+
+  if (status) {
+    query += ` AND status = ?`;
+    params.push(status);
+  }
+  if (sinceCreatedAt) {
+    query += ` AND created_at >= ?`;
+    params.push(sinceCreatedAt);
+  }
+  if (sinceUpdatedAt) {
+    query += ` AND updated_at >= ?`;
+    params.push(sinceUpdatedAt);
+  }
+  query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  params.push(safeLimit, safeOffset);
+
+  return db.prepare(query).all(...params);
+}
+
+/**
+ * Testing hook / query planner diagnostic for listOrders (Part 3).
+ *
+ * @param {Object} opts - Same options as listOrders
+ * @returns {Array<{id: number, parent: number, notused: number, detail: string}>} SQLite query plan explain details
+ */
+function explainListOrdersPlan(opts = {}) {
+  const apiKeyId = opts.apiKeyId || 'placeholder_key';
+  const status = opts.status;
+  const sinceCreatedAt = opts.sinceCreatedAt;
+  const sinceUpdatedAt = opts.sinceUpdatedAt;
+  const limit = opts.limit || 50;
+  const offset = opts.offset || 0;
+
+  let query = `SELECT id, status, amount_usdc, payment_asset, created_at, updated_at FROM orders WHERE api_key_id = ?`;
+  const params = [apiKeyId];
+
+  if (status) {
+    query += ` AND status = ?`;
+    params.push(status);
+  }
+  if (sinceCreatedAt) {
+    query += ` AND created_at >= ?`;
+    params.push(sinceCreatedAt);
+  }
+  if (sinceUpdatedAt) {
+    query += ` AND updated_at >= ?`;
+    params.push(sinceUpdatedAt);
+  }
+  query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
+
+  return db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(...params);
+}
+
+// Attach helpers to db instance for export (Part 3)
+db.listOrders = listOrders;
+db.explainListOrdersPlan = explainListOrdersPlan;
+
 module.exports = db;
+
