@@ -546,11 +546,36 @@ export class Stellar_CardClient {
    * @param opts.idempotencyKey - Optional caller-supplied idempotency key.
    * @param opts.webhook_url - Optional webhook URL for order-status push events.
    * @param opts.metadata - Arbitrary key/value pairs forwarded to the backend.
+   * @param opts.timeout - Override the default request timeout.
+   * @param opts.signal - Optional AbortSignal for cancellation.
    * @returns Order response containing payment instructions and initial budget.
    * @throws {InvalidAmountError} When `amount_usdc` is outside `[0.01, 10000]`.
    * @throws {AuthError} When the API key is invalid or missing.
    * @throws {SpendLimitError} When the API key's spend limit is exhausted.
    * @throws {RateLimitError} When the order-creation rate limit (60/hour) is hit.
+   *
+   * @example
+   * ```typescript
+   * const client = new Stellar_CardClient({ apiKey: process.env.CARDS402_API_KEY });
+   * try {
+   *   const order = await client.createOrder({
+   *     amount_usdc: '10.00',
+   *     webhook_url: 'https://agent.example.com/webhook',
+   *     metadata: { agent_id: 'alice', order_type: 'physical' },
+   *   });
+   *
+   *   console.log(`Order ${order.order_id} created`);
+   *   console.log(`Pay ${order.payment.usdc.amount} USDC`);
+   *   console.log(`Contract: ${order.payment.contract_id}`);
+   * } catch (err) {
+   *   if (err instanceof SpendLimitError) {
+   *     console.log(`Spend limit $${err.limit} reached`);
+   *   } else if (err instanceof RateLimitError) {
+   *     console.log('Rate limited, retry in 60 seconds');
+   *   }
+   *   throw err;
+   * }
+   * ```
    */
   async createOrder(opts: CreateOrderOptions): Promise<OrderResponse> {
     validateCreateOrderInput(opts);
@@ -580,9 +605,30 @@ export class Stellar_CardClient {
    * Fetch the current status for a single order.
    *
    * @param orderId - Order UUID returned by {@link createOrder}.
+   * @param reqOpts - Optional request options (timeout, signal, headers).
    * @returns Current order status including phase and card details when ready.
    * @throws {ValidationError} When `orderId` fails the UUID-shaped pattern check.
    * @throws {AuthError} When the API key is invalid.
+   *
+   * @example
+   * ```typescript
+   * // Check if card is ready
+   * const status = await client.getOrder('550e8400-e29b-41d4-a716-446655440000');
+   * console.log(`Status: ${status.status}`);
+   * console.log(`Phase: ${status.phase}`);
+   *
+   * if (status.phase === 'ready' && status.card) {
+   *   console.log(`Card: ${status.card.number}`);
+   *   console.log(`Expires: ${status.card.expiry}`);
+   * }
+   *
+   * if (status.phase === 'failed') {
+   *   console.log(`Failed: ${status.error}`);
+   *   if (status.refund) {
+   *     console.log(`Refund tx: ${status.refund.stellar_txid}`);
+   *   }
+   * }
+   * ```
    */
   async getOrder(orderId: string, reqOpts: RequestOptions = {}): Promise<OrderStatus> {
     // Validate and encode — path param must be a UUID-shaped identifier.
@@ -606,9 +652,30 @@ export class Stellar_CardClient {
    * be established or is interrupted by the network path.
    *
    * @param orderId - Order UUID to wait for.
-   * @param opts - Options for waiting including timeout and poll interval.
+   * @param opts.timeoutMs - Total timeout budget (SSE + polling). Defaults to 300000ms (5 min).
+   * @param opts.pollIntervalMs - HTTP polling interval. Defaults to 3000ms (only used as fallback).
    * @returns A promise resolving to the card details once ready.
    * @throws {WaitTimeoutError} When the timeout is reached before the order is ready.
+   * @throws {OrderFailedError} When order reaches failed/refunded/expired state.
+   *
+   * @example
+   * ```typescript
+   * try {
+   *   const card = await client.waitForCard('550e8400-e29b-41d4-a716-446655440000', {
+   *     timeoutMs: 600000, // Wait up to 10 minutes
+   *     pollIntervalMs: 2000, // Fallback poll every 2 seconds
+   *   });
+   *   console.log(`Card ready: ${card.number}`);
+   *   console.log(`Expires: ${card.expiry}`);
+   * } catch (err) {
+   *   if (err instanceof WaitTimeoutError) {
+   *     console.log('Card not ready yet, order may still be processing');
+   *   } else if (err instanceof OrderFailedError) {
+   *     console.log(`Order failed: ${err.orderId}`);
+   *   }
+   *   throw err;
+   * }
+   * ```
    */
   async waitForCard(
     orderId: string,
@@ -999,8 +1066,24 @@ export class Stellar_CardClient {
    * budget for the API key. Useful for budget-gating logic before creating
    * an order.
    *
+   * @param reqOpts - Optional request options (timeout, signal, headers).
    * @returns Spend summary including budget limits and order counts.
    * @throws {AuthError} When the API key is invalid.
+   *
+   * @example
+   * ```typescript
+   * const usage = await client.getUsage();
+   * console.log(`API Key: ${usage.api_key_id}`);
+   * console.log(`Spent: $${usage.budget.spent_usdc}`);
+   * console.log(`In-flight: $${usage.budget.in_flight_usdc}`);
+   * console.log(`Remaining: $${usage.budget.remaining_usdc}`);
+   * console.log(`Orders: ${usage.orders.total} total, ${usage.orders.delivered} delivered`);
+   *
+   * // Budget-gate logic
+   * if (usage.budget.remaining_usdc && parseFloat(usage.budget.remaining_usdc) < 10) {
+   *   console.warn('Low budget remaining');
+   * }
+   * ```
    */
   async getUsage(reqOpts: RequestOptions = {}): Promise<UsageSummary> {
     const res = await this.fetchWithRetry(
@@ -1016,11 +1099,28 @@ export class Stellar_CardClient {
    * List recent audit events (API calls, card authorizations, webhook
    * deliveries) for the dashboard tied to this API key (#731).
    *
-   * @param opts.action - Filter by action name, e.g. `"order.create"`.
-   * @param opts.limit - Page size. Defaults to 20.
-   * @param opts.since - ISO-8601 lower bound on `timestamp`.
+   * @param opts.action - Filter by action name, e.g. `"order.create"`, `"order.pay"`.
+   * @param opts.limit - Page size. Defaults to 20, max 100.
+   * @param opts.since - ISO-8601 lower bound on `timestamp` (e.g., `"2024-01-01T00:00:00Z"`).
+   * @param opts.timeout - Override the default request timeout.
+   * @param opts.signal - Optional AbortSignal for cancellation.
    * @returns Audit log entries, most recent first.
    * @throws {AuthError} When the API key is invalid.
+   *
+   * @example
+   * ```typescript
+   * // Get recent activity
+   * const logs = await client.getAuditLogs({ limit: 50 });
+   * for (const entry of logs) {
+   *   console.log(`${entry.timestamp} ${entry.action} by ${entry.actor}: ${entry.result}`);
+   * }
+   *
+   * // Filter by action
+   * const orders = await client.getAuditLogs({
+   *   action: 'order.create',
+   *   since: '2024-01-01T00:00:00Z',
+   * });
+   * ```
    */
   async getAuditLogs({
     action,
@@ -1054,6 +1154,22 @@ export class Stellar_CardClient {
    * @param state - Lifecycle state: `"initializing"` or `"awaiting_funding"`.
    * @param opts.wallet_public_key - Stellar public key of the agent's wallet.
    * @param opts.detail - Optional free-text detail for the dashboard.
+   * @param opts.timeout - Override the default request timeout.
+   * @param opts.signal - Optional AbortSignal for cancellation.
+   * @returns Always resolves (errors are silently ignored).
+   *
+   * @example
+   * ```typescript
+   * // Report wallet setup phase
+   * await client.reportStatus('initializing');
+   *
+   * // Report with wallet key
+   * const wallet = createWallet();
+   * await client.reportStatus('awaiting_funding', {
+   *   wallet_public_key: wallet.publicKey,
+   *   detail: 'Waiting for USDC funding before starting orders',
+   * });
+   * ```
    */
   async reportStatus(
     state: 'initializing' | 'awaiting_funding',
@@ -1085,9 +1201,22 @@ export class Stellar_CardClient {
    * Estimate the XLM required to pay for a given USDC order amount before payment,
    * querying the Stellar Horizon DEX orderbook with configurable slippage.
    *
-   * @param usdcAmount - Amount in USDC
-   * @param options - Estimation options including slippage buffer and fallback quote fetcher
-   * @returns Estimated stroops, effective exchange rate, and expiration timestamp
+   * Useful for wallet agents paying in XLM instead of USDC. The estimate includes
+   * a slippage buffer (default 1%) to account for price movement between quote and execution.
+   *
+   * @param usdcAmount - Amount in USDC as a string or number.
+   * @param options - Estimation options including slippage buffer and fallback quote fetcher.
+   * @returns Estimated stroops, effective exchange rate, and expiration timestamp.
+   *
+   * @example
+   * ```typescript
+   * const estimate = await client.estimateXlmRequired('10.00', {
+   *   slippagePercent: 0.02, // 2% buffer
+   * });
+   * console.log(`USDC 10.00 ≈ XLM ${stroopsToDecimal(estimate.estimatedStroops)}`);
+   * console.log(`Rate: ${estimate.xlmPerUsdc} XLM per USDC`);
+   * console.log(`Quote expires: ${estimate.expirationTimestamp}`);
+   * ```
    */
   async estimateXlmRequired(
     usdcAmount: string | number,
@@ -1100,9 +1229,20 @@ export class Stellar_CardClient {
   /**
    * Fetch XLM, USDC and every trustline balance for a Stellar account in a
    * single Horizon call (#701). Unfunded accounts resolve to zero balances.
-   * Results are cached for 3 seconds.
+   * Results are cached for 3 seconds to reduce Horizon load.
    *
-   * @param publicKey - Stellar G-address to inspect.
+   * @param publicKey - Stellar G-address to inspect (e.g., `"GAID..."`).
+   * @returns All balances including native XLM, USDC, and other trustlines.
+   *
+   * @example
+   * ```typescript
+   * const balances = await client.getAccountBalances('GAID...');
+   * console.log(`XLM: ${balances.xlm}`);
+   * console.log(`USDC: ${balances.usdc}`);
+   * for (const [asset, balance] of Object.entries(balances.other)) {
+   *   console.log(`${asset}: ${balance}`);
+   * }
+   * ```
    */
   async getAccountBalances(publicKey: string): Promise<AccountBalances> {
     const { getAccountBalances } = await import('./stellar');

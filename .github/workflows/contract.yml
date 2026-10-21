@@ -36,6 +36,24 @@ jobs:
       - name: Install Stellar CLI
         uses: stellar/stellar-cli@v26.0.0
 
+      - name: Run cargo audit for security vulnerabilities
+        run: |
+          # Install cargo-audit if not present
+          cargo install cargo-audit --locked 2>/dev/null || true
+          # Run audit and generate report
+          cargo audit --json > audit-report.json || true
+          # Display summary (non-blocking for now)
+          echo "=== Security Audit Summary ==="
+          cargo audit || echo "⚠️  Vulnerabilities found - see audit-report.json"
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-audit-report
+          path: stellar_card-contract/audit-report.json
+          retention-days: 30
+
       - name: Check formatting
         run: cargo fmt --check
 
