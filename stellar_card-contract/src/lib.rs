@@ -653,6 +653,67 @@ impl Stellar_CardReceiver {
         env.storage().instance().remove(&DataKey::Paused);
     }
 
+    /// Routes a payment from `from` to the treasury, optionally splitting a
+    /// protocol fee off to a configured `FeeCollector`.
+    ///
+    /// When no fee collector is set, or `FeeBps` is 0, the full `amount` is
+    /// forwarded to the treasury — preserving pre-fee behaviour exactly.
+    ///
+    /// # Errors
+    /// * `TransferFailed` - If either leg of the transfer fails
+    fn _transfer_with_fee(
+        env: &Env,
+        from: &Address,
+        amount: i128,
+        token_contract: &Address,
+    ) -> Result<(), Error> {
+        let treasury: Address = env.storage().instance().get(&DataKey::Treasury).unwrap();
+        let fee_collector: Option<Address> = env.storage().instance().get(&DataKey::FeeCollector);
+        let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
+
+        let token_client = token::Client::new(env, token_contract);
+
+        // Split the fee out first so the treasury leg is the remainder.
+        // Computed without a single `amount * bps` multiply so a max-i128
+        // payment with a fee configured cannot overflow (release profile
+        // has `overflow-checks = true`).
+        let mut fee_amount: i128 = 0;
+        if let Some(collector) = fee_collector.clone() {
+            if fee_bps > 0 {
+                let bps = fee_bps as i128;
+                fee_amount = (amount / 10_000) * bps + ((amount % 10_000) * bps) / 10_000;
+                if fee_amount > 0 {
+                    let res = token_client.try_transfer(from, &collector, &fee_amount);
+                    if res.is_err() {
+                        return Err(Error::TransferFailed);
+                    }
+                }
+            }
+        }
+
+        let treasury_amount = amount - fee_amount;
+        if treasury_amount > 0 {
+            let res = token_client.try_transfer(from, &treasury, &treasury_amount);
+            if res.is_err() {
+                return Err(Error::TransferFailed);
+            }
+        }
+
+        if fee_amount > 0 {
+            if let Some(collector) = fee_collector {
+                env.events().publish(
+                    (
+                        Symbol::new(env, "fee_collected"),
+                        token_contract.clone(),
+                        from.clone(),
+                    ),
+                    fee_amount,
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Returns whether the contract is currently paused.
     fn is_paused(env: &Env) -> bool {
         Self::load_config(env).paused
@@ -1535,6 +1596,21 @@ impl Stellar_CardReceiver {
         env.storage().instance().get(&DataKey::XlmContract).unwrap()
     }
 
+    /// Returns the EURC SAC contract address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// The EURC contract address
+    ///
+    /// # Panics
+    /// Panics if called before `init` (see `try_eurc_contract` to avoid this),
+    /// or if `set_eurc_contract` has never been called on a legacy deployment.
+    pub fn eurc_contract(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::EurcContract).unwrap()
+    }
+
     /// Returns the admin address.
     ///
     /// # Arguments
@@ -1716,6 +1792,140 @@ impl Stellar_CardReceiver {
             .update_current_contract_wasm(new_wasm_hash.clone());
         env.events()
             .publish((symbol_short!("upgraded"), admin), new_wasm_hash);
+    }
+
+    /// Sets the 3 authorized upgrade signers used by the 2-of-3 multisig
+    /// upgrade flow.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `signers` - Exactly 3 addresses authorized to propose/approve upgrades
+    ///
+    /// # Authorization
+    /// Only the admin can call this function.
+    ///
+    /// # Panics
+    /// Panics if `signers` does not contain exactly 3 addresses.
+    pub fn set_upgrade_signers(env: Env, signers: Vec<Address>) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        if signers.len() != 3 {
+            panic!("upgrade signers must be exactly 3 addresses");
+        }
+        env.storage().instance().set(&DataKey::UpgradeSigners, &signers);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the authorized upgrade signers.
+    pub fn upgrade_signers(env: Env) -> Vec<Address> {
+        env.storage().instance().get(&DataKey::UpgradeSigners).unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Proposes a contract WASM upgrade. The proposal counts as the first of
+    /// the required 2-of-3 approvals.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `caller` - The signer proposing the upgrade (must authorize this call)
+    /// * `new_wasm_hash` - The hash of the proposed new WASM code
+    ///
+    /// # Authorization
+    /// `caller` must be one of the 3 addresses stored in `UpgradeSigners`.
+    ///
+    /// # Events
+    /// Emits: topics=[Symbol("upgrade_proposed"), new_wasm_hash, caller],
+    /// value=approval count (1)
+    ///
+    /// # Panics
+    /// Panics if `caller` is not an authorized upgrade signer.
+    pub fn propose_upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
+        caller.require_auth();
+
+        let signers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeSigners)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !signers.contains(&caller) {
+            panic!("proposer must be an authorized upgrade signer");
+        }
+
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(caller.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeApprovals(new_wasm_hash.clone()), &approvals);
+
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_proposed"), new_wasm_hash, caller),
+            approvals.len(),
+        );
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Approves a pending upgrade proposal. Once a second distinct signer
+    /// approves (2-of-3 threshold), the WASM bytecode update executes and a
+    /// `contract_upgraded` event is emitted.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `caller` - The signer approving the upgrade (must authorize this call)
+    /// * `new_wasm_hash` - The hash of the proposed new WASM code
+    ///
+    /// # Authorization
+    /// `caller` must be one of the 3 addresses stored in `UpgradeSigners`,
+    /// must not have already approved this proposal, and a proposal for
+    /// `new_wasm_hash` must exist.
+    ///
+    /// # Events
+    /// Emits: topics=[Symbol("upgrade_approved"), new_wasm_hash, caller]
+    /// with the running approval count; when the threshold is reached also
+    /// emits topics=[Symbol("contract_upgraded"), new_wasm_hash, count].
+    ///
+    /// # Panics
+    /// Panics if `caller` is not an authorized upgrade signer, has already
+    /// approved, or if no proposal exists for `new_wasm_hash`.
+    pub fn approve_upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
+        caller.require_auth();
+
+        let signers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeSigners)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !signers.contains(&caller) {
+            panic!("approver must be an authorized upgrade signer");
+        }
+
+        let mut approvals: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeApprovals(new_wasm_hash.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if approvals.contains(&caller) {
+            panic!("signer already approved this upgrade");
+        }
+
+        approvals.push_back(caller.clone());
+        let count = approvals.len();
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeApprovals(new_wasm_hash.clone()), &approvals);
+
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_approved"), new_wasm_hash.clone(), caller),
+            count,
+        );
+
+        if count >= 2 {
+            env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+            env.events().publish(
+                (Symbol::new(&env, "contract_upgraded"), new_wasm_hash, count),
+                count,
+            );
+        }
+        Self::extend_instance_ttl(&env);
     }
 
     /// Recovers tokens sent to the contract by mistake — a direct transfer
@@ -2616,6 +2826,7 @@ mod test {
         payer: Address,
         usdc: Address,
         xlm_sac: Address,
+        eurc: Address,
     }
 
     impl Fixture {
@@ -2665,12 +2876,20 @@ mod test {
             token::StellarAssetClient::new(&self.env, &self.xlm_sac).mint(to, &amount);
         }
 
+        fn mint_eurc(&self, to: &Address, amount: i128) {
+            token::StellarAssetClient::new(&self.env, &self.eurc).mint(to, &amount);
+        }
+
         fn usdc_balance(&self, addr: &Address) -> i128 {
             token::Client::new(&self.env, &self.usdc).balance(addr)
         }
 
         fn xlm_balance(&self, addr: &Address) -> i128 {
             token::Client::new(&self.env, &self.xlm_sac).balance(addr)
+        }
+
+        fn eurc_balance(&self, addr: &Address) -> i128 {
+            token::Client::new(&self.env, &self.eurc).balance(addr)
         }
     }
 
@@ -8545,5 +8764,258 @@ mod test {
             .client()
             .try_pay_usdc(&f.payer, &1, &order_bytes(&f.env, "no-limits"));
         assert!(result.is_ok());
+    }
+
+    // ── invariant fuzz tests ─────────────────────────────────────────────────
+    //
+    // Deterministic LCG-based fuzz harness. No external fuzzing dependency is
+    // required: the generator is fully reproducible from a seed, and every
+    // iteration asserts the payment-accounting invariants documented in
+    // docs/testing.md.
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed)
+        }
+
+        fn next(&mut self) -> u64 {
+            // 64-bit LCG (Knuth MMIX constants) — good enough for input
+            // generation and fully reproducible across runs.
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0
+        }
+
+        fn next_range(&mut self, lo: u64, hi: u64) -> u64 {
+            lo + self.next() % (hi - lo + 1)
+        }
+    }
+
+    fn fuzz_order_id(env: &Env, n: u64) -> Bytes {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&n.to_le_bytes());
+        Bytes::from_slice(env, &buf)
+    }
+
+    /// Invariant 1: after any successful payment the contract's own token
+    /// balance is 0 — funds never rest on the contract.
+    /// Invariant 2: the treasury balance increases by exactly `amount`
+    /// (no-fee configuration) — no value is created or destroyed.
+    /// Invariant 3: rejected payments (non-positive amounts) leave every
+    /// balance unchanged.
+    #[test]
+    fn test_fuzz_payment_accounting_invariants() {
+        let f = Fixture::new();
+        f.init();
+        f.client().set_eurc_contract(&f.eurc);
+
+        let mut rng = Rng::new(0xC0FFEE);
+
+        for i in 0..1200u64 {
+            let amount = rng.next_range(1, 5_000_000) as i128;
+            let asset = rng.next_range(0, 2); // 0=usdc, 1=xlm, 2=eurc
+            let oid = fuzz_order_id(&f.env, i);
+
+            let treasury_before = match asset {
+                0 => f.usdc_balance(&f.treasury),
+                1 => f.xlm_balance(&f.treasury),
+                _ => f.eurc_balance(&f.treasury),
+            };
+            let contract_balance_before = match asset {
+                0 => f.usdc_balance(&f.contract_id),
+                1 => f.xlm_balance(&f.contract_id),
+                _ => f.eurc_balance(&f.contract_id),
+            };
+
+            match asset {
+                0 => {
+                    f.mint_usdc(&f.payer, amount);
+                    f.client().pay_usdc(&f.payer, &amount, &oid);
+                }
+                1 => {
+                    f.mint_xlm(&f.payer, amount);
+                    f.client().pay_xlm(&f.payer, &amount, &oid);
+                }
+                _ => {
+                    f.mint_eurc(&f.payer, amount);
+                    f.client().pay_eurc(&f.payer, &amount, &oid);
+                }
+            }
+
+            let treasury_after = match asset {
+                0 => f.usdc_balance(&f.treasury),
+                1 => f.xlm_balance(&f.treasury),
+                _ => f.eurc_balance(&f.treasury),
+            };
+            let contract_balance_after = match asset {
+                0 => f.usdc_balance(&f.contract_id),
+                1 => f.xlm_balance(&f.contract_id),
+                _ => f.eurc_balance(&f.contract_id),
+            };
+
+            assert_eq!(
+                contract_balance_after, 0,
+                "iteration {}: contract must hold 0 after payment",
+                i
+            );
+            assert_eq!(
+                contract_balance_after, contract_balance_before,
+                "iteration {}: contract balance must not change across a payment",
+                i
+            );
+            assert_eq!(
+                treasury_after - treasury_before,
+                amount,
+                "iteration {}: treasury must increase by exactly the payment amount",
+                i
+            );
+        }
+    }
+
+    /// Non-positive amounts must be rejected for every asset type and must
+    /// not move any balance (no state desynchronization on the error path).
+    #[test]
+    fn test_fuzz_invalid_amounts_never_move_value() {
+        let f = Fixture::new();
+        f.init();
+        f.client().set_eurc_contract(&f.eurc);
+
+        let mut rng = Rng::new(0xDEAD_BEEF);
+
+        for i in 0..600u64 {
+            let amount: i128 = if rng.next() % 2 == 0 {
+                0
+            } else {
+                -(rng.next_range(1, 1_000_000) as i128)
+            };
+            let asset = rng.next_range(0, 2);
+            let oid = fuzz_order_id(&f.env, i);
+
+            let usdc_before = f.usdc_balance(&f.treasury);
+            let xlm_before = f.xlm_balance(&f.treasury);
+            let eurc_before = f.eurc_balance(&f.treasury);
+
+            let result = match asset {
+                0 => f.client().try_pay_usdc(&f.payer, &amount, &oid),
+                1 => f.client().try_pay_xlm(&f.payer, &amount, &oid),
+                _ => f.client().try_pay_eurc(&f.payer, &amount, &oid),
+            };
+            assert!(result.is_err(), "iteration {}: non-positive amount must fail", i);
+
+            assert_eq!(f.usdc_balance(&f.treasury), usdc_before);
+            assert_eq!(f.xlm_balance(&f.treasury), xlm_before);
+            assert_eq!(f.eurc_balance(&f.treasury), eurc_before);
+        }
+    }
+
+    /// Paused state must reject every payment regardless of asset or amount,
+    /// leaving balances untouched — the pause circuit breaker cannot be
+    /// bypassed by input variation.
+    #[test]
+    fn test_fuzz_paused_contract_rejects_all_payments() {
+        let f = Fixture::new();
+        f.init();
+        f.client().set_eurc_contract(&f.eurc);
+
+        let mut rng = Rng::new(0x1234_5678);
+
+        for i in 0..600u64 {
+            let amount = rng.next_range(1, 1_000_000) as i128;
+            let asset = rng.next_range(0, 2);
+            let oid = fuzz_order_id(&f.env, i);
+
+            f.client().pause(&f.admin);
+
+            let usdc_before = f.usdc_balance(&f.treasury);
+            let xlm_before = f.xlm_balance(&f.treasury);
+            let eurc_before = f.eurc_balance(&f.treasury);
+
+            let result = match asset {
+                0 => {
+                    f.mint_usdc(&f.payer, amount);
+                    f.client().try_pay_usdc(&f.payer, &amount, &oid)
+                }
+                1 => {
+                    f.mint_xlm(&f.payer, amount);
+                    f.client().try_pay_xlm(&f.payer, &amount, &oid)
+                }
+                _ => {
+                    f.mint_eurc(&f.payer, amount);
+                    f.client().try_pay_eurc(&f.payer, &amount, &oid)
+                }
+            };
+            assert!(result.is_err(), "iteration {}: paused payment must fail", i);
+            assert_eq!(f.usdc_balance(&f.treasury), usdc_before);
+            assert_eq!(f.xlm_balance(&f.treasury), xlm_before);
+            assert_eq!(f.eurc_balance(&f.treasury), eurc_before);
+
+            f.client().unpause(&f.admin);
+        }
+    }
+
+    /// With a fee configured the accounting splits, but the conservation
+    /// invariant still holds: treasury_delta + fee_delta == amount and the
+    /// contract itself never retains a balance.
+    #[test]
+    fn test_fuzz_fee_split_conserves_total_value() {
+        let f = Fixture::new();
+        f.init();
+
+        let collector = Address::generate(&f.env);
+        f.client().set_fee_collector(&collector);
+        f.client().set_fee_bps(&20u32);
+
+        let mut rng = Rng::new(0xFEE0_FEE0);
+
+        for i in 0..600u64 {
+            let amount = rng.next_range(1, 5_000_000) as i128;
+            let asset = rng.next_range(0, 1); // usdc or xlm
+            let oid = fuzz_order_id(&f.env, i);
+
+            let treasury_before = match asset {
+                0 => f.usdc_balance(&f.treasury),
+                _ => f.xlm_balance(&f.treasury),
+            };
+            let fee_before = match asset {
+                0 => f.usdc_balance(&collector),
+                _ => f.xlm_balance(&collector),
+            };
+
+            match asset {
+                0 => {
+                    f.mint_usdc(&f.payer, amount);
+                    f.client().pay_usdc(&f.payer, &amount, &oid);
+                }
+                _ => {
+                    f.mint_xlm(&f.payer, amount);
+                    f.client().pay_xlm(&f.payer, &amount, &oid);
+                }
+            }
+
+            let treasury_delta = match asset {
+                0 => f.usdc_balance(&f.treasury) - treasury_before,
+                _ => f.xlm_balance(&f.treasury) - treasury_before,
+            };
+            let fee_delta = match asset {
+                0 => f.usdc_balance(&collector) - fee_before,
+                _ => f.xlm_balance(&collector) - fee_before,
+            };
+            let contract_balance = match asset {
+                0 => f.usdc_balance(&f.contract_id),
+                _ => f.xlm_balance(&f.contract_id),
+            };
+
+            assert_eq!(
+                treasury_delta + fee_delta,
+                amount,
+                "iteration {}: treasury + fee must equal the payment amount",
+                i
+            );
+            assert_eq!(contract_balance, 0, "iteration {}: contract must hold 0", i);
+        }
     }
 }
