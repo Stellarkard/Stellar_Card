@@ -47,7 +47,7 @@
 //! let treasury: Address = client.treasury();
 //! ```
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Symbol, Vec};
 
 /// Persistent instance-storage keys.
 ///
@@ -115,6 +115,16 @@ pub struct TreasuryProposal {
 /// Timelock duration, in seconds, between proposing and executing a treasury
 /// migration (48 hours).
 const TIMELOCK_SECONDS: u64 = 172_800;
+
+/// One line item in a batch payment: the order to fund and its amount.
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchPayment {
+    /// Order UUID bytes, forwarded verbatim into the payment event topic.
+    pub order_id: Bytes,
+    /// Amount in stroops (7 decimal places). Must be strictly positive.
+    pub amount: i128,
+}
 
 /// Stable contract error codes.
 ///
@@ -323,6 +333,138 @@ impl Stellar_CardReceiver {
             (Symbol::new(&env, "pay_xlm"), order_id, from),
             amount,
         );
+
+        Self::_exit(&env);
+        env.storage().instance().extend_ttl(17_280_000, 17_280_000);
+    }
+
+    /// Transfer the sum of `payments` USDC (in micro-USDC, 7 d.p.) from `from`
+    /// to treasury in a single SAC transfer, emitting one `pay_usdc` event per
+    /// order.
+    ///
+    /// Each element of `payments` is a [`BatchPayment`] of `(order_id, amount)`.
+    /// The aggregated amount is transferred once, keeping the batch atomic and
+    /// cheap; event payloads still report per-order amounts so the backend can
+    /// reconcile individual card orders.
+    ///
+    /// # Authorization
+    ///
+    /// The payer must sign via `from.require_auth()`.
+    ///
+    /// # Panics
+    ///
+    /// * `batch must not be empty` — if `payments` has no elements.
+    /// * `amount must be positive` — if any element's amount is `<= 0`.
+    /// * Propagates the SAC token's panic if `from` holds insufficient balance.
+    ///
+    /// # Events
+    ///
+    /// For each [`BatchPayment`] emits
+    /// `topics=[Symbol("pay_usdc"), order_id, from]`, `value=amount`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// let mut payments = Vec::new(&env);
+    /// payments.push_back(BatchPayment { order_id: order_id_a, amount: 10_000_000 });
+    /// payments.push_back(BatchPayment { order_id: order_id_b, amount: 25_000_000 });
+    /// client.pay_usdc_batch(&payer, &payments);
+    /// ```
+    pub fn pay_usdc_batch(env: Env, from: Address, payments: Vec<BatchPayment>) {
+        if payments.is_empty() {
+            panic!("batch must not be empty");
+        }
+
+        let mut total: i128 = 0;
+        for item in payments.iter() {
+            if item.amount <= 0 {
+                panic!("amount must be positive");
+            }
+            total += item.amount;
+        }
+
+        from.require_auth();
+        Self::_enter(&env);
+
+        let treasury: Address = env.storage().instance().get(&DataKey::Treasury).unwrap();
+        let usdc_contract: Address = env.storage().instance().get(&DataKey::UsdcContract).unwrap();
+
+        let token_client = token::Client::new(&env, &usdc_contract);
+        token_client.transfer(&from, &treasury, &total);
+
+        for item in payments.iter() {
+            env.events().publish(
+                (Symbol::new(&env, "pay_usdc"), item.order_id, from.clone()),
+                item.amount,
+            );
+        }
+
+        Self::_exit(&env);
+        env.storage().instance().extend_ttl(17_280_000, 17_280_000);
+    }
+
+    /// Transfer the sum of `payments` XLM (in stroops, 7 d.p.) from `from` to
+    /// treasury in a single SAC transfer, emitting one `pay_xlm` event per
+    /// order.
+    ///
+    /// Each element of `payments` is a [`BatchPayment`] of `(order_id, amount)`.
+    /// The aggregated amount is transferred once, keeping the batch atomic and
+    /// cheap; event payloads still report per-order amounts so the backend can
+    /// reconcile individual card orders.
+    ///
+    /// # Authorization
+    ///
+    /// The payer must sign via `from.require_auth()`.
+    ///
+    /// # Panics
+    ///
+    /// * `batch must not be empty` — if `payments` has no elements.
+    /// * `amount must be positive` — if any element's amount is `<= 0`.
+    /// * Propagates the SAC token's panic if `from` holds insufficient balance.
+    ///
+    /// # Events
+    ///
+    /// For each [`BatchPayment`] emits
+    /// `topics=[Symbol("pay_xlm"), order_id, from]`, `value=amount`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// let mut payments = Vec::new(&env);
+    /// payments.push_back(BatchPayment { order_id: order_id_a, amount: 50_000_000 });
+    /// payments.push_back(BatchPayment { order_id: order_id_b, amount: 75_000_000 });
+    /// client.pay_xlm_batch(&payer, &payments);
+    /// ```
+    pub fn pay_xlm_batch(env: Env, from: Address, payments: Vec<BatchPayment>) {
+        if payments.is_empty() {
+            panic!("batch must not be empty");
+        }
+
+        let mut total: i128 = 0;
+        for item in payments.iter() {
+            if item.amount <= 0 {
+                panic!("amount must be positive");
+            }
+            total += item.amount;
+        }
+
+        from.require_auth();
+        Self::_enter(&env);
+
+        let treasury: Address = env.storage().instance().get(&DataKey::Treasury).unwrap();
+        let xlm_contract: Address = env.storage().instance().get(&DataKey::XlmContract).unwrap();
+
+        let token_client = token::Client::new(&env, &xlm_contract);
+        token_client.transfer(&from, &treasury, &total);
+
+        for item in payments.iter() {
+            env.events().publish(
+                (Symbol::new(&env, "pay_xlm"), item.order_id, from.clone()),
+                item.amount,
+            );
+        }
 
         Self::_exit(&env);
         env.storage().instance().extend_ttl(17_280_000, 17_280_000);
@@ -1120,5 +1262,152 @@ mod test {
         // panic here.
         Stellar_CardReceiver::_enter(&f.env);
         Stellar_CardReceiver::_exit(&f.env);
+    }
+
+    // ── batch payment tests ──────────────────────────────────────────────────
+
+    fn batch_of(env: &Env, n: usize, unit: i128) -> soroban_sdk::Vec<BatchPayment> {
+        const IDS: [&str; 20] = [
+            "batch-oid-00", "batch-oid-01", "batch-oid-02", "batch-oid-03", "batch-oid-04",
+            "batch-oid-05", "batch-oid-06", "batch-oid-07", "batch-oid-08", "batch-oid-09",
+            "batch-oid-10", "batch-oid-11", "batch-oid-12", "batch-oid-13", "batch-oid-14",
+            "batch-oid-15", "batch-oid-16", "batch-oid-17", "batch-oid-18", "batch-oid-19",
+        ];
+        let mut payments = soroban_sdk::Vec::new(env);
+        for i in 0..n {
+            payments.push_back(BatchPayment {
+                order_id: order_bytes(env, IDS[i]),
+                amount: unit,
+            });
+        }
+        payments
+    }
+
+    #[test]
+    fn test_pay_usdc_batch_single_item() {
+        let f = Fixture::new();
+        f.init();
+
+        let payments = batch_of(&f.env, 1, 10_000_000);
+        f.mint_usdc(&f.payer, 10_000_000);
+        f.client().pay_usdc_batch(&f.payer, &payments);
+
+        assert_eq!(f.usdc_balance(&f.treasury), 10_000_000);
+        assert_eq!(f.usdc_balance(&f.payer), 0);
+    }
+
+    #[test]
+    fn test_pay_usdc_batch_five_items() {
+        let f = Fixture::new();
+        f.init();
+
+        let unit: i128 = 5_000_000;
+        let payments = batch_of(&f.env, 5, unit);
+        f.mint_usdc(&f.payer, unit * 5);
+        f.client().pay_usdc_batch(&f.payer, &payments);
+
+        assert_eq!(f.usdc_balance(&f.treasury), unit * 5);
+        assert_eq!(f.usdc_balance(&f.payer), 0);
+    }
+
+    #[test]
+    fn test_pay_usdc_batch_twenty_items() {
+        let f = Fixture::new();
+        f.init();
+
+        let unit: i128 = 1_000_000;
+        let payments = batch_of(&f.env, 20, unit);
+        f.mint_usdc(&f.payer, unit * 20);
+        f.client().pay_usdc_batch(&f.payer, &payments);
+
+        assert_eq!(f.usdc_balance(&f.treasury), unit * 20);
+        assert_eq!(f.usdc_balance(&f.payer), 0);
+    }
+
+    #[test]
+    fn test_pay_xlm_batch_five_items() {
+        let f = Fixture::new();
+        f.init();
+
+        let unit: i128 = 7_000_000;
+        let payments = batch_of(&f.env, 5, unit);
+        f.mint_xlm(&f.payer, unit * 5);
+        f.client().pay_xlm_batch(&f.payer, &payments);
+
+        assert_eq!(f.xlm_balance(&f.treasury), unit * 5);
+        assert_eq!(f.xlm_balance(&f.payer), 0);
+    }
+
+    #[test]
+    fn test_pay_usdc_batch_emits_per_order_events() {
+        let f = Fixture::new();
+        f.init();
+
+        let oid_a = order_bytes(&f.env, "batch-evt-a");
+        let oid_b = order_bytes(&f.env, "batch-evt-b");
+        let mut payments = soroban_sdk::Vec::new(&f.env);
+        payments.push_back(BatchPayment { order_id: oid_a.clone(), amount: 11_000_000 });
+        payments.push_back(BatchPayment { order_id: oid_b.clone(), amount: 22_000_000 });
+
+        f.mint_usdc(&f.payer, 33_000_000);
+        f.client().pay_usdc_batch(&f.payer, &payments);
+
+        let events = f.env.events().all();
+        let mut seen_a = false;
+        let mut seen_b = false;
+        for (contract_addr, topics, data) in events.iter() {
+            if contract_addr != f.contract_id {
+                continue;
+            }
+            let sym: Symbol = topics.get(0).unwrap().try_into_val(&f.env).unwrap();
+            if sym != Symbol::new(&f.env, "pay_usdc") {
+                continue;
+            }
+            let emitted_oid: Bytes = topics.get(1).unwrap().try_into_val(&f.env).unwrap();
+            let emitted_from: Address = topics.get(2).unwrap().try_into_val(&f.env).unwrap();
+            assert_eq!(emitted_from, f.payer);
+            let emitted_amount: i128 = data.try_into_val(&f.env).unwrap();
+            if emitted_oid == oid_a {
+                assert_eq!(emitted_amount, 11_000_000);
+                seen_a = true;
+            } else if emitted_oid == oid_b {
+                assert_eq!(emitted_amount, 22_000_000);
+                seen_b = true;
+            }
+        }
+        assert!(seen_a && seen_b, "expected one pay_usdc event per order");
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_pay_usdc_batch_rejects_zero_amount() {
+        let f = Fixture::new();
+        f.init();
+
+        let mut payments = soroban_sdk::Vec::new(&f.env);
+        payments.push_back(BatchPayment { order_id: order_bytes(&f.env, "ok-item"), amount: 1_000_000 });
+        payments.push_back(BatchPayment { order_id: order_bytes(&f.env, "zero-item"), amount: 0 });
+        f.client().pay_usdc_batch(&f.payer, &payments);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_pay_xlm_batch_rejects_negative_amount() {
+        let f = Fixture::new();
+        f.init();
+
+        let mut payments = soroban_sdk::Vec::new(&f.env);
+        payments.push_back(BatchPayment { order_id: order_bytes(&f.env, "neg-item"), amount: -5_000_000 });
+        f.client().pay_xlm_batch(&f.payer, &payments);
+    }
+
+    #[test]
+    #[should_panic(expected = "batch must not be empty")]
+    fn test_pay_usdc_batch_rejects_empty_list() {
+        let f = Fixture::new();
+        f.init();
+
+        let payments = soroban_sdk::Vec::new(&f.env);
+        f.client().pay_usdc_batch(&f.payer, &payments);
     }
 }
