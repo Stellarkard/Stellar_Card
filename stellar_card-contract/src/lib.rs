@@ -88,6 +88,11 @@ pub enum DataKey {
     /// [`Stellar_CardReceiver::execute_treasury_migration`] and
     /// [`Stellar_CardReceiver::cancel_treasury_migration`].
     TreasuryProposal,
+    /// Reentrancy guard latch. Present while a payment entrypoint is running.
+    ///
+    /// Written by [`Stellar_CardReceiver::_enter`] and removed by
+    /// [`Stellar_CardReceiver::_exit`]. Absent when no payment is in flight.
+    ReentrancyGuard,
 }
 
 /// Two-step timelocked treasury migration proposal.
@@ -152,6 +157,32 @@ pub struct Stellar_CardReceiver;
 
 #[contractimpl]
 impl Stellar_CardReceiver {
+    /// Acquire the reentrancy guard.
+    ///
+    /// Sets the [`DataKey::ReentrancyGuard`] latch and refreshes the instance
+    /// storage TTL so the latch cannot be evicted mid-call.
+    ///
+    /// # Panics
+    ///
+    /// * `reentrancy detected` — if the latch is already held. This is the
+    ///   signal that a recursive call entered a payment entrypoint.
+    fn _enter(env: &Env) {
+        if env.storage().instance().has(&DataKey::ReentrancyGuard) {
+            panic!("reentrancy detected");
+        }
+        env.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+        env.storage().instance().extend_ttl(17_280_000, 17_280_000);
+    }
+
+    /// Release the reentrancy guard.
+    ///
+    /// Removes the [`DataKey::ReentrancyGuard`] latch so the next call can
+    /// proceed. Always paired with [`Self::_enter`] on the success path; on a
+    /// panicking path Soroban's transaction rollback clears the latch.
+    fn _exit(env: &Env) {
+        env.storage().instance().remove(&DataKey::ReentrancyGuard);
+    }
+
     /// One-time initialisation. Panics if already initialised.
     ///
     /// Stores the admin, treasury, and token contract addresses, then extends
@@ -232,6 +263,8 @@ impl Stellar_CardReceiver {
         }
         from.require_auth();
 
+        Self::_enter(&env);
+
         let treasury: Address = env.storage().instance().get(&DataKey::Treasury).unwrap();
         let usdc_contract: Address = env.storage().instance().get(&DataKey::UsdcContract).unwrap();
 
@@ -243,6 +276,7 @@ impl Stellar_CardReceiver {
             amount,
         );
 
+        Self::_exit(&env);
         env.storage().instance().extend_ttl(17_280_000, 17_280_000);
     }
 
@@ -277,6 +311,8 @@ impl Stellar_CardReceiver {
         }
         from.require_auth();
 
+        Self::_enter(&env);
+
         let treasury: Address = env.storage().instance().get(&DataKey::Treasury).unwrap();
         let xlm_contract: Address = env.storage().instance().get(&DataKey::XlmContract).unwrap();
 
@@ -288,6 +324,7 @@ impl Stellar_CardReceiver {
             amount,
         );
 
+        Self::_exit(&env);
         env.storage().instance().extend_ttl(17_280_000, 17_280_000);
     }
 
@@ -1004,5 +1041,84 @@ mod test {
         let new_treasury = Address::generate(&env);
         let result = client.try_propose_treasury(&new_treasury);
         assert!(result.is_err(), "propose_treasury must require admin auth");
+    }
+
+    // ── reentrancy guard tests ───────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "reentrancy detected")]
+    fn test_enter_when_already_entered_panics() {
+        let f = Fixture::new();
+        // Simulate an outer payment entrypoint already holding the guard.
+        Stellar_CardReceiver::_enter(&f.env);
+        // A simulated recursive call must be rejected.
+        Stellar_CardReceiver::_enter(&f.env);
+    }
+
+    #[test]
+    fn test_exit_clears_guard() {
+        let f = Fixture::new();
+        Stellar_CardReceiver::_enter(&f.env);
+        Stellar_CardReceiver::_exit(&f.env);
+        // Re-acquiring must succeed — the latch was cleared.
+        Stellar_CardReceiver::_enter(&f.env);
+    }
+
+    #[test]
+    fn test_guard_cleared_after_pay_usdc() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 12_000_000;
+        f.mint_usdc(&f.payer, amount);
+        let oid = order_bytes(&f.env, "guard-usdc");
+        f.client().pay_usdc(&f.payer, &amount, &oid);
+
+        // Guard must be clear — a second payment succeeds immediately.
+        f.mint_usdc(&f.payer, amount);
+        f.client().pay_usdc(&f.payer, &amount, &oid);
+        assert_eq!(f.usdc_balance(&f.treasury), amount * 2);
+    }
+
+    #[test]
+    fn test_guard_cleared_after_pay_xlm() {
+        let f = Fixture::new();
+        f.init();
+
+        let amount: i128 = 30_000_000;
+        f.mint_xlm(&f.payer, amount);
+        let oid = order_bytes(&f.env, "guard-xlm");
+        f.client().pay_xlm(&f.payer, &amount, &oid);
+
+        // Guard must be clear — a second payment succeeds immediately.
+        f.mint_xlm(&f.payer, amount);
+        f.client().pay_xlm(&f.payer, &amount, &oid);
+        assert_eq!(f.xlm_balance(&f.treasury), amount * 2);
+    }
+
+    #[test]
+    fn test_guard_restored_after_transfer_panic() {
+        let f = Fixture::new();
+        f.init();
+
+        // Payer holds no USDC — the SAC transfer panics mid-payment.
+        let oid = order_bytes(&f.env, "transfer-panic");
+        let result = f.client().try_pay_usdc(&f.payer, &1_000_000_i128, &oid);
+        assert!(result.is_err(), "payment without balance must fail");
+
+        // Transaction rollback clears the latch; the next payment succeeds.
+        f.mint_usdc(&f.payer, 1_000_000);
+        f.client().pay_usdc(&f.payer, &1_000_000_i128, &oid);
+        assert_eq!(f.usdc_balance(&f.treasury), 1_000_000);
+    }
+
+    #[test]
+    fn test_enter_refreshes_instance_ttl() {
+        let f = Fixture::new();
+        // _enter must extend instance TTL as its first side effect. Running it
+        // standalone exercises the extend_ttl call; a stale TTL bound would
+        // panic here.
+        Stellar_CardReceiver::_enter(&f.env);
+        Stellar_CardReceiver::_exit(&f.env);
     }
 }
