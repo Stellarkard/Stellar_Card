@@ -81,7 +81,35 @@ pub enum DataKey {
     /// Set by [`Stellar_CardReceiver::init`]. Read by
     /// [`Stellar_CardReceiver::upgrade`] and [`Stellar_CardReceiver::admin`].
     Admin,
+    /// Pending treasury migration proposal created by
+    /// [`Stellar_CardReceiver::propose_treasury`].
+    ///
+    /// Stores a [`TreasuryProposal`]. Cleared by
+    /// [`Stellar_CardReceiver::execute_treasury_migration`] and
+    /// [`Stellar_CardReceiver::cancel_treasury_migration`].
+    TreasuryProposal,
 }
+
+/// Two-step timelocked treasury migration proposal.
+///
+/// Created by [`Stellar_CardReceiver::propose_treasury`], executed by
+/// [`Stellar_CardReceiver::execute_treasury_migration`] once the timelock has
+/// elapsed, or discarded by [`Stellar_CardReceiver::cancel_treasury_migration`]
+/// at any time before execution.
+#[contracttype]
+#[derive(Clone)]
+pub struct TreasuryProposal {
+    /// Destination address that will replace the current treasury.
+    pub new_treasury: Address,
+    /// Ledger timestamp (seconds) at which the proposal was created.
+    pub proposed_at: u64,
+    /// Ledger timestamp (seconds) after which the migration may be executed.
+    pub effective_at: u64,
+}
+
+/// Timelock duration, in seconds, between proposing and executing a treasury
+/// migration (48 hours).
+const TIMELOCK_SECONDS: u64 = 172_800;
 
 /// Stable contract error codes.
 ///
@@ -356,13 +384,159 @@ impl Stellar_CardReceiver {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
+
+    /// Propose a new treasury address with a mandatory timelock.
+    ///
+    /// Stores a [`TreasuryProposal`] whose `effective_at` timestamp is the
+    /// current ledger time plus [`TIMELOCK_SECONDS`]. The migration cannot be
+    /// executed until that timestamp is reached, so a compromised admin key
+    /// cannot redirect funds instantly.
+    ///
+    /// # Authorization
+    ///
+    /// The stored admin must sign via `admin.require_auth()`.
+    ///
+    /// # Panics
+    ///
+    /// * `unwrap()` panics when the contract has not been initialised.
+    /// * `treasury proposal already exists` — if a proposal is already pending.
+    ///
+    /// # Events
+    ///
+    /// Emits `topics=[Symbol("treasury_proposed"), new_treasury]`,
+    /// `value=effective_at`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// client.propose_treasury(&new_treasury);
+    /// ```
+    pub fn propose_treasury(env: Env, new_treasury: Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        if env.storage().instance().has(&DataKey::TreasuryProposal) {
+            panic!("treasury proposal already exists");
+        }
+
+        let now = env.ledger().timestamp();
+        let effective_at = now + TIMELOCK_SECONDS;
+
+        let proposal = TreasuryProposal {
+            new_treasury: new_treasury.clone(),
+            proposed_at: now,
+            effective_at,
+        };
+        env.storage().instance().set(&DataKey::TreasuryProposal, &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "treasury_proposed"), new_treasury),
+            effective_at,
+        );
+
+        env.storage().instance().extend_ttl(17_280_000, 17_280_000);
+    }
+
+    /// Execute a previously proposed treasury migration after the timelock.
+    ///
+    /// Replaces the stored treasury address with the proposal's
+    /// `new_treasury` and clears the proposal.
+    ///
+    /// # Authorization
+    ///
+    /// The stored admin must sign via `admin.require_auth()`.
+    ///
+    /// # Panics
+    ///
+    /// * `unwrap()` panics when the contract has not been initialised.
+    /// * `treasury proposal missing` — if no proposal is pending.
+    /// * `treasury timelock not elapsed` — if `now < effective_at`.
+    ///
+    /// # Events
+    ///
+    /// Emits `topics=[Symbol("treasury_migrated"), new_treasury]`, `value=now`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// client.execute_treasury_migration();
+    /// ```
+    pub fn execute_treasury_migration(env: Env) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        let proposal: TreasuryProposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::TreasuryProposal)
+            .unwrap_or_else(|| panic!("treasury proposal missing"));
+
+        let now = env.ledger().timestamp();
+        if now < proposal.effective_at {
+            panic!("treasury timelock not elapsed");
+        }
+
+        env.storage().instance().set(&DataKey::Treasury, &proposal.new_treasury);
+        env.storage().instance().remove(&DataKey::TreasuryProposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "treasury_migrated"), proposal.new_treasury),
+            now,
+        );
+
+        env.storage().instance().extend_ttl(17_280_000, 17_280_000);
+    }
+
+    /// Cancel a pending treasury migration proposal.
+    ///
+    /// Discards the stored [`TreasuryProposal`] without touching the current
+    /// treasury address. May be called at any time before execution.
+    ///
+    /// # Authorization
+    ///
+    /// The stored admin must sign via `admin.require_auth()`.
+    ///
+    /// # Panics
+    ///
+    /// * `unwrap()` panics when the contract has not been initialised.
+    /// * `treasury proposal missing` — if no proposal is pending.
+    ///
+    /// # Events
+    ///
+    /// Emits `topics=[Symbol("treasury_migration_cancelled")]`, `value=now`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// client.cancel_treasury_migration();
+    /// ```
+    pub fn cancel_treasury_migration(env: Env) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        if !env.storage().instance().has(&DataKey::TreasuryProposal) {
+            panic!("treasury proposal missing");
+        }
+
+        env.storage().instance().remove(&DataKey::TreasuryProposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "treasury_migration_cancelled"),),
+            env.ledger().timestamp(),
+        );
+
+        env.storage().instance().extend_ttl(17_280_000, 17_280_000);
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Events},
+        testutils::{Address as _, Events, Ledger},
         token, Bytes, Env, Symbol, TryIntoVal,
     };
 
@@ -694,5 +868,141 @@ mod test {
         // Should panic because admin.require_auth() fires and no auth is mocked
         let result = client.try_init(&admin, &treasury, &usdc, &xlm_sac);
         assert!(result.is_err(), "init should require admin authorization");
+    }
+
+    // ── treasury migration timelock tests ────────────────────────────────────
+
+    fn advance_ledger(env: &Env, seconds: u64) {
+        env.ledger().with_mut(|li| {
+            li.timestamp += seconds;
+        });
+    }
+
+    #[test]
+    fn test_propose_treasury_stores_proposal_and_emits_event() {
+        let f = Fixture::new();
+        f.init();
+
+        let new_treasury = Address::generate(&f.env);
+        f.client().propose_treasury(&new_treasury);
+
+        let events = f.env.events().all();
+        let mut found = false;
+        for (contract_addr, topics, _data) in events.iter() {
+            if contract_addr != f.contract_id {
+                continue;
+            }
+            let sym: Symbol = topics.get(0).unwrap().try_into_val(&f.env).unwrap();
+            if sym != Symbol::new(&f.env, "treasury_proposed") {
+                continue;
+            }
+            let emitted: Address = topics.get(1).unwrap().try_into_val(&f.env).unwrap();
+            assert_eq!(emitted, new_treasury);
+            found = true;
+            break;
+        }
+        assert!(found, "treasury_proposed event not found");
+
+        // Treasury unchanged until execution.
+        assert_eq!(f.client().treasury(), f.treasury);
+    }
+
+    #[test]
+    fn test_execute_treasury_migration_after_timelock() {
+        let f = Fixture::new();
+        f.init();
+
+        let new_treasury = Address::generate(&f.env);
+        f.client().propose_treasury(&new_treasury);
+
+        advance_ledger(&f.env, TIMELOCK_SECONDS);
+
+        f.client().execute_treasury_migration();
+        assert_eq!(f.client().treasury(), new_treasury);
+    }
+
+    #[test]
+    #[should_panic(expected = "treasury timelock not elapsed")]
+    fn test_execute_treasury_migration_early_panics() {
+        let f = Fixture::new();
+        f.init();
+
+        let new_treasury = Address::generate(&f.env);
+        f.client().propose_treasury(&new_treasury);
+
+        advance_ledger(&f.env, TIMELOCK_SECONDS - 1);
+
+        f.client().execute_treasury_migration();
+    }
+
+    #[test]
+    #[should_panic(expected = "treasury proposal missing")]
+    fn test_execute_treasury_migration_without_proposal_panics() {
+        let f = Fixture::new();
+        f.init();
+        f.client().execute_treasury_migration();
+    }
+
+    #[test]
+    #[should_panic(expected = "treasury proposal already exists")]
+    fn test_propose_treasury_twice_panics() {
+        let f = Fixture::new();
+        f.init();
+
+        let first = Address::generate(&f.env);
+        let second = Address::generate(&f.env);
+        f.client().propose_treasury(&first);
+        f.client().propose_treasury(&second);
+    }
+
+    #[test]
+    fn test_cancel_treasury_migration_discards_proposal() {
+        let f = Fixture::new();
+        f.init();
+
+        let new_treasury = Address::generate(&f.env);
+        f.client().propose_treasury(&new_treasury);
+
+        advance_ledger(&f.env, TIMELOCK_SECONDS);
+        f.client().cancel_treasury_migration();
+
+        // Treasury unchanged; a fresh proposal is allowed after cancel.
+        assert_eq!(f.client().treasury(), f.treasury);
+        let replacement = Address::generate(&f.env);
+        f.client().propose_treasury(&replacement);
+
+        advance_ledger(&f.env, TIMELOCK_SECONDS);
+        f.client().execute_treasury_migration();
+        assert_eq!(f.client().treasury(), replacement);
+    }
+
+    #[test]
+    #[should_panic(expected = "treasury proposal missing")]
+    fn test_cancel_treasury_migration_without_proposal_panics() {
+        let f = Fixture::new();
+        f.init();
+        f.client().cancel_treasury_migration();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_propose_treasury_requires_admin_auth() {
+        let env = Env::default();
+        env.mock_auths(&[]);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let usdc = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let xlm_sac = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let contract_id = env.register(Stellar_CardReceiver, ());
+        let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+
+        env.mock_all_auths();
+        client.init(&admin, &treasury, &usdc, &xlm_sac);
+
+        env.mock_auths(&[]);
+        let new_treasury = Address::generate(&env);
+        let result = client.try_propose_treasury(&new_treasury);
+        assert!(result.is_err(), "propose_treasury must require admin auth");
     }
 }
