@@ -1,12 +1,122 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Symbol};
+//! # Stellar_Card Receiver Contract
+//!
+//! Soroban smart contract that receives USDC and XLM payments from AI agents
+//! and emits `payment` events containing the order ID. The backend polls these
+//! events to route and fulfil orders — no memo or destination matching required.
+//!
+//! ## Entrypoints
+//!
+//! | Function | Authorization | Description |
+//! |----------|---------------|-------------|
+//! | [`Stellar_CardReceiver::init`] | admin | One-time contract initialisation |
+//! | [`Stellar_CardReceiver::pay_usdc`] | payer | USDC payment for a single order |
+//! | [`Stellar_CardReceiver::pay_xlm`] | payer | XLM payment for a single order |
+//! | [`Stellar_CardReceiver::upgrade`] | admin | Replace the contract WASM |
+//! | [`Stellar_CardReceiver::treasury`] | none | Read the treasury address |
+//! | [`Stellar_CardReceiver::usdc_contract`] | none | Read the USDC SAC address |
+//! | [`Stellar_CardReceiver::xlm_contract`] | none | Read the XLM SAC address |
+//! | [`Stellar_CardReceiver::admin`] | none | Read the admin address |
+//!
+//! ## Authorization model
+//!
+//! Two privilege levels exist:
+//!
+//! * **Admin** — the address stored under [`DataKey::Admin`]. The admin
+//!   authorizes [`Stellar_CardReceiver::init`] and
+//!   [`Stellar_CardReceiver::upgrade`] via `require_auth()`.
+//! * **Payer** — any address funding an order. Payers authorize
+//!   [`Stellar_CardReceiver::pay_usdc`] and [`Stellar_CardReceiver::pay_xlm`].
+//!
+//! Read-only getters are unrestricted.
+//!
+//! ## Examples
+//!
+//! Invoking a payment through the generated client:
+//!
+//! ```ignore
+//! let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+//! let order_id = Bytes::from_slice(&env, b"550e8400-e29b-41d4-a716-446655440000");
+//! client.pay_usdc(&payer, &25_000_000, &order_id);
+//! ```
+//!
+//! Reading the treasury address:
+//!
+//! ```ignore
+//! let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+//! let treasury: Address = client.treasury();
+//! ```
 
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Symbol};
+
+/// Persistent instance-storage keys.
+///
+/// Each variant maps to exactly one logical configuration slot. All access goes
+/// through `env.storage().instance()`, so every key shares the contract
+/// instance TTL budget. Keys are written exactly once, during
+/// [`Stellar_CardReceiver::init`], and are never removed.
 #[contracttype]
 pub enum DataKey {
+    /// Address that receives every USDC and XLM payment.
+    ///
+    /// Set by [`Stellar_CardReceiver::init`]. Read by
+    /// [`Stellar_CardReceiver::pay_usdc`], [`Stellar_CardReceiver::pay_xlm`],
+    /// and [`Stellar_CardReceiver::treasury`].
     Treasury,
+    /// Stellar Asset Contract (SAC) address of the USDC token.
+    ///
+    /// Set by [`Stellar_CardReceiver::init`]. Read by
+    /// [`Stellar_CardReceiver::pay_usdc`] and
+    /// [`Stellar_CardReceiver::usdc_contract`].
     UsdcContract,
+    /// Stellar Asset Contract (SAC) address of the native XLM token.
+    ///
+    /// Set by [`Stellar_CardReceiver::init`]. Read by
+    /// [`Stellar_CardReceiver::pay_xlm`] and
+    /// [`Stellar_CardReceiver::xlm_contract`].
     XlmContract,
+    /// Account authorized to call [`Stellar_CardReceiver::init`] and
+    /// [`Stellar_CardReceiver::upgrade`].
+    ///
+    /// Set by [`Stellar_CardReceiver::init`]. Read by
+    /// [`Stellar_CardReceiver::upgrade`] and [`Stellar_CardReceiver::admin`].
     Admin,
+}
+
+/// Stable contract error codes.
+///
+/// Discriminants are part of the public wire interface: off-chain clients match
+/// on the numeric code embedded in the host error. Variants document every
+/// failure condition the entrypoints can surface.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Error {
+    /// [`Stellar_CardReceiver::init`] was invoked after the contract had
+    /// already been initialised. Initialisation is strictly one-shot; redeploy
+    /// a new contract instead of re-initialising this one.
+    AlreadyInitialized = 1,
+    /// A payment amount was zero or negative. All amounts must be strictly
+    /// positive, expressed in stroops (7 decimal places).
+    InvalidAmount = 2,
+    /// A required configuration value was missing from instance storage. This
+    /// indicates the contract was never initialised through
+    /// [`Stellar_CardReceiver::init`].
+    NotInitialized = 3,
+    /// The caller is not the stored admin address. Only the admin may invoke
+    /// privileged entrypoints such as [`Stellar_CardReceiver::upgrade`].
+    Unauthorized = 4,
+    /// A treasury migration proposal is required before the migration can be
+    /// executed, but none is currently stored.
+    TreasuryProposalMissing = 5,
+    /// A treasury migration proposal already exists. Cancel it before
+    /// proposing a different target address.
+    TreasuryProposalExists = 6,
+    /// [`Stellar_CardReceiver::execute_treasury_migration`] was invoked before
+    /// the proposal's timelock had elapsed. Wait until the effective timestamp.
+    TreasuryTimelockNotElapsed = 7,
+    /// A batch payment list was empty. Supply at least one order to fund.
+    EmptyBatch = 8,
 }
 
 #[contract]
@@ -15,12 +125,31 @@ pub struct Stellar_CardReceiver;
 #[contractimpl]
 impl Stellar_CardReceiver {
     /// One-time initialisation. Panics if already initialised.
-    /// The admin must authorize this call to prevent front-running on deployment (C-1).
     ///
-    /// Expected mainnet values (C-3, C-7):
-    ///   usdc_contract : CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75  (USDC SAC)
-    ///   xlm_contract  : native XLM SAC address (varies by network)
-    ///   treasury      : stellar_card treasury G-address — verify before deployment
+    /// Stores the admin, treasury, and token contract addresses, then extends
+    /// the instance TTL so long-lived deployments survive infrequent writes.
+    ///
+    /// # Authorization
+    ///
+    /// The `admin` argument must sign via `admin.require_auth()`. This prevents
+    /// front-running on deployment (C-1).
+    ///
+    /// # Panics
+    ///
+    /// * `already initialized` — if [`DataKey::Admin`] is already present.
+    ///
+    /// # Expected mainnet values (C-3, C-7)
+    ///
+    /// * `usdc_contract` — `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` (USDC SAC)
+    /// * `xlm_contract` — native XLM SAC address (varies by network)
+    /// * `treasury` — stellar_card treasury G-address — verify before deployment
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// client.init(&admin, &treasury, &usdc_sac, &xlm_sac);
+    /// ```
     pub fn init(
         env: Env,
         admin: Address,
@@ -45,7 +174,30 @@ impl Stellar_CardReceiver {
     }
 
     /// Transfer `amount` USDC (in micro-USDC, 7 d.p.) from `from` to treasury.
-    /// Emits: topics=[Symbol("pay_usdc"), order_id, from], value=amount
+    ///
+    /// Performs a single SAC `transfer` of `amount` from the payer to the
+    /// stored treasury address, then publishes a payment event.
+    ///
+    /// # Authorization
+    ///
+    /// The payer must sign via `from.require_auth()`.
+    ///
+    /// # Panics
+    ///
+    /// * `amount must be positive` — if `amount <= 0`.
+    /// * Propagates the SAC token's panic if `from` holds insufficient balance.
+    ///
+    /// # Events
+    ///
+    /// Emits `topics=[Symbol("pay_usdc"), order_id, from]`, `value=amount`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// let oid = Bytes::from_slice(&env, b"a3f7c2d1-4e8b-4f0a-9c2d");
+    /// client.pay_usdc(&payer, &25_000_000, &oid);
+    /// ```
     pub fn pay_usdc(env: Env, from: Address, amount: i128, order_id: Bytes) {
         if amount <= 0 {
             panic!("amount must be positive");
@@ -67,7 +219,30 @@ impl Stellar_CardReceiver {
     }
 
     /// Transfer `amount` XLM (in stroops, 7 d.p.) from `from` to treasury.
-    /// Emits: topics=[Symbol("pay_xlm"), order_id, from], value=amount
+    ///
+    /// Performs a single SAC `transfer` of `amount` from the payer to the
+    /// stored treasury address, then publishes a payment event.
+    ///
+    /// # Authorization
+    ///
+    /// The payer must sign via `from.require_auth()`.
+    ///
+    /// # Panics
+    ///
+    /// * `amount must be positive` — if `amount <= 0`.
+    /// * Propagates the SAC token's panic if `from` holds insufficient balance.
+    ///
+    /// # Events
+    ///
+    /// Emits `topics=[Symbol("pay_xlm"), order_id, from]`, `value=amount`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// let oid = Bytes::from_slice(&env, b"b2e8d1c0-5f9a-4b0b-8d3e");
+    /// client.pay_xlm(&payer, &161_290_000, &oid);
+    /// ```
     pub fn pay_xlm(env: Env, from: Address, amount: i128, order_id: Bytes) {
         if amount <= 0 {
             panic!("amount must be positive");
@@ -89,26 +264,93 @@ impl Stellar_CardReceiver {
     }
 
     /// Return the treasury address.
+    ///
+    /// # Panics
+    ///
+    /// * Host error [`Error::NotInitialized`] path — `unwrap()` panics when the
+    ///   contract has not been initialised.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// let treasury: Address = client.treasury();
+    /// ```
     pub fn treasury(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Treasury).unwrap()
     }
 
     /// Return the USDC SAC contract address.
+    ///
+    /// # Panics
+    ///
+    /// * `unwrap()` panics when the contract has not been initialised.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// let usdc: Address = client.usdc_contract();
+    /// ```
     pub fn usdc_contract(env: Env) -> Address {
         env.storage().instance().get(&DataKey::UsdcContract).unwrap()
     }
 
     /// Return the native XLM SAC contract address.
+    ///
+    /// # Panics
+    ///
+    /// * `unwrap()` panics when the contract has not been initialised.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// let xlm: Address = client.xlm_contract();
+    /// ```
     pub fn xlm_contract(env: Env) -> Address {
         env.storage().instance().get(&DataKey::XlmContract).unwrap()
     }
 
     /// Return the admin address.
+    ///
+    /// # Panics
+    ///
+    /// * `unwrap()` panics when the contract has not been initialised.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// let admin: Address = client.admin();
+    /// ```
     pub fn admin(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Admin).unwrap()
     }
 
     /// Upgrade the contract WASM. Only the admin may call this.
+    ///
+    /// Replaces the currently executing contract's code with the WASM blob
+    /// whose hash is `new_wasm_hash`. The blob must already be uploaded to the
+    /// network.
+    ///
+    /// # Authorization
+    ///
+    /// The stored admin must sign via `admin.require_auth()`.
+    ///
+    /// # Panics
+    ///
+    /// * Propagates a host error if `new_wasm_hash` does not reference an
+    ///   uploaded WASM blob.
+    /// * `unwrap()` panics when the contract has not been initialised.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let client = Stellar_CardReceiverClient::new(&env, &contract_id);
+    /// let new_hash = BytesN::from_array(&env, &[0xAB; 32]);
+    /// client.upgrade(&new_hash);
+    /// ```
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
