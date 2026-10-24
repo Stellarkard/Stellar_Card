@@ -1,13 +1,18 @@
 // @ts-check
 // Background jobs — run on startup and on a repeating interval.
 // Handles order expiry, stuck-order recovery, and unmatched payment refunds.
+// Scheduler failures (any sub-job, the funding-check guard, or the alert
+// evaluator) are also mirrored to Sentry via reportSchedulerError below —
+// see the comment on _reportError for why that hook exists.
 
 const db = require('./db');
 const logger = require('./lib/logger');
 const {
   fireWebhook,
-  WEBHOOK_RETRY_DELAYS_MS,
+  getWebhookMaxAttempts,
+  getWebhookRetryDelay,
   MAX_WEBHOOK_ATTEMPTS,
+  DEFAULT_RETRY_CONFIG,
   refundOrQuarantine,
 } = require('./fulfillment');
 const vccClient = require('./vcc-client');
@@ -18,6 +23,62 @@ const vccClient = require('./vcc-client');
 // untestable without a full patchCache refactor.
 const xlmSender = require('./payments/xlm-sender');
 const { recordDecision } = require('./policy');
+const sentryConfig = require('./lib/sentry-config');
+
+// Test hooks + scheduler error reporting (Part 4 of the Sentry
+// monitoring rollout).
+//
+// Background jobs run outside any Express request scope, so the
+// request/error middleware pair in app.js never sees them and index.js
+// only captures process-level uncaught exceptions and unhandled
+// rejections. A sub-job that throws inside _runSubJob's isolating
+// try/catch therefore stayed invisible in Sentry — ops only had the
+// `jobs.subjob_failed` bizEvent. reportSchedulerError closes that gap
+// by forwarding the original error object (with its stack) plus a
+// `subjob` tag to Sentry on every scheduler failure sink below.
+//
+// _reportError defaults to a thin delegate over
+// sentryConfig.captureException, which is itself a no-op until
+// initSentry() succeeds — so this costs one function call per failure
+// when Sentry is off and needs no NODE_ENV branching at the call
+// sites. Tests inject a recorder via _setErrorReporter (same precedent
+// as src/mpp/verify.js::_setRpcServer): initializing the real SDK is a
+// process-global, one-way side effect the suite deliberately never
+// performs (see test/unit/sentry-config.test.js), so the production
+// binding is unobservable in tests without the hook.
+/** @type {(err: unknown, ctx: { tags?: Record<string, string>, extra?: Record<string, unknown> }) => unknown} */
+let _reportError = (err, ctx) => sentryConfig.captureException(err, ctx);
+
+/**
+ * Inject a stub error reporter for tests. Not for production use.
+ * @param {(err: unknown, ctx: { tags?: Record<string, string>, extra?: Record<string, unknown> }) => unknown} fn
+ */
+function _setErrorReporter(fn) {
+  _reportError = fn;
+}
+
+/** Restore the production Sentry reporter. */
+function _resetErrorReporter() {
+  _reportError = (err, ctx) => sentryConfig.captureException(err, ctx);
+}
+
+/**
+ * Forward a scheduler failure to Sentry. Never throws — reporting must
+ * never crash the job loop, so callers can invoke this unconditionally
+ * next to their existing console.error / bizEvent handling.
+ * @param {unknown} err
+ * @param {string} subjob
+ */
+function reportSchedulerError(err, subjob) {
+  try {
+    _reportError(err, {
+      tags: { area: 'scheduler', subjob },
+      extra: { message: err instanceof Error ? err.message : String(err) },
+    });
+  } catch {
+    /* observability must never crash the job loop */
+  }
+}
 
 // Reconciler timings. After RETRY_AFTER_MS we retry a stuck step. After
 // FAIL_AFTER_MS **and** vcc confirms the job isn't making progress, we hard-
@@ -664,7 +725,8 @@ async function reconcileRefundQuarantine() {
 }
 
 // Retry pending webhook deliveries with exponential backoff.
-// Picks up rows where next_attempt <= now, attempts < MAX_WEBHOOK_ATTEMPTS, delivered = 0.
+// Picks up rows where next_attempt <= now, attempts <= WEBHOOK_MAX_ATTEMPTS
+// (env-tunable, default 3), delivered = 0.
 async function retryWebhooks() {
   const now = new Date().toISOString();
   const rows = /** @type {any[]} */ (
@@ -677,7 +739,7 @@ async function retryWebhooks() {
       AND next_attempt <= ?
   `,
       )
-      .all(MAX_WEBHOOK_ATTEMPTS, now)
+      .all(getWebhookMaxAttempts(), now)
   );
 
   if (rows.length === 0) return;
@@ -743,7 +805,7 @@ async function retryWebhooks() {
                 `UPDATE webhook_queue
                  SET attempts = ?, last_error = ?, next_attempt = ?
                  WHERE id = ?`,
-              ).run(MAX_WEBHOOK_ATTEMPTS + 1, `vault_open_failed: ${vaultMsg}`, now, row.id);
+              ).run(getWebhookMaxAttempts() + 1, `vault_open_failed: ${vaultMsg}`, now, row.id);
               return; // Skip the fire, skip the delivery catch path.
             }
           }
@@ -753,10 +815,24 @@ async function retryWebhooks() {
         log(`  webhook ${row.id.slice(0, 8)} delivered`);
       } catch (err) {
         const nextAttempts = row.attempts + 1;
-        // Index by current attempts (not next) so delays map correctly:
-        // attempts=1→delay[1]=5m, attempts=2→delay[2]=30m, attempts=3→delay[3]=null→abandon
-        const delayMs = WEBHOOK_RETRY_DELAYS_MS[row.attempts] ?? null;
-        if (delayMs === null || nextAttempts > MAX_WEBHOOK_ATTEMPTS) {
+        // Go through getWebhookRetryDelay rather than indexing the array
+        // directly: the helper is the unit-tested backoff, and it is the only
+        // one that guarantees a finite delay. `new Date(Date.now() + NaN)
+        // .toISOString()` throws, and that throw is inside this catch — so the
+        // UPDATE below would never run and the row would retry forever.
+        //
+        // The abandon ceiling comes from getWebhookMaxAttempts() (the same
+        // env-tunable config the delays read), so the ladder length and its
+        // delays can never disagree.
+        //
+        // The previous comment here claimed "attempts=1→5m, attempts=2→30m",
+        // which has not matched WEBHOOK_RETRY_DELAYS_MS ([30s, 60s, 120s])
+        // for some time. Actual default schedule: attempts=1→60s, 2→120s,
+        // then abandoned.
+        const delayMs =
+          nextAttempts > getWebhookMaxAttempts() ? null : getWebhookRetryDelay(row.attempts);
+          nextAttempts > MAX_WEBHOOK_ATTEMPTS ? null : getWebhookRetryDelay(row.attempts, DEFAULT_RETRY_CONFIG);
+        if (delayMs === null) {
           db.prepare(
             `
           UPDATE webhook_queue SET attempts = ?, last_error = ?, next_attempt = ? WHERE id = ?
@@ -1188,6 +1264,10 @@ async function _runSubJob(name, fn) {
         subjob: name,
         error: msg,
       });
+      // Part 4: mirror the failure into Sentry with the sub-job name
+      // as a tag so per-job breakage is visible, groupable, and
+      // alertable there — not just in the bizEvent stream.
+      reportSchedulerError(err, name);
     } catch {
       /* observability must never crash the job loop */
     }
@@ -1237,6 +1317,9 @@ async function checkAgentFundingStatusGuarded() {
     await checkAgentFundingStatus();
   } catch (err) {
     console.error(`[jobs] funding check error: ${err.message}`);
+    // Part 4: same Sentry mirroring as _runSubJob — the funding check
+    // runs on its own fast interval outside the sub-job chain.
+    reportSchedulerError(err, 'checkAgentFundingStatus');
   } finally {
     fundingCheckRunning = false;
   }
@@ -1272,10 +1355,10 @@ function startJobs() {
   // Discord on new firings, persists history. Cheap + bounded, runs in
   // the same process as everything else.
   const ALERT_INTERVAL_MS = parsePositiveMs('ALERT_INTERVAL_MS', 60_000);
-  evaluateAlertsForAllDashboards().catch((err) => log(`alerts startup error: ${err.message}`));
+  evaluateAlertsForAllDashboards().catch(onAlertsError('alerts startup error'));
   _jobIntervals.push(
     setInterval(
-      () => evaluateAlertsForAllDashboards().catch((err) => log(`alerts error: ${err.message}`)),
+      () => evaluateAlertsForAllDashboards().catch(onAlertsError('alerts error')),
       ALERT_INTERVAL_MS,
     ),
   );
@@ -1294,6 +1377,18 @@ function stopJobs() {
     if (t) clearInterval(t);
   }
   log('background jobs stopped');
+}
+
+// Build the rejection handler for the alert-evaluator tick (Part 4).
+// Factored out of startJobs so the Sentry mirroring is unit-testable:
+// the handler logs exactly as before and forwards the error with the
+// `evaluateAlerts` subjob tag. `prefix` is the historical log prefix
+// for the tick phase ('alerts startup error' / 'alerts error').
+function onAlertsError(prefix) {
+  return (err) => {
+    log(`${prefix}: ${err instanceof Error ? err.message : String(err)}`);
+    reportSchedulerError(err, 'evaluateAlerts');
+  };
 }
 
 // Evaluate alert rules for every dashboard. Per-dashboard to honour
@@ -1331,6 +1426,14 @@ module.exports = {
   _parsePositiveMs: parsePositiveMs,
   _resetParsePositiveMsState,
   _runSubJob,
+  // Test-only Sentry reporter hooks (Part 4). See _setErrorReporter.
+  _setErrorReporter,
+  _resetErrorReporter,
+  // Test-only scheduler-sink hooks (Part 4): the funding guard and the
+  // alert-evaluator rejection handler, so their Sentry mirroring is
+  // covered without starting real intervals.
+  _checkAgentFundingStatusGuarded: checkAgentFundingStatusGuarded,
+  _onAlertsError: onAlertsError,
   runJobs,
   checkAgentFundingStatus,
   _resetFundingHorizonOutageState,

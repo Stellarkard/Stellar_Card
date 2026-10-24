@@ -1,9 +1,9 @@
 'use client';
 
 import type { ReactNode } from 'react';
-import { LoadingState } from '../components/LoadingState';
-import { EmptyState } from '../components/EmptyState';
-import { ErrorState } from '../components/ErrorState';
+import { LoadingState } from '../../components/LoadingState';
+import { EmptyState } from '../../components/EmptyState';
+import { ErrorState } from '../../components/ErrorState';
 
 interface Props {
   isLoading?: boolean;

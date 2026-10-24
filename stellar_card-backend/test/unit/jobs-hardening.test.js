@@ -23,7 +23,12 @@ const {
   _resetParsePositiveMsState,
   _runSubJob,
   runJobs,
+  _setErrorReporter,
+  _resetErrorReporter,
+  _checkAgentFundingStatusGuarded,
+  _onAlertsError,
 } = require('../../src/jobs');
+const { db, resetDb } = require('../helpers/app');
 
 // ── F1-jobs: parsePositiveMs ───────────────────────────────────────────────
 
@@ -217,5 +222,221 @@ describe('F2-jobs: runJobs resolves cleanly even when a sub-job throws', () => {
     // synthetic test just verifying runJobs is callable and resolves
     // covers the contract end-to-end.
     await assert.doesNotReject(() => runJobs());
+  });
+});
+
+// ── Part 4: scheduler failures are mirrored to Sentry ───────────────────────
+//
+// _runSubJob (and the funding-check / alert-evaluator sinks) forward the
+// original error object to Sentry with an `area: scheduler` + `subjob`
+// tag. captureException itself is unobservable in tests — it no-ops
+// until initSentry() succeeds, and initializing the SDK is a
+// process-global, one-way side effect the suite deliberately never
+// performs — so these tests inject a recorder via _setErrorReporter
+// (src/jobs.js, same precedent as src/mpp/verify.js::_setRpcServer) and
+// assert on what the scheduler hands to the reporter.
+
+describe('Part 4: _runSubJob reports failures to the error reporter', () => {
+  let origError;
+  let errors;
+  let reports;
+
+  beforeEach(() => {
+    errors = [];
+    origError = console.error;
+    console.error = (...args) => errors.push(args.join(' '));
+    reports = [];
+    _setErrorReporter((err, ctx) => {
+      reports.push({ err, ctx });
+      return 'test-event-id';
+    });
+  });
+
+  afterEach(() => {
+    console.error = origError;
+    _resetErrorReporter();
+  });
+
+  it('reports a throwing sub-job with area + subjob tags', async () => {
+    const boom = new Error('scheduler boom');
+    await _runSubJob('expireStaleOrders', async () => {
+      throw boom;
+    });
+
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].err, boom, 'must forward the original error object, not a string');
+    assert.equal(reports[0].ctx.tags.area, 'scheduler');
+    assert.equal(reports[0].ctx.tags.subjob, 'expireStaleOrders');
+    assert.equal(reports[0].ctx.extra.message, 'scheduler boom');
+  });
+
+  it('reports a non-Error thrown value with a coerced message', async () => {
+    await _runSubJob('retryWebhooks', async () => {
+      throw 'plain string failure';
+    });
+
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].err, 'plain string failure');
+    assert.equal(reports[0].ctx.tags.subjob, 'retryWebhooks');
+    assert.equal(reports[0].ctx.extra.message, 'plain string failure');
+  });
+
+  it('reports nothing when the sub-job succeeds', async () => {
+    let ran = false;
+    await _runSubJob('pruneExpiredSessions', async () => {
+      ran = true;
+    });
+
+    assert.equal(ran, true);
+    assert.equal(reports.length, 0);
+    assert.equal(errors.length, 0);
+  });
+
+  it('still resolves cleanly when the reporter itself throws', async () => {
+    // Reporting must never break the job loop: a throwing reporter is
+    // swallowed inside reportSchedulerError, and the F2 isolation
+    // contract (resolve-always) holds regardless.
+    _setErrorReporter(() => {
+      throw new Error('sentry transport down');
+    });
+    await assert.doesNotReject(async () => {
+      await _runSubJob('purgeOldCards', async () => {
+        throw new Error('card purge boom');
+      });
+    });
+    assert.ok(errors.some((e) => /purgeOldCards failed.*card purge boom/.test(e)));
+  });
+
+  it('restores the production reporter on reset', async () => {
+    _resetErrorReporter();
+    // Production binding delegates to captureException, which no-ops
+    // without init — so no report is recorded and nothing throws.
+    await _runSubJob('recoverStuckOrders', async () => {
+      throw new Error('stuck recovery boom');
+    });
+    assert.equal(reports.length, 0);
+    assert.ok(errors.some((e) => /recoverStuckOrders failed/.test(e)));
+  });
+});
+
+// ── Part 4: funding-check guard reports to the error reporter ────────────
+//
+// checkAgentFundingStatusGuarded is only reachable through the interval
+// in startJobs, so these tests call the exported guard directly with a
+// broken db.prepare to force the inner check to throw — no timers, no
+// network (no wallets are seeded, so the healthy path is a no-op).
+
+describe('Part 4: funding-check guard reports to the error reporter', () => {
+  let origError;
+  let errors;
+  let reports;
+
+  beforeEach(() => {
+    resetDb();
+    errors = [];
+    origError = console.error;
+    console.error = (...args) => errors.push(args.join(' '));
+    reports = [];
+    _setErrorReporter((err, ctx) => {
+      reports.push({ err, ctx });
+      return 'test-event-id';
+    });
+  });
+
+  afterEach(() => {
+    console.error = origError;
+    _resetErrorReporter();
+  });
+
+  it('reports with the checkAgentFundingStatus tag when the check throws', async () => {
+    const realPrepare = db.prepare;
+    db.prepare = function (sql, ...rest) {
+      if (/FROM api_keys/.test(sql)) throw new Error('db is gone');
+      return realPrepare.call(db, sql, ...rest);
+    };
+    try {
+      await _checkAgentFundingStatusGuarded();
+    } finally {
+      db.prepare = realPrepare;
+    }
+
+    assert.ok(errors.some((e) => /funding check error.*db is gone/.test(e)));
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].err.message, 'db is gone');
+    assert.equal(reports[0].ctx.tags.area, 'scheduler');
+    assert.equal(reports[0].ctx.tags.subjob, 'checkAgentFundingStatus');
+    assert.equal(reports[0].ctx.extra.message, 'db is gone');
+  });
+
+  it('releases the mutex so the next tick still runs after a throw', async () => {
+    const realPrepare = db.prepare;
+    db.prepare = function () {
+      throw new Error('boom');
+    };
+    try {
+      await _checkAgentFundingStatusGuarded();
+    } finally {
+      db.prepare = realPrepare;
+    }
+    assert.equal(reports.length, 1);
+
+    // Healthy DB, no awaiting wallets: the check is a no-op that
+    // resolves and reports nothing — proving the mutex reset in
+    // `finally` (a stuck mutex would silently skip this tick).
+    await _checkAgentFundingStatusGuarded();
+    assert.equal(reports.length, 1, 'healthy tick must not report');
+  });
+});
+
+// ── Part 4: alert-evaluator rejection handler reports ────────────────────
+//
+// The two .catch callbacks in startJobs are built by _onAlertsError, so
+// these tests drive the factory directly: no intervals, no dashboards.
+
+describe('Part 4: alert-evaluator rejection handler reports to the error reporter', () => {
+  let origLog;
+  let logs;
+  let reports;
+
+  beforeEach(() => {
+    logs = [];
+    origLog = console.log;
+    console.log = (...args) => logs.push(args.join(' '));
+    reports = [];
+    _setErrorReporter((err, ctx) => {
+      reports.push({ err, ctx });
+      return 'test-event-id';
+    });
+  });
+
+  afterEach(() => {
+    console.log = origLog;
+    _resetErrorReporter();
+  });
+
+  it('logs with the phase prefix and reports the evaluateAlerts tag', () => {
+    const err = new Error('discord down');
+    _onAlertsError('alerts startup error')(err);
+
+    assert.ok(logs.some((l) => l.includes('alerts startup error: discord down')));
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].err, err, 'must forward the original error object');
+    assert.deepEqual(reports[0].ctx.tags, { area: 'scheduler', subjob: 'evaluateAlerts' });
+    assert.equal(reports[0].ctx.extra.message, 'discord down');
+  });
+
+  it('handles a non-Error rejection value without throwing', () => {
+    assert.doesNotThrow(() => _onAlertsError('alerts error')(null));
+    assert.ok(logs.some((l) => l.includes('alerts error: null')));
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].ctx.extra.message, 'null');
+  });
+
+  it('still logs when the reporter itself throws', () => {
+    _setErrorReporter(() => {
+      throw new Error('transport down');
+    });
+    assert.doesNotThrow(() => _onAlertsError('alerts error')(new Error('rule boom')));
+    assert.ok(logs.some((l) => l.includes('alerts error: rule boom')));
   });
 });

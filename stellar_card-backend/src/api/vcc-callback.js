@@ -4,13 +4,16 @@
 // Auth: HMAC-SHA256 signature on the raw request body (not session auth).
 
 const { Router } = require('express');
+const { z } = require('zod');
 const db = require('../db');
 const { enqueueWebhook, refundOrQuarantine } = require('../fulfillment');
 const { verifyVccSignature } = require('../vcc-client');
 const { sealCard } = require('../lib/card-vault');
 const { normalizeCardBrand } = require('../lib/normalize-card');
+const { FulfillmentCard } = require('../lib/validate');
 const { event: bizEvent } = require('../lib/logger');
 const { recordAudit } = require('../lib/audit');
+const { verifyWebhookSignature } = require('../middleware/verifyWebhookSignature');
 
 // Look up the dashboard that owns an order so vcc-callback can write
 // audit rows scoped to it. Returns null if the order has no api_key
@@ -32,10 +35,56 @@ function dashboardIdForOrder(orderId) {
 
 const router = Router();
 
+// Zod validation for the card fulfillment payload (Part 2).
+//
+// Before this, `card` was passed straight from req.body into sealCard()
+// with only an `if (status === 'fulfilled' && card)` truthy check —
+// sealCard() does guard against null/non-object input, but a `card` with
+// missing or wrong-typed `number`/`cvv`/`expiry` still reached the vault
+// layer and either threw an uncaught error mid-request or, depending on
+// the field, silently sealed an empty/garbage string into card storage.
+// A status:'fulfilled' callback with no `card` at all previously fell
+// through to the unrelated `invalid_status` branch, which is the wrong
+// error for what's actually a missing-card request.
+//
+// Validating the shape here means a malformed callback is rejected with
+// a specific 400 before it ever reaches sealCard() or an UPDATE.
+//
+// The object itself now lives in lib/validate.js (FulfillmentCard) so
+// this route and anything else that reasons about a fulfillment payload
+// share one definition, length bounds included: number/cvv/expiry/brand
+// are attacker-influenced and get sealed verbatim, and the original
+// inline schema had no notion of an upper bound at all. The required-field
+// messages are byte-identical to what this route returned before, since
+// they are part of the response contract.
+//
+// It is referenced, not `.extend()`ed: `extend` replaces a field's schema
+// wholesale, so overriding a message that way would silently drop the
+// inherited length cap — exactly the kind of bug this schema exists to
+// prevent.
+const cardSchema = FulfillmentCard;
+
+const baseBodySchema = z.object({
+  order_id: z.string().min(1),
+  status: z.string().min(1),
+});
+
 // POST /vcc-callback
 // Body: { order_id, status: 'fulfilled'|'failed', card?: { number, cvv, expiry, brand }, error?: string }
 // Headers: X-VCC-Signature: sha256=<hmac>, X-VCC-Timestamp: <epoch_ms>
-router.post('/', (req, res) => {
+// Issue #591: fail fast on unsigned/malformed requests (before the order-row
+// read below) and accept X-Webhook-Signature / X-Signature as aliases of
+// X-VCC-Signature. precheckOnly: the v3 verification in this handler remains
+// the authoritative check. Also hosts the explicit local-dev bypass.
+const webhookSignaturePrecheck = verifyWebhookSignature({
+  precheckOnly: true,
+  canonicalHeader: 'x-vcc-signature',
+});
+
+router.post('/', webhookSignaturePrecheck, (req, res) => {
+  // Only set by the middleware when NODE_ENV=development AND
+  // WEBHOOK_SIGNATURE_BYPASS=true — never in test or production.
+  const signatureBypassed = /** @type {any} */ (req).webhookSignatureBypassed === true;
   const signature = req.headers['x-vcc-signature'];
   const timestamp = req.headers['x-vcc-timestamp'];
   const headerOrderId = req.headers['x-vcc-order-id']; // v2+
@@ -53,7 +102,7 @@ router.post('/', (req, res) => {
     });
   }
 
-  if (!signature || !timestamp) {
+  if (!signatureBypassed && (!signature || !timestamp)) {
     return res.status(401).json({ error: 'missing_signature' });
   }
 
@@ -136,7 +185,7 @@ router.post('/', (req, res) => {
     // The header MUST be present AND must match — no "if both present"
     // shortcut. This is the anchor check that prevents an attacker from
     // downgrading to v2 by simply not sending X-VCC-Nonce.
-    if (storedNonce) {
+    if (storedNonce && !signatureBypassed) {
       if (!headerNonce || headerNonce !== storedNonce) {
         bizEvent('callback.rejected', {
           reason: !headerNonce ? 'nonce_missing' : 'nonce_mismatch',
@@ -157,15 +206,20 @@ router.post('/', (req, res) => {
   const requireV3 = Boolean(storedNonce) || orderHasPerOrderSecret;
 
   const rawBody = req.rawBody;
-  const verdict = verifyVccSignature(
-    rawBody,
-    signature,
-    timestamp,
-    headerOrderId,
-    storedNonce,
-    perOrderSecret,
-    { requireV3 },
-  );
+  const verdict = signatureBypassed
+    ? /** @type {{ ok: true, version: string, reason?: undefined }} */ ({
+        ok: true,
+        version: 'dev-bypass',
+      })
+    : verifyVccSignature(
+        rawBody,
+        signature,
+        timestamp,
+        headerOrderId,
+        storedNonce,
+        perOrderSecret,
+        { requireV3 },
+      );
   if (!verdict.ok) {
     bizEvent('callback.rejected', {
       reason: verdict.reason,
@@ -179,9 +233,14 @@ router.post('/', (req, res) => {
   // avoids a confusing 404 after a successful signature verify.
   void orderExistsForPreCheck;
 
-  const { order_id, status, card, error } = req.body;
-  if (!order_id || !status) {
+  const baseParsed = baseBodySchema.safeParse(req.body);
+  if (!baseParsed.success) {
     return res.status(400).json({ error: 'missing_fields' });
+  }
+  const { order_id, status } = baseParsed.data;
+  const { error } = req.body;
+  if (status !== 'fulfilled' && status !== 'failed') {
+    return res.status(400).json({ error: 'invalid_status' });
   }
 
   // Defence in depth: if the caller provided an X-VCC-Order-Id header (v2)
@@ -211,12 +270,26 @@ router.post('/', (req, res) => {
     return res.json({ ok: true, note: 'already_terminal' });
   }
 
-  if (status === 'fulfilled' && card) {
+  if (status === 'fulfilled') {
+    // Card shape is validated here rather than earlier — an idempotent
+    // retry callback for an already-terminal order (caught by the
+    // TERMINAL check above) never needs a valid card body, and a
+    // nonexistent order_id should still 404 before we ever inspect the
+    // card. Only a live fulfillment attempt is required to carry one.
+    const cardParsed = cardSchema.safeParse(req.body.card);
+    if (!cardParsed.success) {
+      return res.status(400).json({
+        error: 'invalid_card',
+        message: cardParsed.error.issues.map((i) => i.message).join('; '),
+      });
+    }
+    const validatedCard = cardParsed.data;
+
     // F1: seal PAN/CVV/expiry before writing. The seal helper throws in
     // production when CARDS402_SECRET_BOX_KEY is unset (F5 enforced it at
     // env validation time, so this is belt-and-braces). card_brand stays
     // plaintext — Visa/Mastercard isn't sensitive.
-    const sealed = sealCard(card);
+    const sealed = sealCard(validatedCard);
     const claimed = db
       .prepare(
         `
@@ -274,7 +347,7 @@ router.post('/', (req, res) => {
         details: {
           amount_usdc: order.amount_usdc,
           payment_asset: order.payment_asset,
-          card_brand: normalizeCardBrand(card.brand),
+          card_brand: normalizeCardBrand(validatedCard.brand),
           api_key_id: order.api_key_id,
         },
         ip: req.ip || req.headers?.['x-forwarded-for'] || null,
@@ -301,14 +374,14 @@ router.post('/', (req, res) => {
           amount_usdc: order.amount_usdc,
           payment_asset: order.payment_asset,
           card: {
-            number: card.number,
-            cvv: card.cvv,
-            expiry: card.expiry,
+            number: validatedCard.number,
+            cvv: validatedCard.cvv,
+            expiry: validatedCard.expiry,
             // Normalise the upstream merchant-catalog string before it
             // hits the agent transcript. Raw value stays in the orders
             // row for ops; agents see "USD Visa Card" not "Visa® Reward
             // Card, 6-Month Expiration [ITNL] eGift Card".
-            brand: normalizeCardBrand(card.brand),
+            brand: normalizeCardBrand(validatedCard.brand),
           },
         },
         keyRow?.webhook_secret || null,

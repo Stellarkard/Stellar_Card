@@ -1,0 +1,3 @@
+# Rust/Soroban build artifacts
+/target
+*.wasm

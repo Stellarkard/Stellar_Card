@@ -111,9 +111,29 @@ describe('requireInternal — domain allow', () => {
   });
 
   it('matches the @stellar_card.com domain case-insensitively', () => {
+    // The middleware lowercases req.user.email before the suffix check,
+    // so an address that arrived with any mix of case is still allowed.
+    // The previous fixture used `OPS@CARDS402.COM` — a different domain
+    // entirely — so the assertion was really checking that an unrelated
+    // domain is allowed, which it is not, and the case-folding property
+    // this test is named for was never actually verified.
     const mw = freshMiddleware();
-    const { nextCalled } = runMiddleware(mw, { id: 'u1', email: 'OPS@CARDS402.COM' });
+    const { nextCalled } = runMiddleware(mw, { id: 'u1', email: 'OPS@STELLAR_CARD.COM' });
     assert.equal(nextCalled, true);
+    for (const email of ['OPS@STELLAR_CARD.COM', 'Ops@Stellar_Card.CoM', 'ops@stellar_card.com']) {
+      const { nextCalled, statusCode } = runMiddleware(mw, { id: 'u1', email });
+      assert.equal(nextCalled, true, email);
+      assert.equal(statusCode, null, email);
+    }
+  });
+
+  it('still rejects a case-shifted address from another domain', () => {
+    // The companion to the test above: lowercasing must not widen the
+    // allowlist to every domain, only normalise the one that is allowed.
+    const mw = freshMiddleware();
+    const { statusCode, body } = runMiddleware(mw, { id: 'u1', email: 'OPS@CARDS402.COM' });
+    assert.equal(statusCode, 403);
+    assert.equal(body.error, 'forbidden');
   });
 
   it('rejects non-@stellar_card.com emails when INTERNAL_EMAILS is unset', () => {

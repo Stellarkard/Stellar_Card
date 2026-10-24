@@ -1,6 +1,6 @@
 /**
  * Comprehensive TypeScript type definitions for the stellar_card SDK.
- * 
+ *
  * This module provides all the core types, interfaces, and type guards
  * used across the SDK for type-safe interactions with the stellar_card API.
  */
@@ -115,6 +115,24 @@ export interface TransactionResult {
   successful: boolean;
   /** Result XDR */
   resultXdr?: string;
+  /** Fee actually charged by the network, in stroops */
+  feeCharged?: string;
+  /** Fee refunded (maxFee − feeCharged), in stroops */
+  feeRefunded?: string;
+  /** Maximum fee allocated when the transaction was built, in stroops */
+  maxFee?: string;
+}
+
+/** Result of a Soroban contract payment (pay_usdc / pay_xlm). */
+export interface ContractPaymentResult {
+  /** Transaction hash (64-char hex) */
+  hash: string;
+  /** Fee actually charged, in stroops */
+  feeCharged: string;
+  /** Fee refunded (maxFee − feeCharged), in stroops */
+  feeRefunded: string;
+  /** Max fee allocated on the envelope, in stroops */
+  maxFee: string;
 }
 
 // ============================================================================
@@ -195,6 +213,24 @@ export interface OrderStatusHistory {
   timestamp: string;
   /** Optional note about the change */
   note?: string;
+}
+
+/** Specific order history event types for detailed tracking */
+export type OrderHistoryEventType =
+  | 'payment_initiated'
+  | 'payment_confirmed'
+  | 'card_issued'
+  | 'refund_processed'
+  | 'order_cancelled';
+
+/** Order history event with typed payload */
+export interface OrderHistoryEvent {
+  /** Type of the event */
+  type: OrderHistoryEventType;
+  /** Timestamp of the event */
+  timestamp: string;
+  /** Additional payload data */
+  payload?: Record<string, unknown>;
 }
 
 /** Extended order status with history */
@@ -415,12 +451,7 @@ export function isOrderPhase(value: unknown): value is DetailedOrderPhase {
 
 /** Type guard for NetworkType */
 export function isNetworkType(value: unknown): value is NetworkType {
-  return (
-    value === 'mainnet' ||
-    value === 'testnet' ||
-    value === 'futurenet' ||
-    value === 'custom'
-  );
+  return value === 'mainnet' || value === 'testnet' || value === 'futurenet' || value === 'custom';
 }
 
 /** Type guard to check if error has a specific code */
@@ -668,7 +699,10 @@ export interface ComprehensiveSDKConfig {
 // ============================================================================
 
 /** Enhanced type guard for API responses */
-export function isValidApiResponse<T>(response: unknown, validator: (data: unknown) => data is T): response is { data: T; status: number } {
+export function isValidApiResponse<T>(
+  response: unknown,
+  validator: (data: unknown) => data is T,
+): response is { data: T; status: number } {
   return (
     typeof response === 'object' &&
     response !== null &&
@@ -684,7 +718,8 @@ export function isValidNetworkConfig(config: unknown): config is ExtendedNetwork
   return (
     typeof config === 'object' &&
     config !== null &&
-    (!('networkPassphrase' in config) || typeof (config as { networkPassphrase: unknown }).networkPassphrase === 'string')
+    (!('networkPassphrase' in config) ||
+      typeof (config as { networkPassphrase: unknown }).networkPassphrase === 'string')
   );
 }
 
@@ -743,8 +778,9 @@ export type Mutable<T> = {
 };
 
 /** Function that returns a promise */
-export type AsyncFn<TArgs extends readonly unknown[] = readonly unknown[], TReturn = unknown> = 
-  (...args: TArgs) => Promise<TReturn>;
+export type AsyncFn<TArgs extends readonly unknown[] = readonly unknown[], TReturn = unknown> = (
+  ...args: TArgs
+) => Promise<TReturn>;
 
 /** Non-nullable version of type */
 export type StrictNonNullable<T> = T extends null | undefined ? never : T;
@@ -753,10 +789,10 @@ export type StrictNonNullable<T> = T extends null | undefined ? never : T;
 export type JSONSerializable<T> = T extends string | number | boolean | null
   ? T
   : T extends readonly (infer U)[]
-  ? readonly JSONSerializable<U>[]
-  : T extends { [key: string]: unknown }
-  ? { [K in keyof T]: JSONSerializable<T[K]> }
-  : never;
+    ? readonly JSONSerializable<U>[]
+    : T extends { [key: string]: unknown }
+      ? { [K in keyof T]: JSONSerializable<T[K]> }
+      : never;
 
 // ============================================================================
 // ADDITIONAL TYPINGS (#150)
@@ -871,5 +907,297 @@ export function isCardIssuanceResult(value: unknown): value is CardIssuanceResul
     typeof v['number'] === 'string' &&
     typeof v['cvv'] === 'string' &&
     typeof v['expiry'] === 'string'
+  );
+}
+
+// ============================================================================
+// ORDER HISTORY EVENT TYPES (Part 5)
+// ============================================================================
+
+/** Order lifecycle event types emitted during order processing */
+export type OrderEventType =
+  | 'order_created'
+  | 'payment_initiated'
+  | 'payment_received'
+  | 'payment_confirmed'
+  | 'payment_failed'
+  | 'trustline_added'
+  | 'trustline_failed'
+  | 'processing_started'
+  | 'card_issued'
+  | 'card_delivery_failed'
+  | 'order_completed'
+  | 'order_failed'
+  | 'order_refunded'
+  | 'order_cancelled'
+  | 'order_expired';
+
+/** Source of an order event */
+export type OrderEventSource = 'api' | 'webhook' | 'sse' | 'polling' | 'system';
+
+/** Order lifecycle event with metadata */
+export interface OrderEvent {
+  /** Unique event identifier */
+  event_id: string;
+  /** Order this event belongs to */
+  order_id: string;
+  /** Type of lifecycle event */
+  event_type: OrderEventType;
+  /** When the event occurred */
+  timestamp: string;
+  /** Source that generated the event */
+  source: OrderEventSource;
+  /** Human-readable description of the event */
+  message?: string;
+  /** Event-specific metadata */
+  metadata?: Record<string, unknown>;
+  /** Error details if the event represents a failure */
+  error?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  };
+}
+
+/** Webhook delivery status for order events */
+export type WebhookDeliveryStatus = 'pending' | 'delivered' | 'failed' | 'retrying';
+
+/** Webhook configuration for order event notifications */
+export interface OrderWebhookConfig {
+  /** Webhook URL to receive order events */
+  url: string;
+  /** Event types to subscribe to (empty = all events) */
+  events?: OrderEventType[];
+  /** Optional secret for HMAC signature verification */
+  secret?: string;
+  /** Maximum delivery attempts before marking as failed */
+  maxRetries?: number;
+  /** Custom headers to include in webhook requests */
+  headers?: Record<string, string>;
+}
+
+/** Webhook delivery record for an order event */
+export interface WebhookDelivery {
+  /** Delivery identifier */
+  delivery_id: string;
+  /** Event that was delivered */
+  event_id: string;
+  /** Order this delivery belongs to */
+  order_id: string;
+  /** Webhook URL that received the event */
+  webhook_url: string;
+  /** HTTP status code of the delivery attempt */
+  status_code?: number;
+  /** Delivery status */
+  status: WebhookDeliveryStatus;
+  /** Number of delivery attempts made */
+  attempts: number;
+  /** Timestamp of the last delivery attempt */
+  last_attempt_at: string;
+  /** Timestamp of successful delivery (if delivered) */
+  delivered_at?: string;
+  /** Error message if delivery failed */
+  error?: string;
+}
+
+/** Order event subscription for receiving real-time order updates */
+export interface OrderEventSubscription {
+  /** Subscription identifier */
+  subscription_id: string;
+  /** Order IDs to subscribe to (empty = all orders for the API key) */
+  order_ids?: string[];
+  /** Event types to receive (empty = all events) */
+  event_types?: OrderEventType[];
+  /** Transport mechanism for receiving events */
+  transport: 'webhook' | 'sse' | 'polling';
+  /** Whether the subscription is currently active */
+  active: boolean;
+  /** Subscription creation timestamp */
+  created_at: string;
+  /** Subscription expiration timestamp (if applicable) */
+  expires_at?: string;
+}
+
+/** Order history timeline entry with event context */
+export interface OrderHistoryEntry {
+  /** The event that occurred */
+  event: OrderEvent;
+  /** Order status at the time of this event */
+  status_at_event: string;
+  /** Phase at the time of this event */
+  phase_at_event: DetailedOrderPhase;
+  /** Previous phase (if phase changed) */
+  previous_phase?: DetailedOrderPhase;
+}
+
+/** Full order history response with timeline */
+export interface OrderHistoryResponse {
+  /** Order identifier */
+  order_id: string;
+  /** Chronological list of events */
+  entries: OrderHistoryEntry[];
+  /** Total event count */
+  total: number;
+  /** Whether more events are available via pagination */
+  has_more: boolean;
+  /** Cursor for fetching the next page */
+  next_cursor?: string;
+}
+
+// ============================================================================
+// ORDER STATUS DISCRIMINATED UNION & TYPE GUARDS (#729)
+// ============================================================================
+
+/**
+ * Card details attached to an order once it reaches the ACTIVE status.
+ * Mirrors {@link CardDetails} from `./client` but is kept local here so
+ * `types.ts` has no dependency on `client.ts`.
+ */
+export interface OrderCard {
+  /** 16-digit card number. */
+  number: string;
+  /** 3-digit CVV. */
+  cvv: string;
+  /** Expiry in MM/YY format. */
+  expiry: string;
+  /** Card brand (e.g. "Visa"), or null when not provided. */
+  brand: string | null;
+}
+
+/**
+ * Status literals used by the discriminated {@link Order} union.
+ *
+ * These match the runtime status strings the backend actually sends (see
+ * `src/__tests__/order-polling.test.ts`): `'ACTIVE'` once a card has been
+ * issued, `'FAILED'` (also covers `'EXPIRED'`-style terminal failures, which
+ * the SDK normalizes to `'FAILED'` for guard purposes), and everything else
+ * — e.g. `'pending_payment'`, `'processing'` — is `'PENDING'`.
+ */
+export type OrderStatusLiteral = 'ACTIVE' | 'PENDING' | 'FAILED';
+
+/** Base fields shared by every branch of the {@link Order} union. */
+interface BaseOrder {
+  order_id: string;
+  amount_usdc: string;
+  payment_asset: PaymentAsset;
+  created_at: string;
+  updated_at: string;
+}
+
+/** An order whose card has been issued. `card` is required and non-null. */
+export interface ActiveOrder extends BaseOrder {
+  status: 'ACTIVE';
+  /** Issued card details — always present once an order is ACTIVE. */
+  card: OrderCard;
+}
+
+/** An order still awaiting payment or processing. Never has a `card`. */
+export interface PendingOrder extends BaseOrder {
+  status: 'PENDING';
+  card?: never;
+}
+
+/** An order that failed, expired, was rejected, or was refunded. */
+export interface FailedOrder extends BaseOrder {
+  status: 'FAILED';
+  card?: never;
+  /** Human-readable failure reason, when available. */
+  error?: string;
+}
+
+/** Discriminated union over an order's lifecycle, keyed on `status`. */
+export type Order = ActiveOrder | PendingOrder | FailedOrder;
+
+/**
+ * Type guard — narrows `order` to {@link ActiveOrder}.
+ *
+ * After this guard returns `true`, `order.card` is accessible without any
+ * further null check — `card` is a required, non-optional field on the
+ * `ActiveOrder` branch of the {@link Order} union.
+ */
+export function isActiveOrder(order: Order): order is ActiveOrder {
+  return order.status === 'ACTIVE';
+}
+
+/** Type guard — narrows `order` to {@link PendingOrder}. */
+export function isPendingOrder(order: Order): order is PendingOrder {
+  return order.status === 'PENDING';
+}
+
+/** Type guard — narrows `order` to {@link FailedOrder}. */
+export function isFailedOrder(order: Order): order is FailedOrder {
+  return order.status === 'FAILED';
+}
+
+// ============================================================================
+// ORDER EVENT TYPE GUARDS
+// ============================================================================
+
+/** Type guard for OrderEventType */
+export function isOrderEventType(value: unknown): value is OrderEventType {
+  const types: OrderEventType[] = [
+    'order_created',
+    'payment_initiated',
+    'payment_received',
+    'payment_confirmed',
+    'payment_failed',
+    'trustline_added',
+    'trustline_failed',
+    'processing_started',
+    'card_issued',
+    'card_delivery_failed',
+    'order_completed',
+    'order_failed',
+    'order_refunded',
+    'order_cancelled',
+    'order_expired',
+  ];
+  return typeof value === 'string' && types.includes(value as OrderEventType);
+}
+
+/** Type guard for OrderEvent */
+export function isOrderEvent(value: unknown): value is OrderEvent {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'event_id' in value &&
+    'order_id' in value &&
+    'event_type' in value &&
+    'timestamp' in value &&
+    'source' in value &&
+    typeof (value as { event_id: unknown }).event_id === 'string' &&
+    typeof (value as { order_id: unknown }).order_id === 'string' &&
+    isOrderEventType((value as { event_type: unknown }).event_type) &&
+    typeof (value as { timestamp: unknown }).timestamp === 'string'
+  );
+}
+
+/** Type guard for WebhookDelivery */
+export function isWebhookDelivery(value: unknown): value is WebhookDelivery {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'delivery_id' in value &&
+    'event_id' in value &&
+    'status' in value &&
+    typeof (value as { delivery_id: unknown }).delivery_id === 'string' &&
+    typeof (value as { event_id: unknown }).event_id === 'string' &&
+    ['pending', 'delivered', 'failed', 'retrying'].includes(
+      (value as { status: unknown }).status as string,
+    )
+  );
+}
+
+/** Type guard for OrderEventSubscription */
+export function isOrderEventSubscription(value: unknown): value is OrderEventSubscription {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'subscription_id' in value &&
+    'transport' in value &&
+    'active' in value &&
+    typeof (value as { subscription_id: unknown }).subscription_id === 'string' &&
+    typeof (value as { active: unknown }).active === 'boolean' &&
+    ['webhook', 'sse', 'polling'].includes((value as { transport: unknown }).transport as string)
   );
 }

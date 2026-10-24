@@ -37,12 +37,7 @@ export { calculateExponentialBackoffDelay, parseRetryAfterMs, sleep } from './re
 export type { ExponentialBackoffDelayOptions } from './retry';
 
 // Pagination utilities — pure functions, no Node.js deps.
-export {
-  paginate,
-  iteratePages,
-  collectAllPages,
-  mapPaginated,
-} from './pagination';
+export { paginate, iteratePages, collectAllPages, mapPaginated } from './pagination';
 export type {
   PaginationCursor,
   PaginatedResult,
@@ -51,21 +46,35 @@ export type {
   MapPaginatedOptions,
 } from './pagination';
 
+// Keystore utilities — secure cross-platform encrypted storage adapter (#705)
+export { BrowserKeystore, createKeystore } from './keystore';
+export type { EncryptedKeystore } from './keystore';
+
+// WebCrypto utilities — browser-compatible cryptographic key derivation and HMAC (#695)
+export { deriveKeyWithWebCrypto, hmacWithWebCrypto, assertSafeBaseUrl } from './config.browser';
+export type { Stellar_CardConfig } from './config.browser';
+
 // Network configuration helpers — pure functions, no Node.js deps.
+
 // `resolveNetworkConfigFromEnv` guards its `process.env` access so it is safe
 // to call in the browser (it simply ignores the absent environment there).
 export {
   resolveNetworkConfig,
   resolveNetworkConfigFromEnv,
+  resolveNetworkConfigWithRetry,
   getDefaultSorobanRpcUrl,
   getDefaultHorizonUrl,
   createCustomNetworkConfig,
+  createExtendedNetworkConfig,
   validateRpcEndpoint,
+  validateNetworkConfig,
   NETWORK_ENV_VARS,
 } from './network';
 export type {
   NetworkConfig,
   RpcEndpointConfig,
+  RpcProxyConfig,
+  ExtendedRpcEndpointConfig,
   ResolvedRpcEndpoint,
   ResolvedNetworkConfig,
 } from './network';
@@ -113,6 +122,8 @@ export type {
   ExtendedPaymentInstructions,
   DetailedOrderPhase,
   OrderStatusHistory,
+  OrderHistoryEventType,
+  OrderHistoryEvent,
   ExtendedOrderStatus,
   DetailedBudget,
   OrderStatistics,
@@ -131,6 +142,16 @@ export type {
   AsyncFunction,
   Callback,
   EventEmitter,
+  // Order event typings (#486)
+  OrderEventType,
+  OrderEventSource,
+  OrderEvent,
+  WebhookDeliveryStatus,
+  OrderWebhookConfig,
+  WebhookDelivery,
+  OrderEventSubscription,
+  OrderHistoryEntry,
+  OrderHistoryResponse,
 } from './types';
 
 export {
@@ -139,4 +160,9 @@ export {
   isNetworkType,
   hasErrorCode,
   isRetryableError,
+  // Order event type guards (#486)
+  isOrderEventType,
+  isOrderEvent,
+  isWebhookDelivery,
+  isOrderEventSubscription,
 } from './types';

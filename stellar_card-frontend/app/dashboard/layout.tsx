@@ -18,9 +18,8 @@ import { Sidebar } from './_shell/Sidebar';
 import { Header } from './_shell/Header';
 import { AuthGate } from './_shell/AuthGate';
 import { FeedbackLauncher } from './_shell/FeedbackLauncher';
-import { CommandPalette } from './_shell/CommandPalette';
+import { DynamicCommandPalette, DynamicOnboardingModal } from '@/app/lib/dynamic-imports';
 import { MobileDrawer } from '@/app/components/MobileDrawer';
-import { DynamicOnboardingModal } from '@/app/lib/dynamic-imports';
 
 function ShellInner({ children }: { children: ReactNode }) {
   const { loading, authError } = useDashboard();
@@ -79,7 +78,7 @@ function ShellInner({ children }: { children: ReactNode }) {
         </main>
       </div>
       <FeedbackLauncher />
-      <CommandPalette />
+      <DynamicCommandPalette />
       <DynamicOnboardingModal />
       <style>{`
         @media (max-width: 768px) {

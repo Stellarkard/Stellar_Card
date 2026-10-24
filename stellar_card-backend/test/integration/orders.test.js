@@ -1,8 +1,8 @@
 require('../helpers/env');
 
-const { describe, it, before, beforeEach } = require('node:test');
+const { describe, it, before, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
-const { request, createTestKey, seedOrder, resetDb } = require('../helpers/app');
+const { request, createTestKey, seedOrder, resetDb, db } = require('../helpers/app');
 
 // Stub fetch: handle VCC API calls and rates lookup; reject everything else.
 const VCC_TEST_PAYMENT = {
@@ -235,6 +235,29 @@ describe('GET /v1/orders/:id', () => {
 
   it('returns 404 for unknown order', async () => {
     const res = await request.get('/v1/orders/nonexistent').set('X-Api-Key', key.key);
+    assert.equal(res.status, 404);
+  });
+
+  // `:id` is bound straight into a `WHERE id = ?`, so an oversized path
+  // segment used to be bound and compared before anything rejected it.
+  // 256 is the cap; 257 is the first value that must be refused.
+  it('rejects an oversized :id with 400 instead of querying for it', async () => {
+    const tooLong = 'a'.repeat(257);
+    const res = await request.get(`/v1/orders/${tooLong}`).set('X-Api-Key', key.key);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_request');
+  });
+
+  it('accepts an :id at exactly the 256-char cap', async () => {
+    const res = await request.get(`/v1/orders/${'a'.repeat(256)}`).set('X-Api-Key', key.key);
+    // Past the schema, so it is a real lookup that legitimately misses.
+    assert.equal(res.status, 404);
+  });
+
+  it('does not narrow :id to a UUID pattern', async () => {
+    // ids are uuid v4 on the create path but VCC-supplied on the callback
+    // path, so a pattern would 400 on a valid row.
+    const res = await request.get('/v1/orders/legacy_order_id-123').set('X-Api-Key', key.key);
     assert.equal(res.status, 404);
   });
 
@@ -480,5 +503,111 @@ describe('GET /v1/usage', () => {
     assert.equal(res.body.orders.rejected, 1);
     // Total still counts everything
     assert.equal(res.body.orders.total, 4);
+  });
+});
+
+// ── Part 5: order-creation rate limiting ─────────────────────────────────
+//
+// orderCreateLimiter (src/api/orders.js) existed with zero coverage:
+// per-key hourly budget (default 60, overridable per key via
+// rate_limit_rpm), per-key buckets, `rate_limit_exceeded` 429 shape,
+// IETF draft-7 RateLimit headers. ORDER_CREATE_LIMIT_PER_HOUR shrinks
+// the default for tests so the 429 trip is provable in 3 requests
+// instead of 61. express-rate-limit's MemoryStore is process-global,
+// so every case mints a FRESH key — reusing a key across cases would
+// bleed budget between them. The env var is set/restored per case so
+// no other suite (same file or otherwise) observes it.
+
+describe('POST /v1/orders — rate limiting (Part 5)', () => {
+  let origLimit;
+
+  beforeEach(async () => {
+    resetDb();
+    origLimit = process.env.ORDER_CREATE_LIMIT_PER_HOUR;
+  });
+
+  afterEach(() => {
+    if (origLimit === undefined) delete process.env.ORDER_CREATE_LIMIT_PER_HOUR;
+    else process.env.ORDER_CREATE_LIMIT_PER_HOUR = origLimit;
+  });
+
+  function postOrder(rawKey, body = { amount_usdc: '10.00' }) {
+    return request.post('/v1/orders').set('X-Api-Key', rawKey).send(body);
+  }
+
+  it('trips 429 with the contract body once the hourly budget is spent', async () => {
+    process.env.ORDER_CREATE_LIMIT_PER_HOUR = '2';
+    const { key } = await createTestKey({ label: 'part5-trip' });
+
+    assert.equal((await postOrder(key)).status, 201);
+    assert.equal((await postOrder(key)).status, 201);
+
+    const blocked = await postOrder(key);
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error, 'rate_limit_exceeded');
+    assert.ok(
+      /rate_limit_rpm/.test(blocked.body.message),
+      'message must point at the per-key override',
+    );
+    // express-rate-limit v8 with standardHeaders:'draft-7' emits the
+    // combined RateLimit header (limit=.., remaining=.., reset=..).
+    assert.match(blocked.headers['ratelimit'], /limit=2/);
+    assert.equal(blocked.headers['retry-after'], '3600');
+  });
+
+  it('honors the per-key rate_limit_rpm override over the env default', async () => {
+    // Env default 2 would trip on the 3rd request — but this key sets
+    // rate_limit_rpm=1 (→ 60/hour), so the 3rd request still creates.
+    // Proves the override branch is read without firing 61 requests.
+    process.env.ORDER_CREATE_LIMIT_PER_HOUR = '2';
+    const { id, key } = await createTestKey({ label: 'part5-override' });
+    db.prepare(`UPDATE api_keys SET rate_limit_rpm = 1 WHERE id = ?`).run(id);
+
+    assert.equal((await postOrder(key)).status, 201);
+    assert.equal((await postOrder(key)).status, 201);
+    const third = await postOrder(key);
+    assert.equal(third.status, 201, 'per-key override must raise the budget above the env default');
+  });
+
+  it('isolates budgets per API key', async () => {
+    process.env.ORDER_CREATE_LIMIT_PER_HOUR = '2';
+    const a = await createTestKey({ label: 'part5-iso-a' });
+    const b = await createTestKey({ label: 'part5-iso-b' });
+
+    assert.equal((await postOrder(a.key)).status, 201);
+    assert.equal((await postOrder(a.key)).status, 201);
+    assert.equal((await postOrder(a.key)).status, 429, 'key A budget spent');
+
+    // Key B is untouched — per-key buckets, not a global counter.
+    const fresh = await postOrder(b.key);
+    assert.equal(fresh.status, 201);
+  });
+
+  it('counts invalid bodies against the budget (limiter runs before validation)', async () => {
+    // Deliberate contract: limiter-first preserves DoS protection, so
+    // 400s burn quota. Two malformed posts + one valid body = budget
+    // spent → the next valid body is rejected.
+    process.env.ORDER_CREATE_LIMIT_PER_HOUR = '2';
+    const { key } = await createTestKey({ label: 'part5-invalid' });
+
+    assert.equal((await postOrder(key, {})).status, 400);
+    assert.equal((await postOrder(key, { amount_usdc: 'not-a-number' })).status, 400);
+
+    const blocked = await postOrder(key);
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error, 'rate_limit_exceeded');
+  });
+
+  it('falls back to 60/hour on a non-numeric env value (fail closed)', async () => {
+    // A typo in the optional tuning variable must never disable the
+    // limiter. Fallback is 60 — far above what this case fires, so
+    // every request here must create.
+    process.env.ORDER_CREATE_LIMIT_PER_HOUR = 'not-a-number';
+    const { key } = await createTestKey({ label: 'part5-fallback' });
+
+    assert.equal((await postOrder(key)).status, 201);
+    const second = await postOrder(key);
+    assert.equal(second.status, 201);
+    assert.match(second.headers['ratelimit'], /limit=60/);
   });
 });

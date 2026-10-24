@@ -17,8 +17,31 @@ import {
   WaitTimeoutError,
   AuthError as AuthErrorCtor,
   ValidationError,
+  TimeoutError,
+  AbortError,
 } from './errors';
 import { calculateExponentialBackoffDelay, sleep } from './retry';
+import { createLogger, type Logger, type LogLevel } from './logger';
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  withRequestTimeout,
+  sanitizeHeaders,
+  mergeHeaders,
+  RequestThrottle,
+  RequestPriority,
+  type RequestOptions,
+} from './network';
+import { validateClientOptions, validateCreateOrderInput } from './validation';
+import type { AccountBalances } from './stellar';
+import {
+  createTelemetryCollector,
+  createTelemetryEndpoint,
+  isTelemetryEnabled,
+  type TelemetryCollector,
+  type TelemetryFeature,
+} from './telemetry';
+
+export type { RequestOptions } from './network';
 
 export interface Budget {
   spent_usdc: string;
@@ -129,9 +152,13 @@ export interface RetryOptions {
   baseDelayMs?: number;
   /** Max backoff cap in ms. */
   maxDelayMs?: number;
+  /** Jitter strategy used for retry delays. Defaults to full jitter. */
+  jitter?: 'full' | 'equal' | 'decorrelated' | 'none';
+  /** Optional callback invoked before waiting for each retry. */
+  onRetry?: (error: unknown, attempt: number, delayMs: number) => void;
 }
 
-export interface CreateOrderOptions extends OrderOptions {
+export interface CreateOrderOptions extends OrderOptions, RequestOptions {
   /** Optional idempotency key for caller-managed create-order retries. */
   idempotencyKey?: string;
 }
@@ -146,7 +173,7 @@ export interface WaitForCardOptions {
   pollIntervalMs?: number;
 }
 
-export interface ListOrdersOptions {
+export interface ListOrdersOptions extends RequestOptions {
   status?: string;
   limit?: number;
   offset?: number;
@@ -175,15 +202,67 @@ export interface IterateOrdersOptions extends ListOrdersOptions {
   maxItems?: number;
 }
 
-export interface ReportStatusOptions {
+export interface ReportStatusOptions extends RequestOptions {
   wallet_public_key?: string;
   detail?: string;
+}
+
+/** A single entry from `GET /dashboard/audit` (#731). */
+export interface AuditLogEntry {
+  id: string;
+  timestamp: string;
+  action: string;
+  actor: string;
+  result: 'success' | 'failure' | string;
+  detail?: string;
+}
+
+export interface ListAuditLogsOptions extends RequestOptions {
+  /** Filter by action name, e.g. `"order.create"`. */
+  action?: string;
+  /** Page size. Defaults to 20. */
+  limit?: number;
+  /** ISO-8601 lower bound on `timestamp`. */
+  since?: string;
 }
 
 export interface StellarCardClientOptions {
   baseUrl?: string;
   apiKey?: string;
   retry?: RetryOptions;
+  logger?: Logger;
+  logLevel?: LogLevel;
+  /** Default per-request timeout in ms. Defaults to 30000. */
+  timeout?: number;
+  /** Stellar network used by on-chain helpers such as {@link Stellar_CardClient.getAccountBalances}. */
+  network?: 'mainnet' | 'testnet' | 'futurenet';
+  /** Optional Soroban RPC URL override. */
+  rpcUrl?: string;
+  /** Custom HTTP headers attached to all outgoing requests. */
+  headers?: Record<string, string>;
+  /** Disable automatic startup SDK version checking. */
+  disableVersionCheck?: boolean;
+  /** Enable anonymous SDK telemetry. Disabled unless explicitly opted in. */
+  telemetry?: boolean;
+  /**
+   * Client-side throttle for outgoing API/Horizon requests (#728). When
+   * set, requests queue automatically once this many requests have
+   * started within the current 1-second sliding window, instead of
+   * firing immediately and risking a Horizon 429. Transaction-submission
+   * requests are prioritized ahead of routine polling/read requests
+   * within the queue. Unset (default) disables throttling entirely —
+   * existing callers see no behavior change.
+   */
+  maxRequestsPerSecond?: number;
+}
+
+export interface WaitForOrderFulfillmentOptions extends RequestOptions {
+  /** Polling interval in milliseconds. Defaults to 2000 (2s). */
+  intervalMs?: number;
+  /** Maximum wait timeout in milliseconds. Defaults to 120000 (120s). */
+  timeoutMs?: number;
+  /** Optional callback invoked on order state transitions. */
+  onProgress?: (status: OrderStatus) => void;
 }
 
 // Shared order-ID shape validator. Keeps the client, the MCP tool,
@@ -224,6 +303,13 @@ export class Stellar_CardClient {
   private baseUrl: string;
   private apiKey: string;
   private retry: Required<RetryOptions>;
+  public readonly logger: Logger;
+  private timeout: number;
+  private network: 'mainnet' | 'testnet' | 'futurenet';
+  private headers: Record<string, string>;
+  private telemetry: TelemetryCollector;
+  /** Set only when `maxRequestsPerSecond` is configured; undefined means throttling is off. */
+  private throttle?: RequestThrottle;
 
   /**
    * Create a client from explicit options, env vars, or on-disk config.
@@ -236,13 +322,33 @@ export class Stellar_CardClient {
    * @param opts.apiKey - stellar_card API key. Required via one of the sources above.
    * @param opts.baseUrl - API base URL. Defaults to `https://api.stellar_card.com/v1`.
    * @param opts.retry - Retry policy applied to transient (429/502/503/504) errors.
+   * @param opts.logger - Optional custom logger implementation (Pino, Winston, Console).
+   * @param opts.logLevel - Optional log level filter ('debug' | 'info' | 'warn' | 'error' | 'silent').
+   * @param opts.headers - Optional custom HTTP headers to attach to all outgoing requests.
+   * @param opts.disableVersionCheck - Optional boolean to disable SDK version checks on startup.
    * @throws {AuthError} When no API key can be resolved.
    */
-  constructor({
-    baseUrl,
-    apiKey,
-    retry = {},
-  }: StellarCardClientOptions = {}) {
+  constructor(options: StellarCardClientOptions = {}) {
+    // Fail fast on malformed options (#700) with every bad field listed.
+    validateClientOptions(options);
+    const {
+      baseUrl,
+      apiKey,
+      retry = {},
+      logger,
+      logLevel,
+      headers,
+      disableVersionCheck: _disableVersionCheck,
+    } = options;
+    this.logger = createLogger({ logger, logLevel });
+    this.timeout = options.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.network = options.network ?? 'mainnet';
+    this.headers = sanitizeHeaders(headers);
+    this.throttle =
+      options.maxRequestsPerSecond !== undefined
+        ? new RequestThrottle({ maxRequestsPerSecond: options.maxRequestsPerSecond })
+        : undefined;
+
     // Resolve api key + base URL in priority order:
     //   1. Explicit constructor args
     //   2. CARDS402_API_KEY / CARDS402_BASE_URL env vars
@@ -302,6 +408,10 @@ export class Stellar_CardClient {
     }
     this.baseUrl = finalBase.replace(/\/$/, '');
     this.apiKey = resolvedKey;
+    this.telemetry = createTelemetryCollector({
+      enabled: isTelemetryEnabled(options.telemetry),
+      endpoint: createTelemetryEndpoint(this.baseUrl),
+    });
     // Audit A-23: default to retry on transient errors so every agent doesn't
     // reimplement its own backoff loop. 2 retries with 500ms base + 5s cap
     // covers brief network blips without punishing a persistent outage.
@@ -309,6 +419,8 @@ export class Stellar_CardClient {
       attempts: retry.attempts ?? 2,
       baseDelayMs: retry.baseDelayMs ?? 500,
       maxDelayMs: retry.maxDelayMs ?? 5000,
+      jitter: retry.jitter ?? 'full',
+      onRetry: retry.onRetry ?? (() => undefined),
     };
   }
 
@@ -325,13 +437,56 @@ export class Stellar_CardClient {
     return status === 429 || status === 503 || status === 504 || status === 502 || status === 0;
   }
 
-  private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
-    const { attempts, baseDelayMs, maxDelayMs } = this.retry;
+  /**
+   * Classify a request for the (optional) client-side throttle queue.
+   * POSTs to the order-creation endpoint submit a payment/transaction
+   * flow and are latency-sensitive, so they jump the queue ahead of
+   * routine GET polling (status/usage/list) when `maxRequestsPerSecond`
+   * is configured. See {@link RequestThrottle}.
+   */
+  private classifyPriority(url: string, init: RequestInit): RequestPriority {
+    const method = (init.method ?? 'GET').toUpperCase();
+    if (method === 'POST' && /\/orders(\?|$)/.test(url)) {
+      return RequestPriority.Critical;
+    }
+    return RequestPriority.Normal;
+  }
+
+  private async fetchWithRetry(
+    url: string,
+    init: RequestInit,
+    { timeout = this.timeout, signal, headers: reqHeaders }: RequestOptions = {},
+    telemetryFeature: TelemetryFeature = 'api_request',
+  ): Promise<Response> {
+    const { attempts, baseDelayMs, maxDelayMs, jitter, onRetry } = this.retry;
+    const operation = `${init.method ?? 'GET'} ${url}`;
     let lastErr: unknown;
+    this.logger.debug(`HTTP ${init.method ?? 'GET'} ${url}`);
+
+    const baseHeaders = (init.headers as Record<string, string>) ?? {};
+    const finalHeaders = mergeHeaders(baseHeaders, this.headers, reqHeaders);
+    const mergedInit: RequestInit = {
+      ...init,
+      headers: finalHeaders,
+    };
+    const priority = this.classifyPriority(url, init);
+
     for (let i = 0; i <= attempts; i++) {
       try {
-        const res = await fetch(url, init);
-        if (res.ok || !this.shouldRetry(res.status) || i === attempts) return res;
+        const doFetch = (s: AbortSignal) => fetch(url, { ...mergedInit, signal: s });
+        const res = await withRequestTimeout(
+          operation,
+          (s) => (this.throttle ? this.throttle.schedule(() => doFetch(s), priority) : doFetch(s)),
+          {
+            timeout,
+            signal,
+          },
+        );
+        if (res.ok || !this.shouldRetry(res.status) || i === attempts) {
+          if (!res.ok) this.telemetry.recordFeatureError(telemetryFeature);
+          this.logger.debug(`HTTP ${res.status} for ${init.method ?? 'GET'} ${url}`);
+          return res;
+        }
         lastErr = new Error(`HTTP ${res.status}`);
         // Enhanced exponential backoff with full jitter and Retry-After header support
         const delayMs = calculateExponentialBackoffDelay({
@@ -339,22 +494,40 @@ export class Stellar_CardClient {
           baseDelayMs,
           maxDelayMs,
           retryAfter: res.headers?.get?.('Retry-After') ?? null,
-          jitter: 'full', // Use full jitter to avoid thundering herd
+          jitter,
           factor: 2, // Standard exponential backoff factor
         });
+        this.logger.info(
+          `Retrying request to ${url} (attempt ${i + 1}/${attempts}) after ${delayMs}ms due to HTTP ${res.status}`,
+          { attempt: i, delayMs, status: res.status },
+        );
+        onRetry(lastErr, i, delayMs);
         await sleep(delayMs);
         continue;
       } catch (err) {
         lastErr = err;
-        if (i === attempts) throw err;
+        // Timeouts and caller aborts are final — never retried.
+        if (err instanceof TimeoutError || err instanceof AbortError) throw err;
+        if (i === attempts) {
+          this.telemetry.recordFeatureError(telemetryFeature);
+          this.logger.error(`HTTP request to ${url} failed after ${attempts} retries`, {
+            error: err,
+          });
+          throw err;
+        }
         // Enhanced exponential backoff for network errors
         const delayMs = calculateExponentialBackoffDelay({
           attempt: i,
           baseDelayMs,
           maxDelayMs,
-          jitter: 'full',
+          jitter,
           factor: 2,
         });
+        this.logger.info(
+          `Retrying request to ${url} (attempt ${i + 1}/${attempts}) after ${delayMs}ms due to network error`,
+          { attempt: i, delayMs, error: err },
+        );
+        onRetry(err, i, delayMs);
         await sleep(delayMs);
       }
     }
@@ -380,19 +553,25 @@ export class Stellar_CardClient {
    * @throws {RateLimitError} When the order-creation rate limit (60/hour) is hit.
    */
   async createOrder(opts: CreateOrderOptions): Promise<OrderResponse> {
-    const { idempotencyKey: providedKey, ...body } = opts;
+    validateCreateOrderInput(opts);
+    const { idempotencyKey: providedKey, timeout, signal, ...body } = opts;
     const idempotencyKey = providedKey ?? crypto.randomUUID();
     // Safe to retry: the Idempotency-Key collapses duplicate creates on the
     // backend, so replaying on a 5xx/timeout can't charge twice.
-    const res = await this.fetchWithRetry(`${this.baseUrl}/orders`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Api-Key': this.apiKey,
-        'Idempotency-Key': idempotencyKey,
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/orders`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Api-Key': this.apiKey,
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+      { timeout, signal },
+      'orders',
+    );
     if (!res.ok) return this.handleError(res);
     return res.json() as Promise<OrderResponse>;
   }
@@ -405,14 +584,17 @@ export class Stellar_CardClient {
    * @throws {ValidationError} When `orderId` fails the UUID-shaped pattern check.
    * @throws {AuthError} When the API key is invalid.
    */
-  async getOrder(orderId: string): Promise<OrderStatus> {
+  async getOrder(orderId: string, reqOpts: RequestOptions = {}): Promise<OrderStatus> {
     // Validate and encode — path param must be a UUID-shaped identifier.
     // The server also validates, but failing here avoids a round-trip
     // on typos and eliminates a path-traversal surface on misuse.
     validateOrderId(orderId);
-    const res = await this.fetchWithRetry(`${this.baseUrl}/orders/${encodeURIComponent(orderId)}`, {
-      headers: { 'X-Api-Key': this.apiKey },
-    });
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/orders/${encodeURIComponent(orderId)}`,
+      { headers: { 'X-Api-Key': this.apiKey } },
+      reqOpts,
+      'orders',
+    );
     if (!res.ok) return this.handleError(res);
     return res.json() as Promise<OrderStatus>;
   }
@@ -422,6 +604,11 @@ export class Stellar_CardClient {
    *
    * Uses SSE first and falls back to HTTP polling if the stream cannot
    * be established or is interrupted by the network path.
+   *
+   * @param orderId - Order UUID to wait for.
+   * @param opts - Options for waiting including timeout and poll interval.
+   * @returns A promise resolving to the card details once ready.
+   * @throws {WaitTimeoutError} When the timeout is reached before the order is ready.
    */
   async waitForCard(
     orderId: string,
@@ -454,7 +641,10 @@ export class Stellar_CardClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${this.baseUrl}/orders/${orderId}/stream`, {
-        headers: { 'X-Api-Key': this.apiKey, Accept: 'text/event-stream' },
+        headers: mergeHeaders(
+          { 'X-Api-Key': this.apiKey, Accept: 'text/event-stream' },
+          this.headers,
+        ),
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -575,6 +765,111 @@ export class Stellar_CardClient {
   }
 
   /**
+   * Poll an order until its card becomes active or reaches a terminal failure state.
+   *
+   * @param orderId - UUID or identifier of the order.
+   * @param options.intervalMs - Polling interval in milliseconds (defaults to 2000).
+   * @param options.timeoutMs - Maximum timeout in milliseconds (defaults to 120000).
+   * @param options.onProgress - Optional callback invoked whenever the order status transitions.
+   * @returns The fulfilled OrderStatus when status reaches ACTIVE.
+   * @throws {OrderFailedError} If the order reaches a terminal failure state.
+   * @throws {TimeoutError} If polling exceeds timeoutMs.
+   */
+  async waitForOrderFulfillment(
+    orderId: string,
+    options: WaitForOrderFulfillmentOptions = {},
+  ): Promise<OrderStatus> {
+    validateOrderId(orderId);
+    const intervalMs = options.intervalMs ?? 2000;
+    const timeoutMs = options.timeoutMs ?? 120_000;
+    const { onProgress, signal } = options;
+
+    if (signal?.aborted) throw new AbortError(`waitForOrderFulfillment ${orderId}`);
+
+    const startTime = Date.now();
+    const deadline = startTime + timeoutMs;
+    let lastState: string | null = null;
+
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new AbortError(`waitForOrderFulfillment ${orderId}`);
+
+      const order = await this.getOrder(orderId, options);
+      const currentStatus = order.status ? order.status.toUpperCase() : '';
+      const currentPhase = order.phase ? order.phase.toLowerCase() : '';
+      const stateKey = `${currentStatus}:${currentPhase}`;
+
+      // Notify onProgress callback on state transition
+      if (stateKey !== lastState) {
+        lastState = stateKey;
+        if (onProgress) {
+          try {
+            onProgress(order);
+          } catch (callbackErr) {
+            this.logger.warn(`onProgress callback threw for order ${orderId}`, {
+              error: callbackErr,
+            });
+          }
+        }
+      }
+
+      // Check if order is fulfilled / active
+      if (currentStatus === 'ACTIVE' || (order.card && currentPhase === 'ready')) {
+        return order;
+      }
+
+      // Check for terminal failure states
+      if (
+        currentStatus === 'FAILED' ||
+        currentStatus === 'REJECTED' ||
+        currentStatus === 'REFUNDED' ||
+        currentPhase === 'failed' ||
+        currentPhase === 'rejected' ||
+        currentPhase === 'refunded'
+      ) {
+        throw new OrderFailedError(
+          orderId,
+          order.error ?? order.status ?? order.phase,
+          order.refund,
+        );
+      }
+
+      if (currentStatus === 'EXPIRED' || currentPhase === 'expired') {
+        throw new OrderFailedError(
+          orderId,
+          order.error ?? 'Payment window expired — no funds were taken',
+          undefined,
+        );
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+
+      const sleepTime = Math.min(intervalMs, remainingMs);
+      await new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(new AbortError(`waitForOrderFulfillment ${orderId}`));
+          return;
+        }
+        let onAbort: (() => void) | undefined;
+        const timer = setTimeout(() => {
+          if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+          resolve();
+        }, sleepTime);
+
+        if (signal) {
+          onAbort = () => {
+            clearTimeout(timer);
+            reject(new AbortError(`waitForOrderFulfillment ${orderId}`));
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+      });
+    }
+
+    throw new TimeoutError(`waitForOrderFulfillment ${orderId}`, timeoutMs);
+  }
+
+  /**
    * List this agent's recent orders.
    *
    * Supports offset/limit pagination plus created/updated time filters
@@ -595,6 +890,8 @@ export class Stellar_CardClient {
     offset,
     since_created_at,
     since_updated_at,
+    timeout,
+    signal,
   }: ListOrdersOptions = {}): Promise<OrderListItem[]> {
     const normalizedLimit = normalizeIntegerOption('limit', limit, 20);
     const normalizedOffset =
@@ -606,9 +903,12 @@ export class Stellar_CardClient {
     if (since_created_at) params.set('since_created_at', since_created_at);
     if (since_updated_at) params.set('since_updated_at', since_updated_at);
     const qs = params.toString() ? `?${params}` : '';
-    const res = await this.fetchWithRetry(`${this.baseUrl}/orders${qs}`, {
-      headers: { 'X-Api-Key': this.apiKey },
-    });
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/orders${qs}`,
+      { headers: { 'X-Api-Key': this.apiKey } },
+      { timeout, signal },
+      'orders',
+    );
     if (!res.ok) return this.handleError(res);
     return res.json() as Promise<OrderListItem[]>;
   }
@@ -666,12 +966,16 @@ export class Stellar_CardClient {
     ...filters
   }: IterateOrdersOptions = {}): AsyncGenerator<OrderListItem, void, void> {
     let remaining =
-      maxItems === undefined ? Number.POSITIVE_INFINITY : normalizeIntegerOption('maxItems', maxItems, 0);
+      maxItems === undefined
+        ? Number.POSITIVE_INFINITY
+        : normalizeIntegerOption('maxItems', maxItems, 0);
     let nextOffset = normalizeIntegerOption('offset', offset, 0);
     const pageSize = normalizeIntegerOption('limit', limit, 20);
 
     while (remaining > 0) {
-      const requestLimit = Number.isFinite(remaining) ? Math.max(1, Math.min(pageSize, remaining)) : pageSize;
+      const requestLimit = Number.isFinite(remaining)
+        ? Math.max(1, Math.min(pageSize, remaining))
+        : pageSize;
       const page = await this.listOrdersPage({
         ...filters,
         limit: requestLimit,
@@ -698,12 +1002,46 @@ export class Stellar_CardClient {
    * @returns Spend summary including budget limits and order counts.
    * @throws {AuthError} When the API key is invalid.
    */
-  async getUsage(): Promise<UsageSummary> {
-    const res = await this.fetchWithRetry(`${this.baseUrl}/usage`, {
-      headers: { 'X-Api-Key': this.apiKey },
-    });
+  async getUsage(reqOpts: RequestOptions = {}): Promise<UsageSummary> {
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/usage`,
+      { headers: { 'X-Api-Key': this.apiKey } },
+      reqOpts,
+    );
     if (!res.ok) return this.handleError(res);
     return res.json() as Promise<UsageSummary>;
+  }
+
+  /**
+   * List recent audit events (API calls, card authorizations, webhook
+   * deliveries) for the dashboard tied to this API key (#731).
+   *
+   * @param opts.action - Filter by action name, e.g. `"order.create"`.
+   * @param opts.limit - Page size. Defaults to 20.
+   * @param opts.since - ISO-8601 lower bound on `timestamp`.
+   * @returns Audit log entries, most recent first.
+   * @throws {AuthError} When the API key is invalid.
+   */
+  async getAuditLogs({
+    action,
+    limit = 20,
+    since,
+    timeout,
+    signal,
+  }: ListAuditLogsOptions = {}): Promise<AuditLogEntry[]> {
+    const normalizedLimit = normalizeIntegerOption('limit', limit, 20);
+    const params = new URLSearchParams();
+    if (action) params.set('action', action);
+    params.set('limit', String(normalizedLimit));
+    if (since) params.set('since', since);
+    const qs = params.toString() ? `?${params}` : '';
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/dashboard/audit${qs}`,
+      { headers: { 'X-Api-Key': this.apiKey } },
+      { timeout, signal },
+    );
+    if (!res.ok) return this.handleError(res);
+    return res.json() as Promise<AuditLogEntry[]>;
   }
 
   /**
@@ -722,20 +1060,58 @@ export class Stellar_CardClient {
     opts: ReportStatusOptions = {},
   ): Promise<void> {
     try {
-      await this.fetchWithRetry(`${this.baseUrl}/agent/status`, {
-        method: 'POST',
-        headers: {
-          'X-Api-Key': this.apiKey,
-          'Content-Type': 'application/json',
+      await this.fetchWithRetry(
+        `${this.baseUrl}/agent/status`,
+        {
+          method: 'POST',
+          headers: {
+            'X-Api-Key': this.apiKey,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            state,
+            wallet_public_key: opts.wallet_public_key,
+            detail: opts.detail,
+          }),
         },
-        body: JSON.stringify({
-          state,
-          wallet_public_key: opts.wallet_public_key,
-          detail: opts.detail,
-        }),
-      });
+        { timeout: opts.timeout, signal: opts.signal },
+      );
     } catch {
       /* best-effort; do not block the caller */
     }
+  }
+
+  /**
+   * Estimate the XLM required to pay for a given USDC order amount before payment,
+   * querying the Stellar Horizon DEX orderbook with configurable slippage.
+   *
+   * @param usdcAmount - Amount in USDC
+   * @param options - Estimation options including slippage buffer and fallback quote fetcher
+   * @returns Estimated stroops, effective exchange rate, and expiration timestamp
+   */
+  async estimateXlmRequired(
+    usdcAmount: string | number,
+    options?: import('./stellar').EstimateXlmOptions,
+  ): Promise<import('./stellar').XlmEstimateResult> {
+    const { estimateXlmRequired } = await import('./stellar');
+    return estimateXlmRequired(usdcAmount, options);
+  }
+
+  /**
+   * Fetch XLM, USDC and every trustline balance for a Stellar account in a
+   * single Horizon call (#701). Unfunded accounts resolve to zero balances.
+   * Results are cached for 3 seconds.
+   *
+   * @param publicKey - Stellar G-address to inspect.
+   */
+  async getAccountBalances(publicKey: string): Promise<AccountBalances> {
+    const { getAccountBalances } = await import('./stellar');
+    const { Networks } = await import('@stellar/stellar-sdk');
+    const passphrase = {
+      mainnet: Networks.PUBLIC,
+      testnet: Networks.TESTNET,
+      futurenet: Networks.FUTURENET,
+    }[this.network];
+    return getAccountBalances(publicKey, passphrase);
   }
 }

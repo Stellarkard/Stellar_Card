@@ -18,7 +18,10 @@ describe('Soroban contract operations', () => {
         type: 'soroban_contract' as const,
         contract_id: 'C' + 'A'.repeat(55),
         order_id: 'ord_123',
-        usdc: { amount: '10.00', asset: 'USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' },
+        usdc: {
+          amount: '10.00',
+          asset: 'USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+        },
       };
       expect(payment.contract_id.length).toBe(56);
       expect(payment.order_id).toMatch(/^ord_/);

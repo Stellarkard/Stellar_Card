@@ -1,5 +1,13 @@
 // Plain text input. Matches the dark surfaces of the rest of the UI.
 // Prefix/suffix slots are optional for currency units, icons, etc.
+//
+// A11y (#136):
+//   - aria-label / aria-labelledby forwarded for inputs without a
+//     visible <label>. Callers should prefer a visible label, but
+//     dashboard search / filter inputs often have placeholder-only UX.
+//   - aria-describedby forwarded for error or hint text associations.
+//   - aria-invalid exposed when the field is in an error state.
+//   - Prefix/suffix icons get aria-hidden so they're not read twice.
 
 import type { CSSProperties, InputHTMLAttributes, ReactNode } from 'react';
 
@@ -9,9 +17,11 @@ interface Props extends Omit<InputHTMLAttributes<HTMLInputElement>, 'prefix'> {
   prefix?: ReactNode;
   suffix?: ReactNode;
   wrapperStyle?: CSSProperties;
-  'aria-label'?: string;
+  /** Associates an external error / hint element with this input. */
   'aria-describedby'?: string;
-  'aria-invalid'?: boolean;
+  /** Marks the field invalid — should be paired with a visible error. */
+  'aria-invalid'?: boolean | 'true' | 'false' | 'grammar' | 'spelling';
+  'aria-label'?: string;
   'aria-required'?: boolean;
 }
 
@@ -19,7 +29,7 @@ export function Input({ prefix, suffix, wrapperStyle, style, ...rest }: Props) {
   const ariaLabel = rest['aria-label'];
   const ariaInvalid = rest['aria-invalid'];
   const ariaRequired = rest['aria-required'];
-  
+
   return (
     <div
       style={{
@@ -36,7 +46,11 @@ export function Input({ prefix, suffix, wrapperStyle, style, ...rest }: Props) {
         ...wrapperStyle,
       }}
     >
-      {prefix && <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>{prefix}</span>}
+      {prefix && (
+        <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>
+          {prefix}
+        </span>
+      )}
       <input
         {...rest}
         aria-label={ariaLabel}
@@ -53,7 +67,11 @@ export function Input({ prefix, suffix, wrapperStyle, style, ...rest }: Props) {
           ...style,
         }}
       />
-      {suffix && <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>{suffix}</span>}
+      {suffix && (
+        <span aria-hidden="true" style={{ color: 'var(--fg-dim)' }}>
+          {suffix}
+        </span>
+      )}
     </div>
   );
 }

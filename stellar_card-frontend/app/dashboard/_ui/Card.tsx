@@ -1,8 +1,16 @@
 // Card — a surface-elevated container. Used for KPI tiles, chart frames,
 // table wrappers, side pane sections. Padding optional so tables can go
 // edge-to-edge inside a card.
+//
+// A11y (#136):
+//   - When a title is present the card renders as a <section> with an
+//     accessible heading so screen readers can navigate by landmark.
+//   - aria-labelledby ties the section to its title text.
+//   - Without a title the card stays a plain <div> to avoid polluting
+//     the landmark list with anonymous regions.
 
 import type { CSSProperties, ReactNode } from 'react';
+import { useId } from 'react';
 
 interface Props {
   children: ReactNode;
@@ -13,18 +21,18 @@ interface Props {
 }
 
 export function Card({ children, padding = '1rem 1.25rem', style, title, actions }: Props) {
+  const headingId = useId();
   const isEdgeToEdge = padding === 0 || padding === '0';
+  const Tag = title ? 'section' : 'div';
   return (
-    <div
+    <Tag
+      aria-labelledby={title ? headingId : undefined}
       className={isEdgeToEdge ? 'dashboard-card dashboard-card-scroll' : 'dashboard-card'}
       style={{
         background: 'var(--surface)',
         border: '1px solid var(--border)',
         borderRadius: 10,
         boxShadow: 'var(--shadow-card)',
-        // Scroll shell for borderless table cards needs overflow-hidden
-        // on the wrapper so the fade mask we paint via CSS stays
-        // clipped inside the rounded corners.
         overflow: isEdgeToEdge ? 'hidden' : undefined,
         ...style,
       }}
@@ -41,6 +49,7 @@ export function Card({ children, padding = '1rem 1.25rem', style, title, actions
           }}
         >
           <div
+            id={headingId}
             style={{
               fontSize: '0.72rem',
               fontWeight: 600,
@@ -57,17 +66,11 @@ export function Card({ children, padding = '1rem 1.25rem', style, title, actions
       <div
         style={{
           padding: typeof padding === 'number' ? `${padding}px` : padding,
-          // When the card hosts a borderless table (padding=0) the inner
-          // div doubles as a horizontal scroll container so the table
-          // can use min-width: 580px on narrow viewports without
-          // overflowing the parent. iOS gets momentum scrolling for
-          // free via -webkit-overflow-scrolling: touch, which webkit
-          // applies automatically when overflow:auto is set.
           overflowX: padding === 0 || padding === '0' ? 'auto' : undefined,
         }}
       >
         {children}
       </div>
-    </div>
+    </Tag>
   );
 }

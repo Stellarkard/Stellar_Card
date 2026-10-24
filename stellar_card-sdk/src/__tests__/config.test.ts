@@ -21,8 +21,12 @@ import {
   saveStellar_CardConfig,
   assertSafeBaseUrl,
   resolveCredentials,
+  validateClientOptions,
+  validateCreateOrderInput,
   type Stellar_CardConfig,
 } from '../config';
+import { ConfigurationError, InvalidAmountError, ValidationError } from '../errors';
+import { Stellar_CardClient } from '../client';
 
 // ── Test harness ─────────────────────────────────────────────────────────────
 // Each test gets its own tmp dir so we can muck with file permissions,
@@ -300,5 +304,82 @@ describe('resolveCredentials', () => {
     const result = resolveCredentials({ apiKey: 'from_opts' });
     expect(result.apiKey).toBe('from_opts');
     expect(result.baseUrl).toMatch(/^https:\/\/env\.stellar_card\.com/);
+  });
+});
+
+// ── Zod config / order validation (#700) ────────────────────────────────────
+
+describe('validateClientOptions', () => {
+  it('accepts a valid configuration', () => {
+    const opts = {
+      apiKey: 'sk_test',
+      baseUrl: 'https://api.example.com/v1',
+      network: 'testnet' as const,
+      rpcUrl: 'https://soroban-testnet.stellar.org',
+      timeout: 5000,
+    };
+    expect(validateClientOptions(opts)).toBe(opts);
+    expect(() => validateClientOptions({})).not.toThrow();
+  });
+
+  it('reports every invalid field in one ConfigurationError', () => {
+    try {
+      validateClientOptions({
+        baseUrl: 'not a url',
+        network: 'moonnet',
+        rpcUrl: 'ftp://rpc.example.com',
+        timeout: -1,
+      });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigurationError);
+      const fields = (err as ConfigurationError).issues.map((i) => i.field).sort();
+      expect(fields).toEqual(['baseUrl', 'network', 'rpcUrl', 'timeout']);
+      expect((err as Error).message).toContain('timeout: must be greater than 0');
+    }
+  });
+
+  it('rejects non-integer and oversized timeouts and non-string api keys', () => {
+    expect(() => validateClientOptions({ timeout: 1.5 })).toThrow(ConfigurationError);
+    expect(() => validateClientOptions({ timeout: 600_001 })).toThrow(ConfigurationError);
+    expect(() => validateClientOptions({ apiKey: 42 })).toThrow(/apiKey: must be a string/);
+  });
+
+  it('is enforced by the client constructor', () => {
+    expect(
+      () => new Stellar_CardClient({ apiKey: 'k', baseUrl: 'https://a.example', timeout: 0 }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it('adds negligible overhead (< 1ms per validation)', () => {
+    const opts = { apiKey: 'k', baseUrl: 'https://a.example', timeout: 1000 };
+    for (let i = 0; i < 50; i++) validateClientOptions(opts); // warm up
+    const runs = 1000;
+    const start = performance.now();
+    for (let i = 0; i < runs; i++) validateClientOptions(opts);
+    expect((performance.now() - start) / runs).toBeLessThan(1);
+  });
+});
+
+describe('validateCreateOrderInput', () => {
+  it('accepts valid order inputs', () => {
+    expect(() =>
+      validateCreateOrderInput({ amount_usdc: '10.50', webhook_url: 'https://hooks.example/x' }),
+    ).not.toThrow();
+  });
+
+  it('rejects zero, negative and malformed amounts with InvalidAmountError', () => {
+    for (const amount_usdc of ['0', '0.00', '-5', 'ten', '1.123456789']) {
+      expect(() => validateCreateOrderInput({ amount_usdc })).toThrow(InvalidAmountError);
+    }
+  });
+
+  it('rejects invalid or insecure callback URLs', () => {
+    expect(() =>
+      validateCreateOrderInput({ amount_usdc: '1', webhook_url: 'http://hooks.example' }),
+    ).toThrow(ValidationError);
+    expect(() => validateCreateOrderInput({ amount_usdc: '1', webhook_url: 'nope' })).toThrow(
+      /webhook_url/,
+    );
   });
 });

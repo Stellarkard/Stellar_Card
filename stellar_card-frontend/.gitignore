@@ -12,6 +12,10 @@
 
 # testing
 /coverage
+/playwright-report
+/test-results
+/blob-report
+/storybook-static
 
 # next.js
 /.next/
@@ -23,6 +27,7 @@
 # misc
 .DS_Store
 *.pem
+Thumbs.db
 
 # debug
 npm-debug.log*
@@ -39,3 +44,20 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# bundle analyzer
+.next/analyze/

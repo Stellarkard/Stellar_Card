@@ -71,9 +71,7 @@ for (const file of files) {
 
 const unpackedKb = (manifest.unpackedSize ?? 0) / 1024;
 if (unpackedKb > MAX_UNPACKED_KB) {
-  errors.push(
-    `unpacked size ${unpackedKb.toFixed(1)} KB exceeds budget of ${MAX_UNPACKED_KB} KB`,
-  );
+  errors.push(`unpacked size ${unpackedKb.toFixed(1)} KB exceeds budget of ${MAX_UNPACKED_KB} KB`);
 }
 
 if (errors.length > 0) {

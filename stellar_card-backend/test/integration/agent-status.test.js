@@ -104,6 +104,45 @@ describe('POST /v1/agent/status', () => {
     assert.equal(res.body.error, 'invalid_wallet_public_key');
   });
 
+  it('accepts a null wallet_public_key as an explicit clear', async () => {
+    // null is PRESENT but distinct from absent: it passes the nullable
+    // wallet check and counts toward "at least one field", so the report
+    // is an update rather than a nothing_to_update.
+    const res = await request
+      .post('/v1/agent/status')
+      .set('X-Api-Key', testKey.key)
+      .send({ wallet_public_key: null });
+    assert.equal(res.status, 200);
+    const row = /** @type {any} */ (
+      db.prepare(`SELECT wallet_public_key FROM api_keys WHERE id = ?`).get(testKey.id)
+    );
+    assert.equal(row.wallet_public_key, null);
+  });
+
+  it('rejects a detail longer than 500 characters', async () => {
+    // The pre-Zod handler silently sliced detail to 500 chars. The shared
+    // boundedString primitive replaces that silent data loss with a loud
+    // 400 so the agent operator knows the report was dropped.
+    const res = await request
+      .post('/v1/agent/status')
+      .set('X-Api-Key', testKey.key)
+      .send({ detail: 'x'.repeat(501) });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_detail');
+    assert.equal(res.body.message, 'detail must be at most 500 characters');
+  });
+
+  it('reports the first invalid field in guard order', async () => {
+    // The sequential guards checked state, then wallet, then detail. A
+    // request wrong in several ways must still surface invalid_state.
+    const res = await request
+      .post('/v1/agent/status')
+      .set('X-Api-Key', testKey.key)
+      .send({ state: 'bogus', wallet_public_key: 7, detail: { n: 1 } });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_state');
+  });
+
   // ── F1-agent-status: event fanout mirrors updated fields ─────────────────
 
   it('event payload only includes fields that were actually provided', async () => {

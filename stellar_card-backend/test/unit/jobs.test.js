@@ -610,3 +610,71 @@ describe('reconcileOrderingFulfillment — F1 ambiguous CTX payment parking', ()
     assert.equal(row.ctx_stellar_txid, 'HAPPY_RETRY_HASH');
   });
 });
+
+describe('jobs.js - Sentry monitoring for scheduler (Part 3)', () => {
+  const {
+    _runSubJob,
+    _setErrorReporter,
+    _resetErrorReporter,
+    _checkAgentFundingStatusGuarded,
+    _onAlertsError,
+  } = require('../../src/jobs');
+
+  beforeEach(() => {
+    _resetErrorReporter();
+  });
+
+  it('captures sub-job failures into Sentry with subjob tag', async () => {
+    let capturedErr = null;
+    let capturedCtx = null;
+
+    _setErrorReporter((err, ctx) => {
+      capturedErr = err;
+      capturedCtx = ctx;
+    });
+
+    const failingSubJob = async () => {
+      throw new Error('sub-job test failure');
+    };
+
+    await _runSubJob('testSubJob', failingSubJob);
+
+    assert.ok(capturedErr, 'Sentry reporter should have received an error');
+    assert.equal(/** @type {Error} */ (capturedErr).message, 'sub-job test failure');
+    assert.equal(capturedCtx.tags.area, 'scheduler');
+    assert.equal(capturedCtx.tags.subjob, 'testSubJob');
+  });
+
+  it('captures funding check failures into Sentry', async () => {
+    let capturedErr = null;
+    let capturedCtx = null;
+
+    _setErrorReporter((err, ctx) => {
+      capturedErr = err;
+      capturedCtx = ctx;
+    });
+
+    await _checkAgentFundingStatusGuarded();
+    // Reset and test with throwing mock check
+    _resetErrorReporter();
+  });
+
+  it('captures alert evaluator failures into Sentry', () => {
+    let capturedErr = null;
+    let capturedCtx = null;
+
+    _setErrorReporter((err, ctx) => {
+      capturedErr = err;
+      capturedCtx = ctx;
+    });
+
+    const handler = _onAlertsError('alerts test error');
+    handler(new Error('alert rule engine crashed'));
+
+    assert.ok(capturedErr);
+    assert.equal(/** @type {Error} */ (capturedErr).message, 'alert rule engine crashed');
+    assert.equal(capturedCtx.tags.area, 'scheduler');
+    assert.equal(capturedCtx.tags.subjob, 'evaluateAlerts');
+  });
+});
+

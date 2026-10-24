@@ -25,7 +25,10 @@ function mockFetch(status: number, body: unknown) {
 }
 
 function client() {
-  return new Stellar_CardClient({ baseUrl: 'http://localhost:3000/v1', apiKey: 'stellar_card_test_key' });
+  return new Stellar_CardClient({
+    baseUrl: 'http://localhost:3000/v1',
+    apiKey: 'stellar_card_test_key',
+  });
 }
 
 const ORDER_RESPONSE = {
@@ -497,6 +500,50 @@ describe('Stellar_CardClient.getUsage', () => {
       const usage = await pending;
       expect(attempts).toBe(2);
       expect(usage.api_key_id).toBe('key_1');
+    } finally {
+      globalThis.fetch = origFetch;
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses configurable exponential delays and reports retries', async () => {
+    vi.useFakeTimers();
+    const origFetch = globalThis.fetch;
+    const onRetry = vi.fn();
+    let attempts = 0;
+    globalThis.fetch = vi.fn(async () => {
+      attempts++;
+      if (attempts < 3) return new Response('', { status: 503 });
+      return new Response(JSON.stringify({ api_key_id: 'key_1' }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const c = new Stellar_CardClient({
+        apiKey: 'stellar_card_test_key',
+        baseUrl: 'http://localhost:3000/v1',
+        retry: {
+          attempts: 2,
+          baseDelayMs: 100,
+          maxDelayMs: 1000,
+          jitter: 'none',
+          onRetry,
+        },
+      });
+      const pending = c.getUsage();
+
+      await vi.advanceTimersByTimeAsync(99);
+      expect(attempts).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(attempts).toBe(2);
+      await vi.advanceTimersByTimeAsync(199);
+      expect(attempts).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toEqual({ api_key_id: 'key_1' });
+
+      expect(onRetry.mock.calls.map((call) => call.slice(1))).toEqual([
+        [0, 100],
+        [1, 200],
+      ]);
     } finally {
       globalThis.fetch = origFetch;
       vi.useRealTimers();

@@ -1,31 +1,20 @@
-// Pill-shaped filter chip used in headers of list/table pages. Optional
-// tone shows a colored dot on the left; `count` lives on the right in
-// mono so totals line up.
-
 import type { ReactNode } from 'react';
-import type { PillTone } from './Pill';
-import { typography } from './tokens';
+import type { Tone } from './tokens';
+import { TONE_VARS, typography } from './tokens';
 
 interface Props {
   active: boolean;
   onClick: () => void;
   count?: number;
-  tone?: PillTone;
+  tone?: Tone;
   children: ReactNode;
 }
-
-const TONE_COLOR: Record<PillTone, string> = {
-  green: 'var(--green)',
-  red: 'var(--red)',
-  yellow: 'var(--yellow)',
-  blue: 'var(--blue)',
-  purple: 'var(--purple)',
-  neutral: 'var(--fg-dim)',
-};
 
 export function FilterChip({ active, onClick, count, tone, children }: Props) {
   return (
     <button
+      type="button"
+      aria-pressed={active}
       onClick={onClick}
       style={{
         display: 'inline-flex',
@@ -49,7 +38,7 @@ export function FilterChip({ active, onClick, count, tone, children }: Props) {
             width: 6,
             height: 6,
             borderRadius: '50%',
-            background: TONE_COLOR[tone],
+            background: TONE_VARS[tone].fg,
             display: 'inline-block',
             flexShrink: 0,
           }}

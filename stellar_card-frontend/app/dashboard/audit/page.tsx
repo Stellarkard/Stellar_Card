@@ -48,7 +48,9 @@ export default function AuditLogPage() {
   }, [toast]);
 
   useEffect(() => {
-    void reload();
+    /* eslint-disable react-hooks/set-state-in-effect -- initial data fetch */
+    reload();
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [reload]);
 
   const filtered = entries?.filter((e) => {

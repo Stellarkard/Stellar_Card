@@ -1,6 +1,18 @@
 // @ts-check
 // Stellar payment helpers — sends USDC or XLM from the treasury wallet.
 // Used for refunds to agents and for paying CTX.com gift card invoices.
+//
+// Every attempt in the submit-retry ladder below emits a structured
+// wallet.transaction.* log line plus a matching wallet.tx_* bizEvent
+// (attempt, success, failed, recovered, unresolved) so ops can trace a
+// payout end-to-end — including the network-error/ambiguous-outcome
+// cases where we don't yet know if the tx landed — without grepping
+// Horizon directly. See submitWithRetry for the full state machine.
+//
+// The retry-ladder length is an ops knob: STELLAR_TX_MAX_ATTEMPTS
+// (default 3, validated 1..10) drives both how many attempts actually
+// run AND the `max_attempts` field every event carries, so the log
+// always reflects the ladder that really executed.
 
 const {
   Horizon,
@@ -77,9 +89,36 @@ const NETWORK_PASSPHRASE = NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TE
 
 const server = new Horizon.Server(HORIZON_URL);
 
+// Resolve the retry-ladder length for submitWithRetry. Default 3; ops can
+// override with STELLAR_TX_MAX_ATTEMPTS. Any value that isn't an integer in
+// [1,10] falls back to 3 — the conservative default — because the ladder
+// length is also a log field: wallet.tx_initiated.max_attempts must always
+// match the ladder that actually ran, and a corrupt value (bogus, 0, >10,
+// fractional) must never silently swap how many Horizon round-trips a payout
+// burns. The FIRST fallback is surfaced loudly via a wallet.transaction.*
+// log line + wallet.tx_config_invalid bizEvent so an ops typo is traceable.
+let walletTxConfigWarned = false;
+function walletTxMaxAttempts() {
+  const raw = process.env.STELLAR_TX_MAX_ATTEMPTS;
+  if (raw === undefined || raw === null || raw === '') return 3;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 1 && n <= 10) return n;
+  if (!walletTxConfigWarned) {
+    walletTxConfigWarned = true;
+    const fields = {
+      raw_value: String(raw),
+      fallback_max_attempts: 3,
+    };
+    log('error', 'wallet.transaction.config_invalid', fields);
+    bizEvent('wallet.tx_config_invalid', fields);
+  }
+  return 3;
+}
+
 // Submit a Stellar transaction with two layers of safety:
 //
-//   1. Retry on tx_bad_seq up to `maxAttempts` times. Concurrent sends that
+//   1. Retry on tx_bad_seq up to `maxAttempts` times (configurable via
+//      STELLAR_TX_MAX_ATTEMPTS, default 3). Concurrent sends that
 //      race on the treasury's sequence number resolve naturally: the losing
 //      submit gets tx_bad_seq, reloads the account, and rebuilds with the
 //      fresh seq. tx_bad_seq is definitive — stellar-core validated the
@@ -111,10 +150,33 @@ const server = new Horizon.Server(HORIZON_URL);
 //
 //      The `stellarStatus` marker lets callers differentiate safe-retry
 //      from must-not-retry without parsing error strings.
-async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
+async function submitWithRetry(buildTx, keypair, maxAttempts = walletTxMaxAttempts()) {
   let lastErr;
+  const publicKey = keypair.publicKey();
+  // Total wall-clock for the whole retry ladder, not per attempt. The gap
+  // between wallet.tx_initiated and its terminal event is the number ops
+  // actually needs when a payout is slow: the per-attempt Horizon round trip
+  // is not what the merchant waits for, the ladder is.
+  const startedAt = Date.now();
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const account = await server.loadAccount(keypair.publicKey());
+    let account;
+    try {
+      account = await server.loadAccount(publicKey);
+    } catch (loadErr) {
+      // Horizon unreachable / account missing: nothing has been signed or
+      // submitted yet. Without this line the whole ladder died with no
+      // wallet.* log at all, so a payout outage looked like silence.
+      const loadFields = {
+        public_key: maskStellarAddress(publicKey),
+        attempt,
+        max_attempts: maxAttempts,
+        elapsed_ms: Date.now() - startedAt,
+        error: loadErr instanceof Error ? loadErr.message : String(loadErr),
+      };
+      log('error', 'wallet.transaction.load_account_failed', loadFields);
+      bizEvent('wallet.tx_load_failed', loadFields);
+      throw loadErr;
+    }
     const tx = buildTx(account);
     tx.sign(keypair);
     // Compute the envelope hash BEFORE submission so we can look it up on
@@ -122,13 +184,66 @@ async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
     // Buffer; Horizon's /transactions/{hash} endpoint takes hex.
     const hashHex = tx.hash().toString('hex');
 
+    log('info', 'wallet.transaction.attempt', {
+      public_key: maskStellarAddress(publicKey),
+      tx_hash: hashHex,
+      attempt,
+      max_attempts: maxAttempts,
+      elapsed_ms: Date.now() - startedAt,
+    });
+    bizEvent('wallet.tx_initiated', {
+      public_key: maskStellarAddress(publicKey),
+      tx_hash: hashHex,
+      attempt,
+      max_attempts: maxAttempts,
+      elapsed_ms: Date.now() - startedAt,
+    });
+
     try {
       const result = await server.submitTransaction(tx);
-      return result.hash;
+      const finalHash = result.hash || hashHex;
+      log('info', 'wallet.transaction.success', {
+        public_key: maskStellarAddress(publicKey),
+        tx_hash: finalHash,
+        attempt,
+        elapsed_ms: Date.now() - startedAt,
+      });
+      bizEvent('wallet.tx_success', {
+        public_key: maskStellarAddress(publicKey),
+        tx_hash: finalHash,
+        attempt,
+        elapsed_ms: Date.now() - startedAt,
+      });
+      return finalHash;
     } catch (err) {
       lastErr = err;
       const resultCodes = err?.response?.data?.extras?.result_codes;
       const txCode = resultCodes?.transaction;
+      // Distinguishes "the first submit was rejected" from "we spent the
+      // whole ladder and still failed". Without it, a tx_bad_seq that clears
+      // on the 2nd attempt and one that survives all 3 look identical apart
+      // from the attempt number, and an alert on wallet.tx_failed cannot tell
+      // a transient from a stuck sequence number.
+      const retriesExhausted = attempt >= maxAttempts;
+
+      log('error', 'wallet.transaction.failed', {
+        public_key: maskStellarAddress(publicKey),
+        tx_hash: hashHex,
+        attempt,
+        retries_exhausted: retriesExhausted,
+        elapsed_ms: Date.now() - startedAt,
+        error: err instanceof Error ? err.message : String(err),
+        tx_code: txCode || null,
+      });
+      bizEvent('wallet.tx_failed', {
+        public_key: maskStellarAddress(publicKey),
+        tx_hash: hashHex,
+        attempt,
+        retries_exhausted: retriesExhausted,
+        elapsed_ms: Date.now() - startedAt,
+        error: err instanceof Error ? err.message : String(err),
+        tx_code: txCode || null,
+      });
 
       // tx_bad_seq: definitive rejection; safe to reload + retry.
       if (txCode === 'tx_bad_seq' && attempt < maxAttempts) {
@@ -144,8 +259,36 @@ async function submitWithRetry(buildTx, keypair, maxAttempts = 3) {
       const resolution = await resolveNetworkErrorOutcome(hashHex);
       if (resolution.landed) {
         // The tx did make it to a ledger during the lost-response window.
+        log('info', 'wallet.transaction.recovered', {
+          public_key: maskStellarAddress(publicKey),
+          tx_hash: hashHex,
+          attempt,
+          elapsed_ms: Date.now() - startedAt,
+        });
+        bizEvent('wallet.tx_recovered', {
+          public_key: maskStellarAddress(publicKey),
+          tx_hash: hashHex,
+          attempt,
+          elapsed_ms: Date.now() - startedAt,
+        });
         return hashHex;
       }
+      // Terminal verdict for a lost response. wallet.transaction.failed above
+      // was logged before we knew whether the tx landed; this records the
+      // resolved outcome, and whether a retry is safe (only when Horizon
+      // confirmed the tx never landed; 'unknown' must NOT be auto-retried).
+      const unresolvedFields = {
+        public_key: maskStellarAddress(publicKey),
+        tx_hash: hashHex,
+        attempt,
+        elapsed_ms: Date.now() - startedAt,
+        stellar_status: resolution.reason,
+        retry_safe: resolution.reason === 'not_landed',
+        result_code: resolution.resultCode ?? null,
+        lookup_error: resolution.lookupError ?? null,
+      };
+      log('error', 'wallet.transaction.unresolved', unresolvedFields);
+      bizEvent('wallet.tx_unresolved', unresolvedFields);
       // Re-throw with a clearer message and a machine-readable marker so
       // the caller can decide whether a retry is safe.
       throw annotateSubmitError(err, hashHex, resolution);

@@ -140,11 +140,73 @@ function seal(plaintext) {
     }
     return plaintext;
   }
+  const data = Buffer.from(plaintext, 'utf8');
+  try {
+    return sealBytes(data, key);
+  } finally {
+    // #595: wipe the transient plaintext and key copies. The caller's
+    // JS string is immutable and can't be wiped — callers holding raw
+    // card secrets should prefer sealBuffer() with a Buffer they own.
+    zeroize(data);
+    zeroize(key);
+  }
+}
+
+/**
+ * Overwrite a Buffer / typed array with zeros in place (#595).
+ * No-op for null/undefined; returns the same buffer for chaining.
+ * @template {Uint8Array | null | undefined} T
+ * @param {T} buf
+ * @returns {T}
+ */
+function zeroize(buf) {
+  if (buf && typeof buf.fill === 'function') buf.fill(0);
+  return buf;
+}
+
+/**
+ * Encrypt raw bytes with AES-256-GCM (12-byte random IV, 16-byte tag)
+ * into the "enc:<iv>:<tag>:<ct>" format. Intermediate ciphertext
+ * buffers are hex-encoded and then wiped.
+ * @param {Buffer} data
+ * @param {Buffer} key
+ */
+function sealBytes(data, key) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
-  const ct = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const ct = Buffer.concat([cipher.update(data), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return `enc:${iv.toString('hex')}:${tag.toString('hex')}:${ct.toString('hex')}`;
+  try {
+    return `enc:${iv.toString('hex')}:${tag.toString('hex')}:${ct.toString('hex')}`;
+  } finally {
+    zeroize(ct);
+  }
+}
+
+/**
+ * Seal secret bytes the caller owns (#595). Unlike seal(), the input
+ * never becomes a JS string. With `{ wipe: true }` the input buffer is
+ * zeroized after encryption (and on failure), so the caller doesn't
+ * have to remember to.
+ *
+ * Same key rules as seal(): throws in production without a key; in
+ * dev/test without a key returns the plaintext as a UTF-8 string.
+ * @param {Buffer} data
+ * @param {{ wipe?: boolean }} [opts]
+ */
+function sealBuffer(data, opts = {}) {
+  if (!Buffer.isBuffer(data)) throw new Error('sealBuffer: data must be a Buffer');
+  try {
+    const key = getKey();
+    if (!key) return seal(data.toString('utf8'));
+    try {
+      return sealBytes(data, key);
+    } finally {
+      zeroize(key);
+    }
+  } finally {
+    if (opts.wipe) zeroize(data);
+  }
 }
 
 /**
@@ -159,6 +221,66 @@ function seal(plaintext) {
 function open(stored) {
   if (typeof stored !== 'string') throw new Error('open: stored must be a string');
   if (!stored.startsWith('enc:')) return stored;
+  const { key, ivHex, tagHex, ctHex } = parseSealed(stored);
+  const plain = decryptBytes(key, ivHex, tagHex, ctHex);
+  try {
+    return plain.toString('utf8');
+  } finally {
+    // #595: wipe the decrypted bytes and the key copy.
+    zeroize(plain);
+  }
+}
+
+/**
+ * AES-256-GCM decrypt to a Buffer. Always wipes the key and the
+ * ciphertext copy; the returned plaintext buffer is the caller's to
+ * wipe. Throws on a bad auth tag (tamper / wrong key).
+ * @param {Buffer} key
+ * @param {string} ivHex
+ * @param {string} tagHex
+ * @param {string} ctHex
+ */
+function decryptBytes(key, ivHex, tagHex, ctHex) {
+  const ct = Buffer.from(ctHex, 'hex');
+  try {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'), {
+      authTagLength: 16,
+    });
+    decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+    const head = decipher.update(ct);
+    const tail = decipher.final();
+    const out = Buffer.concat([head, tail]);
+    zeroize(head);
+    zeroize(tail);
+    return out;
+  } finally {
+    zeroize(ct);
+    zeroize(key);
+  }
+}
+
+/**
+ * Open a sealed secret straight into a Buffer the caller owns (#595),
+ * so the plaintext never becomes an immutable JS string. The caller
+ * MUST zeroize() it when done (card-vault's withOpenedCard does this
+ * automatically). Unsealed legacy values are returned as a Buffer copy.
+ * @param {string} stored
+ * @returns {Buffer}
+ */
+function openToBuffer(stored) {
+  if (typeof stored !== 'string') throw new Error('openToBuffer: stored must be a string');
+  if (!stored.startsWith('enc:')) return Buffer.from(stored, 'utf8');
+  const { key, ivHex, tagHex, ctHex } = parseSealed(stored);
+  return decryptBytes(key, ivHex, tagHex, ctHex);
+}
+
+
+/**
+ * Validate a sealed blob's shape and load the key. Shared by open() and
+ * openToBuffer() so both enforce the same IV / tag length rules.
+ * @param {string} stored
+ */
+function parseSealed(stored) {
   const key = getKey();
   if (!key) {
     throw new Error(
@@ -200,16 +322,14 @@ function open(stored) {
       `secret-box: malformed sealed blob (auth tag is ${tagHex.length / 2} bytes, expected 16)`,
     );
   }
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'), {
-    authTagLength: 16,
-  });
-  decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
-  return decipher.update(Buffer.from(ctHex, 'hex'), undefined, 'utf8') + decipher.final('utf8');
+  return { key, ivHex, tagHex, ctHex };
 }
 
 /** True if a box key is configured (so callers can refuse to seal plaintext in prod). */
 function hasKey() {
-  return getKey() !== null;
+  const key = getKey();
+  zeroize(key);
+  return key !== null;
 }
 
-module.exports = { seal, open, hasKey };
+module.exports = { seal, open, hasKey, sealBuffer, openToBuffer, zeroize };

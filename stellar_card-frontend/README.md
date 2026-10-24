@@ -5,19 +5,49 @@ Next.js 16 app for [stellar_card.com](https://stellar_card.com). Marketing site,
 ## Development
 
 ```bash
-npm run dev -w web        # start dev server on :3000
-npm run build -w web      # production build
-npm run typecheck -w web  # TypeScript check
-npm run lint              # ESLint (run from monorepo root)
+# Start local dev server on :3000
+npm run dev
+
+# Production build
+npm run build
+
+# TypeScript typecheck
+npm run typecheck
+
+# ESLint check
+npm run lint
+
+# Start Storybook component environment (:6006)
+npm run storybook
+```
+
+## Testing & Cross-Browser QA
+
+```bash
+# Run unit & component tests (Vitest)
+npm test
+
+# Run Playwright E2E cross-browser tests (Chromium, Firefox, WebKit, Mobile Chrome, Mobile Safari)
+npm run test:e2e
+
+# Run Playwright accessibility audit
+npm run test:a11y
 ```
 
 ## Environment variables
 
-| Variable                   | Required        | Description                                           |
-| -------------------------- | --------------- | ----------------------------------------------------- |
+| Variable | Required | Description |
+| --- | --- | --- |
 | `NEXT_PUBLIC_API_BASE_URL` | Production only | Backend API base URL, e.g. `https://api.stellar_card.com` |
 
 In development the dashboard defaults to `http://localhost:4000` for its API base.
+
+## Docker Container
+
+```bash
+# Run frontend via Docker Compose from repository root
+docker compose up frontend
+```
 
 ## Structure
 
@@ -33,6 +63,8 @@ app/
   globals.css          Global styles + brand CSS variables
   layout.tsx           Root layout: fonts, metadata template, JSON-LD
   sitemap.ts robots.ts manifest.ts opengraph-image.tsx
+e2e/                   Playwright E2E & cross-browser test suite
+.storybook/            Storybook setup & accessibility addons
 public/
   skill.md             Agent-facing setup guide
   llms.txt             Machine-readable service index
@@ -44,3 +76,5 @@ public/
 - Uses `next/font/google` for Fraunces (display), IBM Plex Sans (body), and IBM Plex Mono (data). The build downloads font files from Google Fonts at build time — ensure outbound HTTPS access is available in your build environment.
 - The dashboard authenticates via email OTP (6-digit code), session cookie is `sameSite: strict`. The marketing surface is fully public.
 - Next.js 16 file conventions are in force: middleware lives in `proxy.ts` at the web root (the old `middleware.ts` name is deprecated and logs a migration notice in the dev server).
+- Includes comprehensive cross-browser test coverage across Chromium, Firefox, WebKit, Mobile Chrome, and Mobile Safari.
+- Theme tokens and wallet connection states are documented in `STATE_SYSTEM_GUIDE.md` and accessible via Storybook.

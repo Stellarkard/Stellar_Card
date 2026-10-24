@@ -67,10 +67,7 @@ describe('withRetry', () => {
   it('retries when isRetryable returns true and stops when it returns false', async () => {
     const retryableErr = new Error('transient');
     const fatalErr = new Error('fatal');
-    const fn = vi
-      .fn()
-      .mockRejectedValueOnce(retryableErr)
-      .mockRejectedValueOnce(fatalErr);
+    const fn = vi.fn().mockRejectedValueOnce(retryableErr).mockRejectedValueOnce(fatalErr);
     const isRetryable = vi.fn((err: unknown) => err === retryableErr);
 
     const promise = withRetry({ fn, maxRetries: 3, baseDelayMs: 10, maxDelayMs: 50, isRetryable });

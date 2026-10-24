@@ -36,10 +36,10 @@ export default function SettingsPage() {
   const toast = useToast();
 
   // Theme preference
-  const [theme, setTheme] = useState<Theme>('dark');
-  useEffect(() => {
-    setTheme(loadTheme());
-  }, []);
+  const [theme, setTheme] = useState<Theme>(() => {
+    if (typeof window !== 'undefined') return loadTheme();
+    return 'dark';
+  });
 
   function pickTheme(next: Theme) {
     setTheme(next);
@@ -49,11 +49,11 @@ export default function SettingsPage() {
   }
 
   // Density preference
-  const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable');
-  useEffect(() => {
+  const [density, setDensity] = useState<'comfortable' | 'compact'>(() => {
+    if (typeof window === 'undefined') return 'comfortable';
     const stored = window.localStorage.getItem(DENSITY_KEY);
-    if (stored === 'compact' || stored === 'comfortable') setDensity(stored);
-  }, []);
+    return stored === 'compact' || stored === 'comfortable' ? stored : 'comfortable';
+  });
 
   function pickDensity(next: 'comfortable' | 'compact') {
     setDensity(next);
@@ -62,15 +62,15 @@ export default function SettingsPage() {
   }
 
   // Notification preferences
-  const [notifs, setNotifs] = useState<NotifPrefs>(DEFAULT_NOTIF);
-  useEffect(() => {
+  const [notifs, setNotifs] = useState<NotifPrefs>(() => {
     try {
-      const raw = window.localStorage.getItem(NOTIF_PREF_KEY);
-      if (raw) setNotifs({ ...DEFAULT_NOTIF, ...JSON.parse(raw) });
+      const raw = typeof window !== 'undefined' ? window.localStorage.getItem(NOTIF_PREF_KEY) : null;
+      if (raw) return { ...DEFAULT_NOTIF, ...JSON.parse(raw) };
     } catch {
       /* noop */
     }
-  }, []);
+    return DEFAULT_NOTIF;
+  });
 
   function updateNotif(key: keyof NotifPrefs, value: boolean) {
     const next = { ...notifs, [key]: value };
@@ -362,7 +362,7 @@ function PlatformTreasuryCard() {
         }}
       >
         The Stellar_Card treasury wallet on Stellar. Top this up with XLM or USDC when fulfillment runs
-        low — it's what funds CTX payments and refunds. Only visible to the platform owner.
+        low — it&apos;s what funds CTX payments and refunds. Only visible to the platform owner.
       </div>
       {error && (
         <div

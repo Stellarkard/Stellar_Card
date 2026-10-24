@@ -464,3 +464,173 @@ describe('card-vault — F3 whitespace-only rejection', () => {
     assert.equal(sealed.expiry, '12 / 27');
   });
 });
+
+// ── #595: masking, CVV-at-rest guard and buffer zeroization ─────────────────
+
+describe('card-vault — #595 maskCardNumber', () => {
+  const { maskCardNumber } = require('../../src/lib/card-vault');
+
+  it('masks all but the last four digits in fixed ****-****-****-NNNN groups', () => {
+    assert.equal(maskCardNumber('4111111111111234'), '****-****-****-1234');
+    assert.equal(maskCardNumber('4111 1111 1111 1234'), '****-****-****-1234');
+    assert.equal(maskCardNumber('4111-1111-1111-1234'), '****-****-****-1234');
+  });
+
+  it('does not reveal PAN length (15-digit AmEx uses the same shape)', () => {
+    assert.equal(maskCardNumber('378282246310005'), '****-****-****-0005');
+  });
+
+  it('never echoes invalid or untrusted input', () => {
+    for (const bad of ['12', '4111abcd11111111', '', '   ', null, undefined, 4111111111111234, {}]) {
+      assert.equal(maskCardNumber(bad), '****-****-****-****');
+    }
+  });
+});
+
+describe('card-vault — #595 raw CVV is never persisted', () => {
+  it('seals CVV to AES-256-GCM ciphertext that does not contain the raw value', () => {
+    const previousKey = process.env.CARDS402_SECRET_BOX_KEY;
+    process.env.CARDS402_SECRET_BOX_KEY = crypto.randomBytes(32).toString('hex');
+    try {
+      const { sealCard } = require('../../src/lib/card-vault');
+      const sealed = sealCard({ number: '4111111111111234', cvv: '987', expiry: '12/28', brand: 'Visa' });
+      assert.match(sealed.cvv, /^enc:[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]+$/);
+      assert.ok(!sealed.cvv.includes('987'));
+    } finally {
+      if (previousKey === undefined) delete process.env.CARDS402_SECRET_BOX_KEY;
+      else process.env.CARDS402_SECRET_BOX_KEY = previousKey;
+    }
+  });
+
+  it('refuses to return plaintext CVV when a key is set but sealing is bypassed', () => {
+    const previousKey = process.env.CARDS402_SECRET_BOX_KEY;
+    process.env.CARDS402_SECRET_BOX_KEY = crypto.randomBytes(32).toString('hex');
+    const secretBox = require('../../src/lib/secret-box');
+    const originalSeal = secretBox.seal;
+    // Simulate a secret-box regression that returns its input unsealed.
+    const vaultPath = require.resolve('../../src/lib/card-vault');
+    delete require.cache[vaultPath];
+    secretBox.seal = (/** @type {string} */ v) => v;
+    try {
+      const { sealCard } = require('../../src/lib/card-vault');
+      assert.throws(
+        () => sealCard({ number: null, cvv: '987', expiry: null, brand: 'Visa' }),
+        /refusing to persist CVV that is not sealed ciphertext/,
+      );
+    } finally {
+      secretBox.seal = originalSeal;
+      delete require.cache[vaultPath];
+      if (previousKey === undefined) delete process.env.CARDS402_SECRET_BOX_KEY;
+      else process.env.CARDS402_SECRET_BOX_KEY = previousKey;
+    }
+  });
+});
+
+describe('card-vault — #595 withOpenedCard zeroizes decrypted buffers', () => {
+  it('decrypts to Buffers for the callback, then zero-fills every buffer', async () => {
+    const previousKey = process.env.CARDS402_SECRET_BOX_KEY;
+    process.env.CARDS402_SECRET_BOX_KEY = crypto.randomBytes(32).toString('hex');
+    try {
+      const { sealCard, withOpenedCard } = require('../../src/lib/card-vault');
+      const sealed = sealCard({ number: '4111111111111234', cvv: '123', expiry: '12/28', brand: 'Visa' });
+
+      /** @type {any} */
+      let held;
+      const seen = await withOpenedCard(
+        { card_number: sealed.number, card_cvv: sealed.cvv, card_expiry: sealed.expiry, card_brand: 'Visa' },
+        (card) => {
+          held = card;
+          return {
+            number: card.number?.toString('utf8'),
+            cvv: card.cvv?.toString('utf8'),
+            expiry: card.expiry?.toString('utf8'),
+            brand: card.brand,
+          };
+        },
+      );
+
+      assert.deepEqual(seen, { number: '4111111111111234', cvv: '123', expiry: '12/28', brand: 'Visa' });
+      for (const field of ['number', 'cvv', 'expiry']) {
+        assert.ok(Buffer.isBuffer(held[field]));
+        assert.ok(held[field].every((/** @type {number} */ b) => b === 0), `${field} buffer was not zeroized`);
+      }
+    } finally {
+      if (previousKey === undefined) delete process.env.CARDS402_SECRET_BOX_KEY;
+      else process.env.CARDS402_SECRET_BOX_KEY = previousKey;
+    }
+  });
+
+  it('still zeroizes when the callback throws', async () => {
+    const previousKey = process.env.CARDS402_SECRET_BOX_KEY;
+    process.env.CARDS402_SECRET_BOX_KEY = crypto.randomBytes(32).toString('hex');
+    try {
+      const { sealCard, withOpenedCard } = require('../../src/lib/card-vault');
+      const sealed = sealCard({ number: '4111111111111234', cvv: '123', expiry: null, brand: 'Visa' });
+      /** @type {any} */
+      let held;
+      await assert.rejects(
+        withOpenedCard({ card_number: sealed.number, card_cvv: sealed.cvv }, (card) => {
+          held = card;
+          throw new Error('processor down');
+        }),
+        /processor down/,
+      );
+      assert.ok(held.cvv.every((/** @type {number} */ b) => b === 0));
+      assert.ok(held.number.every((/** @type {number} */ b) => b === 0));
+      assert.equal(held.expiry, null);
+    } finally {
+      if (previousKey === undefined) delete process.env.CARDS402_SECRET_BOX_KEY;
+      else process.env.CARDS402_SECRET_BOX_KEY = previousKey;
+    }
+  });
+
+  it('rejects a tampered field with a field-labelled error', async () => {
+    const previousKey = process.env.CARDS402_SECRET_BOX_KEY;
+    process.env.CARDS402_SECRET_BOX_KEY = crypto.randomBytes(32).toString('hex');
+    try {
+      const { sealCard, withOpenedCard } = require('../../src/lib/card-vault');
+      const sealed = sealCard({ number: null, cvv: '123', expiry: null, brand: null });
+      const tampered = sealed.cvv.slice(0, -2) + (sealed.cvv.endsWith('00') ? 'ff' : '00');
+      await assert.rejects(
+        withOpenedCard({ card_cvv: tampered }, () => 'unreachable'),
+        /card-vault: failed to open card_cvv/,
+      );
+    } finally {
+      if (previousKey === undefined) delete process.env.CARDS402_SECRET_BOX_KEY;
+      else process.env.CARDS402_SECRET_BOX_KEY = previousKey;
+    }
+  });
+});
+
+describe('secret-box — #595 buffer zeroization', () => {
+  it('sealBuffer({ wipe: true }) zero-fills the input after encrypting, and it round-trips', () => {
+    const previousKey = process.env.CARDS402_SECRET_BOX_KEY;
+    process.env.CARDS402_SECRET_BOX_KEY = crypto.randomBytes(32).toString('hex');
+    try {
+      const { sealBuffer, open } = require('../../src/lib/secret-box');
+      const secret = Buffer.from('4111111111111234', 'utf8');
+      const sealed = sealBuffer(secret, { wipe: true });
+      assert.ok(secret.every((b) => b === 0));
+      assert.equal(open(sealed), '4111111111111234');
+    } finally {
+      if (previousKey === undefined) delete process.env.CARDS402_SECRET_BOX_KEY;
+      else process.env.CARDS402_SECRET_BOX_KEY = previousKey;
+    }
+  });
+
+  it('openToBuffer returns a caller-owned Buffer that zeroize() clears', () => {
+    const previousKey = process.env.CARDS402_SECRET_BOX_KEY;
+    process.env.CARDS402_SECRET_BOX_KEY = crypto.randomBytes(32).toString('hex');
+    try {
+      const { seal, openToBuffer, zeroize } = require('../../src/lib/secret-box');
+      const buf = openToBuffer(seal('123'));
+      assert.equal(buf.toString('utf8'), '123');
+      zeroize(buf);
+      assert.ok(buf.every((b) => b === 0));
+      assert.equal(zeroize(null), null);
+    } finally {
+      if (previousKey === undefined) delete process.env.CARDS402_SECRET_BOX_KEY;
+      else process.env.CARDS402_SECRET_BOX_KEY = previousKey;
+    }
+  });
+});

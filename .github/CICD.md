@@ -23,6 +23,12 @@ Jobs:
 
 - **type-matrix**: Tests TypeScript compatibility with multiple versions (5.0 - 5.3)
 
+### 1a. E2E Tests (`e2e.yml`)
+
+Runs the Playwright suite in `stellar_card-frontend/e2e/` across a CI matrix covering `chromium`, `firefox`, `webkit`, `Mobile Chrome`, and `Mobile Safari` — mirroring every project defined in `playwright.config.ts` except `Microsoft Edge`, which needs a system-installed Edge browser that isn't available on the `ubuntu-latest` runner image and is left as a local-only / self-hosted-runner project.
+
+`Mobile Chrome` and `Mobile Safari` are device-emulation presets, not separate browser engines — they render on `chromium` and `webkit` respectively, so the workflow resolves each matrix entry to its underlying engine before installing or caching browser binaries.
+
 ### 2. Security Audit (`security.yml`)
 
 Runs:
@@ -155,6 +161,22 @@ Add to README:
 1. Enable Dependabot in repo settings
 2. Check `.github/dependabot.yml` syntax
 3. Verify package manager is detected (run actions manually)
+
+## Caching Strategy
+
+All workflows cache dependencies and build artifacts to keep CI fast:
+
+| Workflow | Cache | Key basis |
+|----------|-------|-----------|
+| `test.yml`, `a11y.yml` | npm store + Node modules (via `.github/actions/setup-node`) | OS, Node version, `package-lock.json` hash |
+| `test.yml` | TypeScript `.tsbuildinfo` | OS, Node version, `src/**` + `tsconfig*.json` hash |
+| `e2e.yml`, `a11y.yml` | Playwright browser binaries (`~/.cache/ms-playwright`) | OS, installed `@playwright/test` version, matrix project |
+| `sdk-validate.yml`, `publish.yml`, `release.yml` | npm store (via `actions/setup-node@v4` `cache: npm`) | `package-lock.json` hash |
+| `security.yml` | npm store (via `actions/setup-node@v4` `cache: npm`) | `package-lock.json` hash per audited directory |
+
+Playwright caches are keyed per browser project so each matrix job (`chromium`, `firefox`, `webkit`) only restores its own binaries — a cache hit still runs `playwright install-deps` to pull OS-level shared libraries, which don't persist inside the cached path.
+
+Use the reusable `.github/actions/setup-node` composite action for any new workflow that runs `npm ci` — it wires up both the npm store cache and `actions/setup-node`'s built-in lockfile cache with a consistent key format.
 
 ## Best Practices
 

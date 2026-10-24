@@ -14,29 +14,43 @@ Soroban smart contract that receives USDC payments from AI agents and emits `pay
 ### 1. Install toolchain
 
 ```bash
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 cargo install --locked stellar-cli
 ```
 
-### 2. Build
+### 2. Build and optimise
 
 ```bash
-cargo build --target wasm32-unknown-unknown --release
+make build
 ```
 
-### 3. Optimise
+This compiles for `wasm32v1-none`, runs `stellar contract optimize` (or
+binaryen's `wasm-opt` if the CLI's optimizer isn't available) to produce
+`target/wasm32v1-none/release/stellar_card_receiver.optimized.wasm`, and fails
+if either binary exceeds its size budget. The equivalent manual steps:
 
 ```bash
-stellar contract optimize --wasm target/wasm32-unknown-unknown/release/stellar_card_receiver.wasm
+cargo build --target wasm32v1-none --release
+stellar contract optimize --wasm target/wasm32v1-none/release/stellar_card_receiver.wasm
 ```
 
-This produces `stellar_card_receiver.optimized.wasm`.
+Use `wasm32v1-none`, not `wasm32-unknown-unknown`: on Rust 1.82+ the latter
+emits reference-types / multi-value WASM that Soroban rejects.
+
+### 3. Binary size
+
+The optimizer pass takes the contract from ~46 KB to ~37 KB (Soroban's hard
+limit is 64 KiB). `make wasm-size` checks both binaries against the budgets in
+the Makefile (`WASM_SIZE_BUDGET_BYTES`, `OPTIMIZED_WASM_SIZE_BUDGET_BYTES`), and
+`test_wasm_within_size_budget` asserts the raw budget on every `cargo test`.
+When a change legitimately needs more room, raise both budgets together, with
+the new measured size in the Makefile comment.
 
 ### 4. Deploy to testnet
 
 ```bash
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/stellar_card_receiver.optimized.wasm \
+  --wasm target/wasm32v1-none/release/stellar_card_receiver.optimized.wasm \
   --source <YOUR_SECRET_KEY> \
   --network testnet
 ```
@@ -49,7 +63,7 @@ The command prints the deployed contract ID (C...). Save it as `RECEIVER_CONTRAC
 
 ```bash
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/stellar_card_receiver.optimized.wasm \
+  --wasm target/wasm32v1-none/release/stellar_card_receiver.optimized.wasm \
   --source <YOUR_SECRET_KEY> \
   --network mainnet
 ```
@@ -61,10 +75,7 @@ asset contract addresses and requires the admin signature. Calling `init` a
 second time panics with `already initialized`.
 
 The contract retains an `upgrade(new_wasm_hash)` entrypoint gated by
-`admin.require_auth()` — the admin key can swap the contract's WASM in the
-future. There is no pause function; if you want a fully immutable deployment,
-transfer the admin key to a burn address after `init` (or fork the contract
-with `upgrade` removed).
+`admin.require_auth()` and supports pausing payments during an incident.
 
 Contract IDs on Stellar mainnet:
 
@@ -111,3 +122,85 @@ Each successful payment emits one Soroban event. The `topic[0]` symbol identifie
 | `value`    | `i128`    | Amount in stroops (1 XLM = 10,000,000) |
 
 The backend event watcher filters on both `pay_usdc` and `pay_xlm` symbols.
+
+Administrative state changes emit `init`, `paused`, `unpaused`, `upgraded`,
+`tokens_rescued`, `withdraw_limits_set`, `admin_transferred`, `role_granted`,
+`role_revoked`, and `role_renounced` events. Idempotent operations
+(re-pausing, re-granting a role an address already holds, revoking or
+renouncing a role that isn't held) do not emit events when no state changed,
+so every event is a real state transition. The full topic/data layout of each
+event is documented at the top of `src/lib.rs`.
+
+## Access control & storage
+
+- `pause` needs the `Operator` role or higher; `rescue_tokens` and
+  `set_withdraw_limits` need `Admin`. The stored admin (`admin()`) always
+  qualifies, even after renouncing its own role entry.
+- `transfer_admin` moves the `Admin` role along with the admin address, so the
+  outgoing admin can no longer use role-gated entrypoints (it also emits
+  `role_revoked` / `role_granted` before `admin_transferred`).
+- Instance storage, which every call loads, stays bounded: `Paused` is only
+  stored while paused, the `rescue_tokens` daily total is a single reused
+  slot, and the reentrancy guard entry is removed after each call. The full
+  storage layout is documented at the top of `src/lib.rs`.
+
+## Testing & Verification
+
+```bash
+# Build the WASM fixture and run contract unit tests
+make test
+
+# Run only the in-process integration suite (tests/integration.rs):
+# full multi-step flows through the public client, no Docker needed
+make contract-integration-test
+
+# Run the end-to-end suite against a local Quickstart network
+# Requires Docker and Stellar CLI
+make integration-test
+
+# Syntax-check (and shellcheck, if installed) every script in scripts/
+make integration-test-lint
+
+# Format contract source files
+cargo fmt --check
+```
+
+### Integration tests
+
+There are two integration layers (Issue #400 - Part 2):
+
+- **`tests/integration.rs`** runs in-process with `cargo test` (so it is part
+  of `make test`). It drives the contract only through its public client, the
+  way a wallet or the backend would, across full flows: payments, incident
+  pause/resume, admin handover, role lifecycle, `rescue_tokens` with daily
+  limits and the withdraw protections, and init against the real native XLM
+  asset contract (swapped token arguments rejected). Authorization is checked with specific signers where it matters,
+  not just `mock_all_auths`.
+- **`scripts/test_local_network.sh`** (`make integration-test`) starts a
+  `stellar/quickstart` container, deploys real USDC and native XLM asset
+  contracts plus the receiver — the **optimized** WASM from `make build`, the
+  same binary `deploy.sh` ships — and asserts on real ledger state: rejected
+  init parameters leaving the contract retryable (Issue #390 - Part 1),
+  getters, balances, RBAC-gated pause, pause → unpause → payment,
+  `rescue_tokens` with per-call and daily limits, `withdrawn_today`, rejected
+  calls, and the emitted `init` and `pay_usdc` events. CI lints the scripts,
+  then runs it on every contract change.
+
+The script can be tuned with environment variables:
+
+| Variable           | Default                     | Purpose                                              |
+|--------------------|-----------------------------|------------------------------------------------------|
+| `STELLAR_RPC_PORT` | `8000`                      | Host port to publish Quickstart on (avoid clashes)   |
+| `QUICKSTART_IMAGE` | `stellar/quickstart:latest` | Image to run, e.g. a pinned tag                      |
+| `RPC_WAIT_SECONDS` | `180`                       | How long to wait for RPC and friendbot to be healthy |
+| `KEEP_NETWORK`     | `0`                         | `1` leaves the container running for debugging       |
+| `SKIP_BUILD`       | `0`                         | `1` reuses an existing release WASM                  |
+| `WASM_PATH`        | optimized build, else raw   | Deploy a specific WASM file instead                  |
+
+On failure the script names the step that failed and prints the tail of the
+container logs.
+
+## Security & Dependabot
+
+- Dependencies in `Cargo.toml` are monitored automatically by Dependabot (`.github/dependabot.yml`).
+- Automated Rust vulnerability checks run via `cargo-audit` in security workflows.

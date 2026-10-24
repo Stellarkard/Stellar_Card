@@ -59,7 +59,11 @@ module.exports = async function auth(req, res, next) {
   // to trigger a full-table scan with a bcrypt compare against every row,
   // which let an attacker turn one HTTP request into O(n) bcrypt work on
   // our box. Now we bail before touching the DB.
-  if (!key.startsWith('stellar_card_') || key.length < KEY_MIN_LENGTH || key.length > KEY_MAX_LENGTH) {
+  if (
+    !key.startsWith('stellar_card_') ||
+    key.length < KEY_MIN_LENGTH ||
+    key.length > KEY_MAX_LENGTH
+  ) {
     return res.status(401).json({ error: 'invalid_api_key' });
   }
   const keyPrefix = key.slice(9, 21);

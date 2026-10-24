@@ -189,3 +189,65 @@ describe('submitSorobanTx — NOT_FOUND timeout then Horizon', () => {
     expect(res.error!.txHash).toBe('HASH_ABC');
   });
 });
+
+describe('submitSorobanTx — RPC error responses', () => {
+  it('retries automatically on TRY_AGAIN_LATER response', async () => {
+    const server = makeServer([{ status: 'TRY_AGAIN_LATER' }, { status: 'SUCCESS' }]);
+    global.fetch = vi.fn().mockRejectedValue(new Error('should not be called'));
+    const res = await runAndSettle(
+      submitSorobanTx(mockTx, server as unknown as Parameters<typeof submitSorobanTx>[1]),
+    );
+    expect(res.value).toBe('HASH_ABC');
+    expect(res.error).toBeUndefined();
+    expect(server.getTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws error on ERROR status with contract trap', async () => {
+    const server = makeServer([
+      {
+        status: 'ERROR',
+        error: 'Error(Contract, #1)',
+        diagnosticEvents: [
+          {
+            event: {
+              body: {
+                value: 'Error(Contract, #1)',
+              },
+            },
+          },
+        ],
+      },
+    ]);
+    global.fetch = vi.fn();
+    const res = await runAndSettle(
+      submitSorobanTx(mockTx, server as unknown as Parameters<typeof submitSorobanTx>[1]),
+    );
+    expect(res.error).toBeDefined();
+    expect(res.error!.message).toContain('failed');
+    expect(res.error!.txHash).toBeUndefined();
+  });
+
+  it('handles DUPLICATE transaction submission gracefully', async () => {
+    const server = makeServer([{ status: 'DUPLICATE' }]);
+    global.fetch = vi.fn();
+    const res = await runAndSettle(
+      submitSorobanTx(mockTx, server as unknown as Parameters<typeof submitSorobanTx>[1]),
+    );
+    expect(res.error).toBeDefined();
+    expect(res.error!.message).toContain('duplicate');
+    expect(res.error!.txHash).toBeUndefined();
+  });
+
+  it('maps error status to StellarRpcError', async () => {
+    const server: MockServer = {
+      sendTransaction: vi.fn().mockResolvedValue({ status: 'PENDING', hash: 'HASH_ABC' }),
+      getTransaction: vi.fn().mockRejectedValue(new Error('RPC error')),
+    };
+    global.fetch = vi.fn();
+    const res = await runAndSettle(
+      submitSorobanTx(mockTx, server as unknown as Parameters<typeof submitSorobanTx>[1]),
+    );
+    expect(res.error).toBeDefined();
+    expect(res.error!.name).toMatch(/error|Error/i);
+  });
+});

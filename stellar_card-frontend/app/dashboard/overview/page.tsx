@@ -4,14 +4,14 @@
 
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useDashboard } from '../_lib/DashboardProvider';
 import { KpiTile, KpiRow } from '../_ui/KpiTile';
 import { Card } from '../_ui/Card';
 import { Pill } from '../_ui/Pill';
 import { EmptyState } from '../_ui/EmptyState';
-import { SpendChart } from '../_ui/SpendChart';
+import { DynamicSpendChart } from '@/app/lib/dynamic-imports';
 import { OrderStatusPill } from '../_ui/OrderStatusPill';
 import { PageContainer } from '../_ui/PageContainer';
 import { PageHeader } from '../_ui/PageHeader';
@@ -21,9 +21,9 @@ import { IN_FLIGHT_ORDER_STATUSES } from '../_lib/constants';
 export default function OverviewPage() {
   const { user, info, agents, orders } = useDashboard();
   const isPlatformOwner = !!user?.is_platform_owner;
+  const [now] = useState(() => Date.now());
 
   const stats = useMemo(() => {
-    const now = Date.now();
     const DAY = 86_400_000;
     const in24h = orders.filter((o) => now - parseTimestamp(o.created_at) < DAY);
     const in7d = orders.filter((o) => now - parseTimestamp(o.created_at) < 7 * DAY);
@@ -68,7 +68,7 @@ export default function OverviewPage() {
       delivered7d: delivered7d.length,
       topAgents,
     };
-  }, [orders, agents]);
+  }, [orders, agents, now]);
 
   const chartData = useMemo(() => bucketSpendByDay(orders, 14), [orders]);
 
@@ -94,7 +94,7 @@ export default function OverviewPage() {
         <KpiTile
           label="Spend 7d"
           value={formatUsd(stats.spend7d)}
-          hint={`${orders.filter((o) => parseTimestamp(o.created_at) > Date.now() - 7 * 86400000).length} orders`}
+          hint={`${orders.filter((o) => parseTimestamp(o.created_at) > now - 7 * 86400000).length} orders`}
         />
         <KpiTile
           label="Success rate 7d"
@@ -128,7 +128,7 @@ export default function OverviewPage() {
             </Link>
           }
         >
-          <SpendChart data={chartData} height={220} />
+          <DynamicSpendChart data={chartData} height={220} />
         </Card>
 
         {isPlatformOwner ? (

@@ -156,7 +156,7 @@ export default function BlogPost() {
             history. It might be quoted in a bug report when the operator screenshots the
             conversation. It might end up in a vector store as part of a RAG index the operator
             didn&apos;t remember setting up. It will almost certainly show up in any future
-            conversation that references "last week&apos;s chat".
+            conversation that references &quot;last week&apos;s chat&quot;.
           </p>
 
           <p>

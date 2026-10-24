@@ -1,0 +1,106 @@
+name: Accessibility Audit
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+    paths:
+      - 'stellar_card-frontend/**'
+      - '.github/workflows/a11y.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'stellar_card-frontend/**'
+      - '.github/workflows/a11y.yml'
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  a11y-audit:
+    name: axe-core Accessibility Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: '20.x'
+          working-directory: stellar_card-frontend
+
+      - name: Install dependencies
+        working-directory: stellar_card-frontend
+        run: npm ci
+
+      - name: Get installed Playwright version
+        id: playwright-version
+        working-directory: stellar_card-frontend
+        run: |
+          echo "version=$(node -e "console.log(require('./node_modules/@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: stellar_card-frontend
+        run: npx playwright install chromium --with-deps
+
+      - name: Install OS dependencies for Playwright
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: stellar_card-frontend
+        run: npx playwright install-deps chromium
+
+      - name: Run a11y audit
+        working-directory: stellar_card-frontend
+        run: npx playwright test e2e/a11y-audit.spec.ts
+        env:
+          CI: true
+
+      - name: Run Storybook a11y checks
+        working-directory: stellar_card-frontend
+        run: |
+          npx storybook build --quiet
+          npx @storybook/addon-a11y-test --storybook-static ./storybook-static
+        continue-on-error: true
+
+      - name: Upload a11y report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a11y-report
+          path: stellar_card-frontend/test-results/
+          retention-days: 7
+
+  audit-summary:
+    name: Audit summary
+    runs-on: ubuntu-latest
+    needs: a11y-audit
+    if: always()
+
+    steps:
+      - name: Report result
+        run: |
+          if [ "${{ needs.a11y-audit.result }}" = "success" ]; then
+            echo "Accessibility audit passed."
+          else
+            echo "::warning::Accessibility audit had failures — check the a11y-audit job logs."
+          fi

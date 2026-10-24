@@ -1,0 +1,57 @@
+name: Contract
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+    paths:
+      - 'stellar_card-contract/**'
+      - '.github/workflows/contract.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'stellar_card-contract/**'
+      - '.github/workflows/contract.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: stellar_card-contract
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: rustup target add wasm32v1-none
+
+      - name: Install Stellar CLI
+        uses: stellar/stellar-cli@v26.0.0
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint shell scripts
+        run: make integration-test-lint
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Build release WASM and check binary size
+        run: make build
+
+      # Reuses the optimized WASM from the build step (the script deploys
+      # it rather than the raw build, matching deploy.sh). Container logs
+      # are dumped automatically when a scenario fails.
+      - name: Run local-network integration test
+        env:
+          SKIP_BUILD: '1'
+        run: make integration-test

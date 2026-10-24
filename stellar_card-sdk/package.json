@@ -5,7 +5,10 @@
   "main": "dist/index.js",
   "module": "dist/esm/index.js",
   "types": "dist/index.d.ts",
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/cli.js",
+    "./dist/commands/**/*.js"
+  ],
   "exports": {
     ".": {
       "browser": {
@@ -26,9 +29,28 @@
       "types": "./dist/mcp.d.ts",
       "import": "./dist/mcp.js",
       "require": "./dist/mcp.js"
+    },
+    "./ows": {
+      "types": "./dist/ows.d.ts",
+      "import": "./dist/esm/ows.js",
+      "require": "./dist/ows.js"
+    },
+    "./hardware": {
+      "types": "./dist/hardware.d.ts",
+      "import": "./dist/esm/hardware.js",
+      "require": "./dist/hardware.js"
+    },
+    "./mock": {
+      "types": "./dist/mock.d.ts",
+      "import": "./dist/esm/mock.js",
+      "require": "./dist/mock.js"
+    },
+    "./react": {
+      "types": "./dist/integrations/react.d.ts",
+      "import": "./dist/esm/integrations/react.js",
+      "require": "./dist/integrations/react.js"
     }
   },
-  "sideEffects": false,
   "browser": {
     "./dist/config.js": false,
     "./dist/ows.js": false,
@@ -36,10 +58,16 @@
     "./dist/commands/onboard.js": false,
     "./dist/commands/purchase.js": false,
     "./dist/commands/wallet.js": false,
+    "./dist/commands/status.js": false,
+    "./dist/version-check.js": false,
+    "./dist/index.js": "./dist/browser.js",
     "fs": false,
     "path": false,
     "os": false,
-    "crypto": false
+    "crypto": false,
+    "child_process": false,
+    "worker_threads": false,
+    "perf_hooks": false
   },
   "bin": {
     "stellar_card": "./dist/cli.js"
@@ -54,10 +82,14 @@
     "build": "tsc && tsc -p tsconfig.esm.json",
     "dev": "tsc --watch",
     "lint": "eslint src",
+    "format": "prettier --write \"src/**/*.ts\" \"scripts/**/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"scripts/**/*.mjs\"",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.esm.json --noEmit",
     "test": "vitest run",
     "check:browser": "node scripts/check-browser-deps.mjs",
+    "size": "size-limit",
     "verify:package": "node scripts/verify-package.mjs",
+    "prepare": "node scripts/prepare.mjs",
     "prepublishOnly": "npm run build && npm test && npm run check:browser && npm run verify:package"
   },
   "keywords": [
@@ -86,24 +118,92 @@
   "engines": {
     "node": ">=18"
   },
+  "typesVersions": {
+    "*": {
+      "browser": [
+        "./dist/browser.d.ts"
+      ],
+      "mcp": [
+        "./dist/mcp.d.ts"
+      ],
+      "ows": [
+        "./dist/ows.d.ts"
+      ],
+      "hardware": [
+        "./dist/hardware.d.ts"
+      ],
+      "mock": [
+        "./dist/mock.d.ts"
+      ],
+      "react": [
+        "./dist/integrations/react.d.ts"
+      ]
+    }
+  },
+  "react-native": {
+    "./dist/config.js": false,
+    "./dist/ows.js": false,
+    "./dist/cli.js": false,
+    "./dist/commands/onboard.js": false,
+    "./dist/commands/purchase.js": false,
+    "./dist/commands/wallet.js": false,
+    "./dist/version-check.js": false,
+    "fs": false,
+    "path": false,
+    "os": false,
+    "crypto": false,
+    "child_process": false
+  },
   "overrides": {
     "axios": "^1.15.0"
   },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
     "@ctx.com/stellar-ows-core": "^1.3.0-stellar",
-    "@stellar/stellar-sdk": "^15.0.1"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@stellar/stellar-sdk": "^15.0.1",
+    "qrcode-generator": "^1.4.4",
+    "zod": "^3.25.76"
   },
   "optionalDependencies": {
-    "@ctx.com/stellar-ows-core-linux-x64-gnu": "1.3.0-stellar",
-    "@ctx.com/stellar-ows-core-linux-arm64-gnu": "1.3.0-stellar",
+    "@ctx.com/stellar-ows-core-darwin-arm64": "1.3.0-stellar",
     "@ctx.com/stellar-ows-core-darwin-x64": "1.3.0-stellar",
-    "@ctx.com/stellar-ows-core-darwin-arm64": "1.3.0-stellar"
+    "@ctx.com/stellar-ows-core-linux-arm64-gnu": "1.3.0-stellar",
+    "@ctx.com/stellar-ows-core-linux-x64-gnu": "1.3.0-stellar"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,mjs,js}": "eslint --fix",
+    "*.{ts,tsx,js,mjs,json,md,yml,yaml,css}": "prettier --write"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.3",
+    "@commitlint/cli": "^19.0.0",
+    "@commitlint/config-conventional": "^19.0.0",
+    "@eslint/js": "^9.39.0",
+    "@testing-library/react": "^16.3.0",
     "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
     "@vitest/coverage-v8": "^4.1.5",
+    "eslint": "^9.39.0",
+    "globals": "^17.0.0",
+    "husky": "^9.0.0",
+    "jsdom": "^30.1.0",
+    "lint-staged": "^15.2.0",
+    "prettier": "^3.9.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "size-limit": "^11.1.6",
+    "@size-limit/preset-small-lib": "^11.1.6",
     "typescript": "^6.0.0",
-    "vitest": "^4.1.5"
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.5",
+    "yaml": "^2.9.0"
   }
 }

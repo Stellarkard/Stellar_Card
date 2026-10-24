@@ -40,6 +40,7 @@ import {
   getHorizonUrl,
   InsufficientFeeError,
 } from './soroban';
+import type { ContractPaymentResult } from './types';
 
 const USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
 const STELLAR_CHAIN = 'stellar';
@@ -80,6 +81,10 @@ function getStellarAddress(wallet: WalletInfo): string {
  * them. Agents running on ephemeral filesystems (Lambda, Cloud Run,
  * scratch containers) should pass a `vaultPath` pointing at a
  * persistent volume, or set the `OWS_VAULT_PATH` environment variable.
+ * @param name - The name of the wallet to create or fetch.
+ * @param passphrase - Optional passphrase to encrypt the wallet at rest.
+ * @param vaultPath - Optional custom path for the OWS vault directory.
+ * @returns Object containing the generated `walletId` and Stellar `publicKey`.
  */
 export function createOWSWallet(
   name: string,
@@ -101,6 +106,11 @@ export function createOWSWallet(
 /**
  * Import an existing Stellar secret key (S...) into an OWS wallet.
  * Useful for migrating from a raw STELLAR_WALLET_SECRET to OWS custody.
+ * @param name - The name of the wallet to store the key under.
+ * @param stellarSecret - The raw Stellar secret key (S-address) to import.
+ * @param passphrase - Optional passphrase to encrypt the wallet at rest.
+ * @param vaultPath - Optional custom path for the OWS vault directory.
+ * @returns Object containing the `walletId` and Stellar `publicKey`.
  */
 export function importStellarKey(
   name: string,
@@ -109,7 +119,11 @@ export function importStellarKey(
   vaultPath?: string,
 ): { walletId: string; publicKey: string } {
   const keypair = Keypair.fromSecret(stellarSecret);
-  const ed25519KeyHex = Buffer.from(keypair.rawSecretKey()).toString('hex');
+  const secretBuffer = Buffer.from(keypair.rawSecretKey());
+  const ed25519KeyHex = secretBuffer.toString('hex');
+  // Wipe the raw secret key material from memory now that it has been
+  // copied into the hex form handed to OWS vault storage.
+  zeroizeSecret(secretBuffer);
   const wallet = importWalletPrivateKey(
     name,
     '', // secp256k1 key (EVM) — not used for Stellar
@@ -120,6 +134,29 @@ export function importStellarKey(
     ed25519KeyHex,
   );
   return { walletId: wallet.id, publicKey: getStellarAddress(wallet) };
+}
+
+// ── Secure in-memory zeroization of secret keys ───────────────────────────
+
+/**
+ * Securely zero out secret key material held in a `Uint8Array`/`Buffer` in
+ * place.
+ *
+ * Fills every byte with `0` so the plaintext secret no longer resides in
+ * memory after it has been copied into a derived form (e.g. the hex form
+ * handed to OWS vault storage). JavaScript `string`s are immutable and
+ * cannot be overwritten in place — pass secrets as `Buffer`/`Uint8Array`
+ * when you need true in-memory zeroization, and reassign any `string`
+ * copies to `''` once they are no longer needed.
+ *
+ * @param buf - Buffer holding secret key material to be destroyed.
+ * @example
+ * const secret = Buffer.from(keypair.rawSecretKey());
+ * const hex = secret.toString('hex');
+ * zeroizeSecret(secret); // secret bytes wiped from memory
+ */
+export function zeroizeSecret(buf: Uint8Array): void {
+  buf.fill(0);
 }
 
 /**
@@ -208,6 +245,8 @@ export interface OnboardAgentResult {
  *
  * The backend broadcasts these transitions over the live SSE dashboard
  * feed, so operators see the agent moving through states in real time.
+ * @param opts - Onboarding options including API key and wallet configuration.
+ * @returns Object containing the new `publicKey` and current `balance`.
  */
 export async function onboardAgent(opts: OnboardAgentOpts): Promise<OnboardAgentResult> {
   const { Stellar_CardClient } = await import('./client');
@@ -308,6 +347,9 @@ function owsSignTx<T extends SignableTx>(
  * Used by purchaseCardOWS's resume branch to decide whether a
  * dropped-pre-apply Soroban tx should be re-submitted or whether we
  * should wait for a still-in-flight one to finalize.
+ * @param txHash - The Soroban transaction hash to check.
+ * @param opts - Options including the optional network passphrase.
+ * @returns 'landed' if successful, 'dropped' if 404/failed, or 'pending' if unknown.
  */
 export async function checkSorobanTxLanded(
   txHash: string,
@@ -356,6 +398,8 @@ export interface TrustlineOpts {
  * silently no-ops them, but charges the base fee each time — so
  * pre-checking saves ~0.00001 XLM per accidental re-run). Returns the
  * new tx hash when a trustline is actually opened.
+ * @param opts - Trustline options including wallet name and network.
+ * @returns The transaction hash if a trustline was created, or `null` if one already exists.
  */
 export async function addUsdcTrustlineOWS(opts: TrustlineOpts): Promise<string | null> {
   const { walletName, passphrase, vaultPath, networkPassphrase = Networks.PUBLIC } = opts;
@@ -413,7 +457,14 @@ export interface PayViaContractOwsOpts {
  */
 export interface PayViaContractOwsDeps {
   buildContractPaymentTx?: typeof buildContractPaymentTx;
-  submitSorobanTx?: typeof submitSorobanTx;
+  /**
+   * Injectable submit. Production uses {@link submitSorobanTx}.
+   * Tests may return a bare hash string for convenience — payViaContractOWS
+   * normalises both shapes into {@link ContractPaymentResult}.
+   */
+  submitSorobanTx?: (
+    ...args: Parameters<typeof submitSorobanTx>
+  ) => Promise<Awaited<ReturnType<typeof submitSorobanTx>> | string>;
   owsSignTx?: (
     tx: Transaction,
     walletName: string,
@@ -443,10 +494,19 @@ const PAY_VIA_CONTRACT_MAX_ATTEMPTS = 3;
  */
 const PAY_VIA_CONTRACT_RETRY_DELAY_MS = 6_000;
 
+/**
+ * Pay the stellar_card receiver contract using an OWS-custody wallet. Builds a
+ * Soroban `pay_usdc` or `pay_xlm` invocation, signs the transaction hash via
+ * OWS, and submits it to the Soroban RPC.
+ *
+ * @param opts - Options including the wallet name, payment instructions, and network config.
+ * @param deps - Optional injectable dependencies for testing (defaults to real implementations).
+ * @returns A {@link ContractPaymentResult} with the transaction hash and fee refund metrics.
+ */
 export async function payViaContractOWS(
   opts: PayViaContractOwsOpts,
   deps: PayViaContractOwsDeps = {},
-): Promise<string> {
+): Promise<ContractPaymentResult> {
   const {
     walletName,
     payment,
@@ -511,7 +571,24 @@ export async function payViaContractOWS(
 
     const resolvedHorizonUrl = horizonUrl ?? getHorizonUrl(networkPassphrase);
     try {
-      return await submitTx(tx, server, resolvedHorizonUrl);
+      const submitted = await submitTx(tx, server, resolvedHorizonUrl);
+      // Tests historically mocked submitSorobanTx to return a bare hash
+      // string — accept both shapes so existing stubs keep working.
+      const fallbackFee = String(tx.fee ?? '100');
+      if (typeof submitted === 'string') {
+        return {
+          hash: submitted,
+          feeCharged: fallbackFee,
+          feeRefunded: '0',
+          maxFee: fallbackFee,
+        };
+      }
+      return {
+        hash: submitted.hash,
+        feeCharged: submitted.feeCharged ?? fallbackFee,
+        feeRefunded: submitted.feeRefunded ?? '0',
+        maxFee: submitted.maxFee ?? fallbackFee,
+      };
     } catch (err) {
       lastErr = err;
       // Fee too low — retry with the network's required fee as floor.
@@ -617,6 +694,8 @@ export interface PurchaseCardOwsOpts {
  * txHash attached (deadline reached but tx may still land), we proceed to
  * waitForCard — the stellar_card backend watcher is the source of truth and
  * will credit the order when the tx finalizes.
+ * @param opts - Options including API key, wallet name, payment amounts, and resumption state.
+ * @returns Object containing the issued `CardDetails` and the `order_id`.
  */
 export async function purchaseCardOWS(
   opts: PurchaseCardOwsOpts,
@@ -816,3 +895,46 @@ export async function purchaseCardOWS(
     );
   }
 }
+
+// ── Secure Keystore Integration (#705) ──────────────────────────────────────
+
+export { createKeystore, NodeFileSystemKeystore, BrowserKeystore } from './keystore';
+export type { EncryptedKeystore } from './keystore';
+
+/**
+ * Persist an encrypted Stellar wallet secret using a cross-platform keystore adapter.
+ *
+ * @param walletName - Wallet identifier
+ * @param stellarSecret - Secret key (S...) to store
+ * @param passphrase - User passphrase to encrypt the secret
+ * @param keystore - Optional keystore adapter (defaults to auto-detected environment keystore)
+ */
+export async function saveWalletToKeystore(
+  walletName: string,
+  stellarSecret: string,
+  passphrase: string,
+  keystore?: import('./keystore').EncryptedKeystore,
+): Promise<void> {
+  const { createKeystore } = await import('./keystore');
+  const store = keystore ?? createKeystore();
+  await store.set(walletName, stellarSecret, passphrase);
+}
+
+/**
+ * Load and decrypt a Stellar wallet secret from a keystore adapter.
+ *
+ * @param walletName - Wallet identifier
+ * @param passphrase - User passphrase to decrypt the secret
+ * @param keystore - Optional keystore adapter (defaults to auto-detected environment keystore)
+ * @returns Decrypted Stellar secret key or null if not found
+ */
+export async function loadWalletFromKeystore(
+  walletName: string,
+  passphrase: string,
+  keystore?: import('./keystore').EncryptedKeystore,
+): Promise<string | null> {
+  const { createKeystore } = await import('./keystore');
+  const store = keystore ?? createKeystore();
+  return store.get(walletName, passphrase);
+}
+

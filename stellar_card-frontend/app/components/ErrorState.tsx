@@ -4,6 +4,7 @@
 
 import type { ReactNode } from 'react';
 import { useCallback, useState } from 'react';
+import { DEFAULT_STATE_COPY } from './stateConfig';
 
 interface Props {
   title?: string;
@@ -14,8 +15,8 @@ interface Props {
 }
 
 export function ErrorState({
-  title = 'Something went wrong',
-  message = 'An unexpected error occurred. Please try again.',
+  title = DEFAULT_STATE_COPY.error.title,
+  message = DEFAULT_STATE_COPY.error.message,
   digest,
   onRetry,
   action,

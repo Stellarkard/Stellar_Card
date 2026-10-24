@@ -10,6 +10,8 @@
 // the SDK's existing payViaContractOWS helper — so the OWS wallet,
 // fee-retry logic, and on-chain confirmation all come for free.
 
+import * as crypto from 'crypto';
+import { Keypair } from '@stellar/stellar-sdk';
 import type { PaymentInstructions, CardDetails } from './client';
 import { payViaContractOWS, type PayViaContractOwsDeps } from './ows';
 
@@ -107,6 +109,9 @@ const POLL_INTERVAL_MS = 1_000;
  * existing Soroban wallet flow, retries the protected resource with an
  * `Authorization: Payment` credential, and polls the receipt URL when
  * fulfillment is asynchronous.
+ *
+ * @param opts - Options for the MPP charge including URL, wallet name, and polling configurations.
+ * @returns A promise resolving to the MPP charge result containing card details and transaction information.
  */
 export async function mppCharge(opts: MppChargeOpts): Promise<MppChargeResult> {
   const url = resolveUrl(opts);
@@ -155,7 +160,7 @@ export async function mppCharge(opts: MppChargeOpts): Promise<MppChargeResult> {
     ...(paymentAsset === 'xlm' && { xlm: { amount: method.amount } }),
   };
 
-  const txHash = await payFn(
+  const txResult = await payFn(
     {
       walletName: opts.walletName,
       payment: paymentInstructions,
@@ -167,6 +172,7 @@ export async function mppCharge(opts: MppChargeOpts): Promise<MppChargeResult> {
     },
     opts._deps?.payViaContractOwsDeps ?? {},
   );
+  const txHash = typeof txResult === 'string' ? txResult : txResult.hash;
 
   // ── Step 4: retry the resource with Authorization: Payment. ─────────
   const authHeader = `Payment scheme="stellar", challenge="${challenge.challenge_id}", tx_hash="${txHash}"`;
@@ -301,4 +307,132 @@ async function safeText(res: Response): Promise<string> {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export interface MppChallengePayload {
+  realm: string;
+  nonce: string;
+  timestamp: number;
+  expiresAt: number;
+  methods?: string[];
+}
+
+export type MppChallenge = MppChallengePayload;
+export type MppChallengeSignatureVerificationOptions = VerifyMppChallengeOpts;
+export type MppCredentialHeaderOptions = MppCredentialHeaderOpts;
+
+export interface GenerateMppChallengeOpts {
+  realm?: string;
+  ttlMs?: number;
+  nonce?: string;
+  methods?: string[];
+}
+
+export interface VerifyMppChallengeOpts {
+  maxAgeMs?: number;
+  expectedNonce?: string;
+  expectedRealm?: string;
+  now?: number;
+}
+
+export interface MppCredentialHeaderOpts {
+  scheme?: 'MPP' | 'Payment';
+  realm?: string;
+  challengeId?: string;
+  nonce?: string;
+  signature?: string;
+  publicKey?: string;
+  txHash?: string;
+}
+
+/**
+ * Generate a cryptographically random MPP challenge payload with nonce, timestamp, and realm.
+ */
+export function generateMppChallenge(opts: GenerateMppChallengeOpts = {}): MppChallengePayload {
+  const realm = opts.realm ?? 'stellar_card';
+  const nonce = opts.nonce ?? crypto.randomBytes(16).toString('hex');
+  const now = Date.now();
+  const ttlMs = opts.ttlMs ?? 600_000;
+  return {
+    realm,
+    nonce,
+    timestamp: now,
+    expiresAt: now + ttlMs,
+    methods: opts.methods ?? ['stellar'],
+  };
+}
+
+/**
+ * Format an MPP challenge payload into a canonical string for signing/verifying.
+ */
+export function serializeMppChallenge(challenge: MppChallengePayload): string {
+  return `realm="${challenge.realm}",nonce="${challenge.nonce}",timestamp=${challenge.timestamp},expires_at=${challenge.expiresAt}`;
+}
+
+/**
+ * Sign an MPP challenge payload with a Stellar Keypair.
+ */
+export function signMppChallenge(
+  challenge: MppChallengePayload | string,
+  keypair: Keypair,
+): string {
+  const raw = typeof challenge === 'string' ? challenge : serializeMppChallenge(challenge);
+  const sigBuffer = keypair.sign(Buffer.from(raw, 'utf-8'));
+  return sigBuffer.toString('hex');
+}
+
+/**
+ * Verify an MPP challenge signature against a Stellar public key, validating expiration and nonce.
+ */
+export function verifyMppChallengeSignature(
+  challenge: MppChallengePayload,
+  signature: string,
+  publicKey: string,
+  opts: VerifyMppChallengeOpts = {},
+): boolean {
+  const now = opts.now ?? Date.now();
+  if (now > challenge.expiresAt) {
+    throw new Error('MPP challenge expired');
+  }
+  if (opts.maxAgeMs && now - challenge.timestamp > opts.maxAgeMs) {
+    throw new Error('MPP challenge expired (exceeded max age)');
+  }
+  if (opts.expectedNonce && challenge.nonce !== opts.expectedNonce) {
+    throw new Error(
+      `MPP challenge nonce mismatch: expected ${opts.expectedNonce}, got ${challenge.nonce}`,
+    );
+  }
+  if (opts.expectedRealm && challenge.realm !== opts.expectedRealm) {
+    throw new Error(
+      `MPP challenge realm mismatch: expected ${opts.expectedRealm}, got ${challenge.realm}`,
+    );
+  }
+
+  const raw = serializeMppChallenge(challenge);
+  const kp = Keypair.fromPublicKey(publicKey);
+  const valid = kp.verify(Buffer.from(raw, 'utf-8'), Buffer.from(signature, 'hex'));
+  if (!valid) {
+    throw new Error('Invalid MPP challenge signature');
+  }
+  return true;
+}
+
+/**
+ * Format credential authorization header (Authorization: MPP ... or Authorization: Payment ...).
+ */
+export function formatMppCredentialHeader(opts: MppCredentialHeaderOpts): string {
+  const scheme = opts.scheme ?? (opts.signature ? 'MPP' : 'Payment');
+  if (scheme === 'MPP') {
+    const parts: string[] = [];
+    if (opts.realm) parts.push(`realm="${opts.realm}"`);
+    if (opts.nonce) parts.push(`nonce="${opts.nonce}"`);
+    if (opts.signature) parts.push(`signature="${opts.signature}"`);
+    if (opts.publicKey) parts.push(`public_key="${opts.publicKey}"`);
+    if (opts.challengeId) parts.push(`challenge="${opts.challengeId}"`);
+    return `MPP ${parts.join(', ')}`;
+  }
+  const parts: string[] = ['scheme="stellar"'];
+  if (opts.challengeId) parts.push(`challenge="${opts.challengeId}"`);
+  if (opts.txHash) parts.push(`tx_hash="${opts.txHash}"`);
+  return `Payment ${parts.join(', ')}`;
 }

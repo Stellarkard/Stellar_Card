@@ -34,16 +34,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Node.js and caches
+        uses: ./.github/actions/setup-node-project
         with:
           node-version: ${{ matrix.node-version }}
-          cache: npm
-          cache-dependency-path: 'stellar_card-sdk/package-lock.json'
+          working-directory: stellar_card-sdk
 
       - name: Install dependencies
         working-directory: stellar_card-sdk
         run: npm ci
+
+      - name: Cache TypeScript build
+        uses: actions/cache@v4
+        with:
+          path: stellar_card-sdk/.tsbuildinfo
+          key: tsbuild-${{ runner.os }}-node${{ matrix.node-version }}-${{ hashFiles('stellar_card-sdk/src/**', 'stellar_card-sdk/tsconfig*.json') }}
+          restore-keys: |
+            tsbuild-${{ runner.os }}-node${{ matrix.node-version }}-
 
       - name: Lint
         working-directory: stellar_card-sdk
@@ -91,12 +98,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Node.js and caches
+        uses: ./.github/actions/setup-node-project
         with:
           node-version: 20.x
-          cache: npm
-          cache-dependency-path: 'stellar_card-sdk/package-lock.json'
+          working-directory: stellar_card-sdk
 
       - name: Install dependencies
         working-directory: stellar_card-sdk

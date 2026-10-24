@@ -27,7 +27,7 @@ export default defineConfig({
       extends: true,
       test: {
         environment: 'node',
-        include: ['app/dashboard/_lib/**/*.test.ts', 'app/dashboard/_ui/**/*.test.ts', 'app/components/**/*.test.tsx'],
+        include: ['app/dashboard/_lib/**/*.test.ts', 'app/dashboard/_ui/**/*.test.ts', 'app/components/**/*.test.tsx', '.storybook/**/*.test.ts'],
         exclude: ['**/node_modules/**', '**/.next/**', '**/e2e/**']
       }
     }, {

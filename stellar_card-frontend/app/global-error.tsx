@@ -17,6 +17,8 @@
 //   succeeding. The page still renders if every font in the list
 //   404s.
 
+import Link from 'next/link';
+
 export default function GlobalError({ error }: { error: Error & { digest?: string } }) {
   return (
     <html lang="en">
@@ -107,7 +109,7 @@ export default function GlobalError({ error }: { error: Error & { digest?: strin
             ) : null}
             .
           </p>
-          <a
+          <Link
             href="/"
             style={{
               fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
@@ -124,7 +126,7 @@ export default function GlobalError({ error }: { error: Error & { digest?: strin
             }}
           >
             Back to stellar_card.com
-          </a>
+          </Link>
         </div>
       </body>
     </html>

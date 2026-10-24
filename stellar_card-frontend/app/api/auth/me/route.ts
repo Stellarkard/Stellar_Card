@@ -9,6 +9,7 @@ import { ADMIN_SESSION_COOKIE, getBackendBaseUrl, verifySession } from '@/app/li
 export const runtime = 'nodejs';
 
 export async function GET(_req: NextRequest) {
+  void _req;
   const cookieStore = await cookies();
   const session = verifySession(cookieStore.get(ADMIN_SESSION_COOKIE)?.value);
   if (!session) {

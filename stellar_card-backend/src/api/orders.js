@@ -4,9 +4,19 @@
 // GET  /orders/:id  — poll order status (and retrieve card details when delivered)
 
 const { Router } = require('express');
+const { z } = require('zod');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+const {
+  validate,
+  patternString,
+  boundedString,
+  jsonObject,
+  boundedIntQuery,
+  optionalIsoTimestamp,
+  orderIdParam,
+} = require('../lib/validate');
 const db = require('../db');
 const { isFrozen } = require('../fulfillment');
 const { assertSafeUrl } = require('../lib/ssrf');
@@ -56,24 +66,227 @@ function canonicalJson(value, depth = 0) {
 const MAX_METADATA_JSON_BYTES = 8 * 1024;
 const MAX_WEBHOOK_URL_CHARS = 2048;
 
+// ── Request schemas ────────────────────────────────────────────────────────
+//
+// The declaration order of the keys below is load-bearing: Zod reports
+// object issues in schema order and the middleware surfaces the first
+// one, so a request that is invalid in several ways still receives the
+// same error it received when these were sequential `if` statements.
+//
+// Every field is declared with a non-coercing primitive (see
+// lib/validate.js) because POST /v1/orders hashes the raw request body
+// for its idempotency fingerprint — a schema that stripped or rewrote
+// anything would silently change which retries count as identical. The
+// schema is `.passthrough()` for the same reason: clients may send
+// forward-compatible fields, and those fields are part of the
+// fingerprint.
+
+// Amounts are integer-cents-clean by construction. The regex rejects
+// "10abc" (which parseFloat would happily read as 10) and "10.12345"
+// (sub-cent precision the issuer cannot represent — every Visa Reward
+// Card balance is an integer number of cents).
+const AMOUNT_USDC_SHAPE = /^\d+(\.\d{1,2})?$/;
+
+// Platform order bounds. Min is $0.01, the smallest value the issuer can
+// represent; max is $10,000, Pathward's ceiling on a single prepaid card
+// balance. Agents needing more should issue multiple cards —
+// blast-radius containment is a feature.
+const MIN_ORDER_USDC = 0.01;
+const MAX_ORDER_USDC = 10000;
+
+const CreateOrderBody = z
+  .object({
+    amount_usdc: patternString(
+      AMOUNT_USDC_SHAPE,
+      'amount_usdc must be a decimal with at most 2 decimal places (e.g. "10.00")',
+      { trim: true },
+    ).superRefine((value, ctx) => {
+      // Range is checked separately from shape because the two failures
+      // need different messages. Zod runs chained refinements even after
+      // an earlier one fails, so this may add a second issue for a value
+      // that already failed the shape check — harmless, because the
+      // middleware surfaces the first issue and the shape issue is
+      // reported first. `String(value)` keeps the parse total for the
+      // non-string case that reaches here.
+      const amount = parseFloat(String(value));
+      if (!amount || amount <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'amount_usdc must be a positive number',
+        });
+        return;
+      }
+      if (amount < MIN_ORDER_USDC) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `amount_usdc must be at least $${MIN_ORDER_USDC.toFixed(2)}`,
+        });
+        return;
+      }
+      if (amount > MAX_ORDER_USDC) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `amount_usdc cannot exceed $${MAX_ORDER_USDC.toFixed(2)}`,
+        });
+      }
+    }),
+
+    // Shape and length only. Reachability (the SSRF check) needs DNS and
+    // stays in the handler.
+    webhook_url: boundedString(
+      MAX_WEBHOOK_URL_CHARS,
+      'webhook_url must be a string',
+      `webhook_url must be at most ${MAX_WEBHOOK_URL_CHARS} characters`,
+    )
+      .nullable()
+      .optional(),
+
+    metadata: jsonObject(
+      MAX_METADATA_JSON_BYTES,
+      'metadata must be a JSON object',
+      'metadata could not be serialized',
+      `metadata serialized size must be at most ${MAX_METADATA_JSON_BYTES} bytes`,
+    ).optional(),
+  })
+  .passthrough();
+
+const CreateOrderErrorCodes = {
+  amount_usdc: 'invalid_amount',
+  webhook_url: 'invalid_webhook_url',
+  metadata: 'invalid_metadata',
+};
+
+// Statuses an agent may filter its own order list by. Whitelisted rather
+// than passed through: an unknown status silently returns an empty list,
+// which reads to the caller as "my orders disappeared" rather than "you
+// typo'd the filter".
+const ORDER_STATUSES = [
+  'pending_payment',
+  'awaiting_approval',
+  'payment_confirmed',
+  'claim_received',
+  'stage1_done',
+  'ordering',
+  'delivered',
+  'failed',
+  'refund_pending',
+  'refunded',
+  'expired',
+  'rejected',
+  'pending_manual_recovery',
+];
+
+const ListOrdersQuery = z
+  .object({
+    status: z
+      .unknown()
+      .optional()
+      .superRefine((value, ctx) => {
+        if (value === undefined || value === '') return;
+        if (typeof value !== 'string' || !ORDER_STATUSES.includes(value)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `status must be one of: ${ORDER_STATUSES.join(', ')}`,
+          });
+        }
+      })
+      .transform((value) => (value === undefined || value === '' ? undefined : String(value))),
+    since_created_at: optionalIsoTimestamp(
+      'since_created_at must be an ISO-8601 timestamp (e.g. 2026-04-16T00:00:00.000Z)',
+    ),
+    since_updated_at: optionalIsoTimestamp(
+      'since_updated_at must be an ISO-8601 timestamp (e.g. 2026-04-16T00:00:00.000Z)',
+    ),
+    limit: boundedIntQuery({ default: 20, min: 1, max: 200 }),
+    offset: boundedIntQuery({ default: 0, min: 0, max: Number.MAX_SAFE_INTEGER }),
+  })
+  .passthrough();
+
+const ListOrdersErrorCodes = {
+  status: 'invalid_status',
+  since_created_at: 'invalid_since_created_at',
+  since_updated_at: 'invalid_since_updated_at',
+};
+
+const validateCreateOrder = validate({
+  body: CreateOrderBody,
+  errorCodes: CreateOrderErrorCodes,
+});
+const validateListOrders = validate({
+  query: ListOrdersQuery,
+  errorCodes: ListOrdersErrorCodes,
+});
+
+/**
+ * Factory for creating order creation rate limiters.
+ *
+ * keyGenerator prefers the authenticated api key id so a single agent's
+ * budget follows them across IPs (NAT, proxies, IPv6 rotation); it only
+ * falls back to the request IP for the rare case this runs before auth
+ * middleware has attached req.apiKey. standardHeaders uses the draft-7
+ * RateLimit-* headers (not legacy X-RateLimit-*) to match the rest of
+ * this API's header conventions.
+ *
+ * @param {Partial<import('express-rate-limit').Options>} [overrideOptions]
+ */
+function createOrderCreateLimiter(overrideOptions = {}) {
+  return rateLimit({
+    windowMs: 60 * 60 * 1000,
+    limit: (req) => {
+      const rpm = req.apiKey?.rate_limit_rpm;
+      if (rpm && rpm > 0) return rpm * 60; // convert rpm → per-hour
+      // Env-overridable, so ops can tighten/loosen the ceiling without a
+      // redeploy. This used to be a hardcoded 60 here while the inline
+      // production limiter below used the env-aware version — i.e. the
+      // tested factory and the limiter actually mounted on POST / behaved
+      // differently, and only the inline one was real.
+      return defaultCreateLimitPerHour();
+    },
+    keyGenerator: (req) => req.apiKey?.id || /** @type {any} */ (ipKeyGenerator)(req),
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    handler: (req, res) =>
+      res.status(429).json({
+        error: 'rate_limit_exceeded',
+        message: "Too many orders created. Check your key's rate_limit_rpm setting.",
+      }),
+    ...overrideOptions,
+  });
+}
+// `:id` is the only path parameter on the two order read endpoints, and
+// both of them interpolate it straight into a `WHERE id = ?` bind. Length
+// is the only property worth asserting (see orderIdParam for why we can't
+// narrow further), so a 400 here is strictly better than binding an
+// attacker-sized string to prepare().
+//
+// `validate()` parses the whole target, so the field primitive has to be
+// wrapped in an object. `.passthrough()` matches every other schema here:
+// the middleware assigns its parse output back onto `req.params`, and a
+// stripping object would drop any sibling param a future sub-route adds.
+const validateOrderIdParam = validate({
+  params: z.object({ id: orderIdParam() }).passthrough(),
+});
+
 // Rate limit order creation per API key — default 60/hour, overridable per key via rate_limit_rpm.
 // req.apiKey is set by the auth middleware before this runs.
-const orderCreateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  limit: (req) => {
-    const rpm = req.apiKey?.rate_limit_rpm;
-    if (rpm && rpm > 0) return rpm * 60; // convert rpm → per-hour
-    return 60; // default 60/hour
-  },
-  keyGenerator: (req) => req.apiKey?.id || /** @type {any} */ (ipKeyGenerator)(req),
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  handler: (req, res) =>
-    res.status(429).json({
-      error: 'rate_limit_exceeded',
-      message: "Too many orders created. Check your key's rate_limit_rpm setting.",
-    }),
-});
+//
+// Part 5: the hourly default is env-overridable via
+// ORDER_CREATE_LIMIT_PER_HOUR so ops can tighten/loosen the ceiling
+// without a redeploy — and so tests can shrink it to single digits
+// instead of firing 61 requests to prove the 429 trip. Read live per
+// request (not captured at module load) so a config change applies
+// without a restart. Non-numeric / non-positive values fall back to
+// 60; a typo in an optional tuning variable must never disable the
+// limiter (fail closed) or clamp it to 1ms-style degenerate values.
+function defaultCreateLimitPerHour() {
+  const raw = parseInt(process.env.ORDER_CREATE_LIMIT_PER_HOUR || '60', 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60;
+}
+// Built from the tested factory rather than a second, near-identical inline
+// rateLimit() call. The inline copy was the one mounted on POST /, which
+// meant the factory's own test coverage described a limiter that was not
+// the one serving traffic.
+const orderCreateLimiter = createOrderCreateLimiter();
 
 // Concurrent-stream tracking. Each open SSE connection on
 // /v1/orders/:id/stream or /dashboard/stream increments the relevant
@@ -234,23 +447,15 @@ function buildBudget(apiKey) {
 // txn is pure DB reads + writes so it can stay synchronous. Side-effect
 // notifications (approval email / Discord ping / spend-alert email)
 // fire AFTER commit out-of-band.
-router.post('/', orderCreateLimiter, async (req, res) => {
-  // Adversarial audit F3-orders (2026-04-15): reject requests with a
-  // missing or non-object body upfront. Before this guard, a request
-  // with no body (missing Content-Type, empty body, text/plain, etc.)
-  // landed `req.body = undefined`, which then flowed into
-  // `canonicalJson(req.body)` for the idempotency fingerprint. That
-  // produced a literal `undefined` return (not a string), which
-  // `crypto.createHash('sha256').update(undefined)` rejected with an
-  // opaque TypeError → Express 500. A plain bad-request must return
-  // 400 with a structured error so clients can correct it.
-  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'Request body must be a JSON object (set Content-Type: application/json).',
-    });
-  }
-
+// The body schema (CreateOrderBody, above) covers the non-object-body
+// guard from adversarial audit F3-orders as well as every field-level
+// check. The non-object case matters beyond tidiness: a request with no
+// body left `req.body` undefined, which flowed into
+// `canonicalJson(req.body)` for the idempotency fingerprint, returned a
+// literal `undefined` (not a string), and made
+// `crypto.createHash('sha256').update(undefined)` throw an opaque
+// TypeError — an Express 500 for what is plainly a bad request.
+router.post('/', orderCreateLimiter, validateCreateOrder, async (req, res) => {
   // Idempotency-Key handling — hardening from the adversarial audit:
   //
   // F2: express parses repeated headers into an array. The previous
@@ -294,96 +499,24 @@ router.post('/', orderCreateLimiter, async (req, res) => {
     });
   }
 
+  // Shape, range, and size are already guaranteed by validateCreateOrder.
   const { amount_usdc, webhook_url, metadata } = req.body;
-
-  // Strict decimal validation — reject "10abc" which parseFloat would
-  // silently accept as 10, AND reject sub-cent amounts like "10.12345"
-  // which Pathward cannot represent (every Visa Reward Card balance is
-  // integer cents). The previous regex was `/^\d+(\.\d+)?$/` which
-  // allowed any decimal precision; a caller sending amount_usdc:
-  // "10.12345678" would slip past validation, get parseFloat'd, and
-  // land in the spend-limit accounting with sub-cent precision the
-  // rest of the pipeline can't honour. Tighten to max 2 decimals so
-  // every stored amount_usdc is integer-cents-clean.
-  if (typeof amount_usdc !== 'string' || !/^\d+(\.\d{1,2})?$/.test(amount_usdc.trim())) {
-    return res.status(400).json({
-      error: 'invalid_amount',
-      message: 'amount_usdc must be a decimal with at most 2 decimal places (e.g. "10.00")',
-    });
-  }
   const amount = parseFloat(amount_usdc);
-  if (!amount || amount <= 0) {
-    return res
-      .status(400)
-      .json({ error: 'invalid_amount', message: 'amount_usdc must be a positive number' });
-  }
-  // Platform order bounds. Min is $0.01 (smallest USD value the issuer
-  // can represent on a gift card); max is $10,000 (Pathward's absolute
-  // ceiling on a single prepaid card balance). Agents that need more
-  // should issue multiple cards — blast-radius containment is a
-  // feature, not a bug.
-  if (amount < 0.01) {
-    return res
-      .status(400)
-      .json({ error: 'invalid_amount', message: 'amount_usdc must be at least $0.01' });
-  }
-  if (amount > 10000) {
-    return res
-      .status(400)
-      .json({ error: 'invalid_amount', message: 'amount_usdc cannot exceed $10000.00' });
-  }
 
-  // Validate webhook_url upfront — fail fast rather than storing a bad URL.
-  // F4: cap the URL length before SSRF validation so a 100KB url can't
-  // be used to bloat the orders.webhook_url column across many orders.
-  if (webhook_url !== undefined && webhook_url !== null) {
-    if (typeof webhook_url !== 'string') {
-      return res.status(400).json({
-        error: 'invalid_webhook_url',
-        message: 'webhook_url must be a string',
-      });
-    }
-    if (webhook_url.length > MAX_WEBHOOK_URL_CHARS) {
-      return res.status(400).json({
-        error: 'invalid_webhook_url',
-        message: `webhook_url must be at most ${MAX_WEBHOOK_URL_CHARS} characters`,
-      });
-    }
-    if (webhook_url) {
-      try {
-        await assertSafeUrl(webhook_url);
-      } catch (err) {
-        return res.status(400).json({ error: 'invalid_webhook_url', message: err.message });
-      }
-    }
-  }
-
-  // Validate metadata — must be a plain JSON object if provided.
-  // F3: cap the serialised size to keep orders.metadata from being
-  // abused as a free-form blob column. 8KB is far beyond anything a
-  // real client needs (a few hundred key/value pairs) while still
-  // cheap to store and transit.
-  let metadataStr = null;
-  if (metadata !== undefined) {
-    if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
-      return res
-        .status(400)
-        .json({ error: 'invalid_metadata', message: 'metadata must be a JSON object' });
-    }
+  // Reachability, on the other hand, is not a shape check: it resolves
+  // DNS and rejects anything pointing at a private range, so it is async
+  // and belongs here rather than in the schema. The length cap in the
+  // schema runs first, so a 100KB URL is rejected before it can cost a
+  // resolution.
+  if (webhook_url) {
     try {
-      metadataStr = JSON.stringify(metadata);
-    } catch {
-      return res
-        .status(400)
-        .json({ error: 'invalid_metadata', message: 'metadata could not be serialized' });
-    }
-    if (Buffer.byteLength(metadataStr, 'utf8') > MAX_METADATA_JSON_BYTES) {
-      return res.status(400).json({
-        error: 'invalid_metadata',
-        message: `metadata serialized size must be at most ${MAX_METADATA_JSON_BYTES} bytes`,
-      });
+      await assertSafeUrl(webhook_url);
+    } catch (err) {
+      return res.status(400).json({ error: 'invalid_webhook_url', message: err.message });
     }
   }
+
+  const metadataStr = metadata === undefined ? null : JSON.stringify(metadata);
 
   // ── Async pre-work (must happen BEFORE the db.transaction) ─────────────────
   // usdToXlm is a Horizon fetch; we resolve it up-front and then let
@@ -698,26 +831,24 @@ router.post('/', orderCreateLimiter, async (req, res) => {
 // whole history, plus `offset` for simple pagination and a tighter hard
 // cap on `limit` (200 from the previous 100 to support larger polling
 // windows without exceeding DB response size).
-router.get('/', orderPollLimiter, (req, res) => {
-  const { status, limit = 20, offset = 0, since_created_at, since_updated_at } = req.query;
-  let query = `SELECT id, status, amount_usdc, payment_asset, created_at, updated_at FROM orders WHERE api_key_id = ?`;
-  const params = [req.apiKey.id];
-  if (status) {
-    query += ` AND status = ?`;
-    params.push(status);
-  }
-  if (since_created_at) {
-    query += ` AND created_at >= ?`;
-    params.push(String(since_created_at));
-  }
-  if (since_updated_at) {
-    query += ` AND updated_at >= ?`;
-    params.push(String(since_updated_at));
-  }
-  query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-  params.push(Math.min(parseInt(String(limit)) || 20, 200));
-  params.push(Math.max(parseInt(String(offset)) || 0, 0));
-  res.json(db.prepare(query).all(...params));
+// validateListOrders whitelists `status`, rejects malformed ISO
+// timestamps, and clamps `limit` / `offset` into range, so everything
+// below is already a trusted value of the right type. Before it, an
+// unknown status returned an empty list — indistinguishable from "you
+// have no orders" — and a malformed `since_*` value was compared
+// lexically against an ISO column, silently matching everything or
+// nothing.
+router.get('/', orderPollLimiter, validateListOrders, (req, res) => {
+  const { status, limit, offset, since_created_at, since_updated_at } = req.query;
+  const orders = db.listOrders({
+    apiKeyId: req.apiKey.id,
+    status,
+    limit,
+    offset,
+    sinceCreatedAt: since_created_at,
+    sinceUpdatedAt: since_updated_at,
+  });
+  res.json(orders);
 });
 
 // Map internal pipeline statuses → stable agent-facing phase
@@ -853,7 +984,7 @@ const TERMINAL_STATUSES = new Set([
 // immediately. A tight loop could hit 1000+ opens/sec, hammering
 // SQLite and socket setup without breaching any counter. Using the
 // existing 600/min poll limiter caps that axis correctly.
-router.get('/:id/stream', orderPollLimiter, (req, res) => {
+router.get('/:id/stream', orderPollLimiter, validateOrderIdParam, (req, res) => {
   const orderId = req.params.id;
   const keyId = req.apiKey.id;
 
@@ -1043,7 +1174,7 @@ router.get('/:id/stream', orderPollLimiter, (req, res) => {
 });
 
 // GET /orders/:id — poll status, returns card details when delivered
-router.get('/:id', orderPollLimiter, (req, res) => {
+router.get('/:id', orderPollLimiter, validateOrderIdParam, (req, res) => {
   const order = /** @type {any} */ (
     db
       .prepare(`SELECT * FROM orders WHERE id = ? AND api_key_id = ?`)
@@ -1200,3 +1331,5 @@ module.exports.releaseStreamSlot = releaseStreamSlot;
 // a single limiter for "agent reads" means one noisy key can't steal
 // its own poll budget by spamming preview endpoints.
 module.exports.orderPollLimiter = orderPollLimiter;
+module.exports.orderCreateLimiter = orderCreateLimiter;
+module.exports.createOrderCreateLimiter = createOrderCreateLimiter;

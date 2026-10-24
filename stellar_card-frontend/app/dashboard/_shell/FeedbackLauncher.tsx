@@ -100,7 +100,7 @@ export function FeedbackLauncher() {
             Send feedback
           </div>
           <div style={{ fontSize: '0.7rem', color: 'var(--fg-dim)', marginBottom: '0.65rem' }}>
-            What's broken, what's missing, what's confusing?
+            What&apos;s broken, what&apos;s missing, what&apos;s confusing?
           </div>
           <textarea
             value={message}

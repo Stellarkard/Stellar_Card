@@ -103,8 +103,8 @@ export default function DeveloperPage() {
             />
           </div>
           <div style={{ fontSize: '0.7rem', color: 'var(--fg-dim)', lineHeight: 1.5 }}>
-            We'll POST a sample <code>delivered</code> payload with fake card data. If you pass a
-            secret, we'll sign it with <code>X-Stellar_Card-Signature: sha256=hex(HMAC(ts.body))</code>{' '}
+            We&apos;ll POST a sample <code>delivered</code> payload with fake card data. If you pass a
+            secret, we&apos;ll sign it with <code>X-Stellar_Card-Signature: sha256=hex(HMAC(ts.body))</code>{' '}
             and <code>X-Stellar_Card-Timestamp</code>.
           </div>
           <Button

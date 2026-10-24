@@ -4,15 +4,15 @@
  */
 
 import { describe, test, expect, beforeEach, vi } from 'vitest';
-import { 
-  Stellar_CardClient, 
-  calculateExponentialBackoffDelay, 
-  parseRetryAfterMs, 
+import {
+  Stellar_CardClient,
+  calculateExponentialBackoffDelay,
+  parseRetryAfterMs,
   withRetry,
   Stellar_CardError,
   RateLimitError,
   AuthError,
-  ValidationError
+  ValidationError,
 } from '../index';
 
 describe('Stellar_CardClient - Edge Cases', () => {
@@ -22,9 +22,9 @@ describe('Stellar_CardClient - Edge Cases', () => {
   beforeEach(() => {
     fetchSpy = vi.fn();
     global.fetch = fetchSpy;
-    client = new Stellar_CardClient({ 
+    client = new Stellar_CardClient({
       apiKey: 'test_key',
-      baseUrl: 'https://api.test.com'
+      baseUrl: 'https://api.test.com',
     });
   });
 
@@ -32,7 +32,7 @@ describe('Stellar_CardClient - Edge Cases', () => {
     fetchSpy.mockResolvedValueOnce({
       ok: false,
       status: 500,
-      json: () => Promise.reject(new Error('Invalid JSON'))
+      json: () => Promise.reject(new Error('Invalid JSON')),
     });
 
     await expect(client.getOrder('test-order-id')).rejects.toThrow(Stellar_CardError);
@@ -45,10 +45,8 @@ describe('Stellar_CardClient - Edge Cases', () => {
   });
 
   test('should handle network timeout in fetchWithRetry', async () => {
-    fetchSpy.mockImplementation(() => 
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Network timeout')), 100)
-      )
+    fetchSpy.mockImplementation(
+      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Network timeout')), 100)),
     );
 
     await expect(client.getUsage()).rejects.toThrow();
@@ -58,14 +56,14 @@ describe('Stellar_CardClient - Edge Cases', () => {
     fetchSpy.mockResolvedValue({
       ok: false,
       status: 503,
-      headers: { get: () => null }
+      headers: { get: () => null },
     });
 
-    const client = new Stellar_CardClient({ 
+    const client = new Stellar_CardClient({
       apiKey: 'test_key',
-      retry: { attempts: 1, baseDelayMs: 10, maxDelayMs: 100 }
+      retry: { attempts: 1, baseDelayMs: 10, maxDelayMs: 100 },
     });
-    
+
     await expect(client.getUsage()).rejects.toThrow();
     expect(fetchSpy).toHaveBeenCalledTimes(2); // Initial + 1 retry
   });
@@ -89,7 +87,7 @@ describe('Retry Logic - Edge Cases', () => {
       baseDelayMs: 100,
       maxDelayMs: 1000,
       factor: 3,
-      jitter: 'none'
+      jitter: 'none',
     });
     expect(delay1).toBe(100);
 
@@ -98,37 +96,42 @@ describe('Retry Logic - Edge Cases', () => {
       baseDelayMs: 100,
       maxDelayMs: 1000,
       factor: 3,
-      jitter: 'none'
+      jitter: 'none',
     });
     expect(delay2).toBe(900); // 100 * 3^2
   });
 
   test('withRetry should handle immediate failures', async () => {
     const fn = vi.fn().mockRejectedValue(new Error('Always fails'));
-    
-    await expect(withRetry({ 
-      fn, 
-      maxRetries: 0 
-    })).rejects.toThrow('Always fails');
-    
+
+    await expect(
+      withRetry({
+        fn,
+        maxRetries: 0,
+      }),
+    ).rejects.toThrow('Always fails');
+
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
   test('withRetry should respect custom retry predicate', async () => {
-    const fn = vi.fn()
+    const fn = vi
+      .fn()
       .mockRejectedValueOnce(new RateLimitError())
       .mockRejectedValueOnce(new AuthError())
       .mockResolvedValueOnce('success');
-    
+
     const isRetryable = (err: unknown) => err instanceof RateLimitError;
-    
-    await expect(withRetry({ 
-      fn, 
-      maxRetries: 2,
-      baseDelayMs: 1,
-      isRetryable 
-    })).rejects.toThrow(AuthError);
-    
+
+    await expect(
+      withRetry({
+        fn,
+        maxRetries: 2,
+        baseDelayMs: 1,
+        isRetryable,
+      }),
+    ).rejects.toThrow(AuthError);
+
     expect(fn).toHaveBeenCalledTimes(2);
   });
 });
@@ -136,18 +139,12 @@ describe('Retry Logic - Edge Cases', () => {
 describe('Error Handling - Comprehensive', () => {
   test('should preserve error context through wrapping', () => {
     const originalError = new Error('Original cause');
-    const wrappedError = new Stellar_CardError(
-      'Wrapped message',
-      'test_code',
-      500,
-      undefined,
-      {
-        source: 'test',
-        operation: 'test_op',
-        cause: originalError,
-        recoveryHint: 'Try again'
-      }
-    );
+    const wrappedError = new Stellar_CardError('Wrapped message', 'test_code', 500, undefined, {
+      source: 'test',
+      operation: 'test_op',
+      cause: originalError,
+      recoveryHint: 'Try again',
+    });
 
     expect(wrappedError.context?.cause).toBe(originalError);
     expect(wrappedError.context?.recoveryHint).toBe('Try again');
@@ -157,7 +154,7 @@ describe('Error Handling - Comprehensive', () => {
 
   test('should handle ValidationError with field context', () => {
     const error = new ValidationError('amount', 'must be positive');
-    
+
     expect(error.field).toBe('amount');
     expect(error.message).toContain('amount');
     expect(error.message).toContain('must be positive');
@@ -180,22 +177,31 @@ describe('Client Configuration Edge Cases', () => {
   });
 
   test('should validate baseUrl safety', () => {
-    expect(() => new Stellar_CardClient({ 
-      apiKey: 'test',
-      baseUrl: 'http://unsafe.example.com' 
-    })).not.toThrow(); // Should warn but not throw in this version
+    expect(
+      () =>
+        new Stellar_CardClient({
+          apiKey: 'test',
+          baseUrl: 'http://unsafe.example.com',
+        }),
+    ).not.toThrow(); // Should warn but not throw in this version
   });
 
   test('should handle missing apiKey appropriately', () => {
-    expect(() => new Stellar_CardClient({ 
-      apiKey: '',
-      baseUrl: 'https://api.test.com'
-    })).toThrow(AuthError);
-    
-    expect(() => new Stellar_CardClient({ 
-      apiKey: '   ',
-      baseUrl: 'https://api.test.com'
-    })).toThrow(AuthError);
+    expect(
+      () =>
+        new Stellar_CardClient({
+          apiKey: '',
+          baseUrl: 'https://api.test.com',
+        }),
+    ).toThrow(AuthError);
+
+    expect(
+      () =>
+        new Stellar_CardClient({
+          apiKey: '   ',
+          baseUrl: 'https://api.test.com',
+        }),
+    ).toThrow(AuthError);
   });
 });
 
@@ -212,11 +218,11 @@ describe('Pagination Edge Cases', () => {
   test('should handle empty pagination results', async () => {
     fetchSpy.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve([])
+      json: () => Promise.resolve([]),
     });
 
     const page = await client.listOrdersPage({ limit: 10, offset: 0 });
-    
+
     expect(page.items).toEqual([]);
     expect(page.hasMore).toBe(false);
     expect(page.nextOffset).toBeNull();
@@ -229,20 +235,34 @@ describe('Pagination Edge Cases', () => {
   });
 
   test('should handle iteration with maxItems boundary', async () => {
-    fetchSpy
-      .mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve([
-          { id: '1', status: 'delivered', amount_usdc: '10.00', payment_asset: 'usdc', created_at: '2023-01-01T00:00:00Z', updated_at: '2023-01-01T01:00:00Z' },
-          { id: '2', status: 'delivered', amount_usdc: '20.00', payment_asset: 'usdc', created_at: '2023-01-01T00:00:00Z', updated_at: '2023-01-01T01:00:00Z' }
-        ])
-      });
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          {
+            id: '1',
+            status: 'delivered',
+            amount_usdc: '10.00',
+            payment_asset: 'usdc',
+            created_at: '2023-01-01T00:00:00Z',
+            updated_at: '2023-01-01T01:00:00Z',
+          },
+          {
+            id: '2',
+            status: 'delivered',
+            amount_usdc: '20.00',
+            payment_asset: 'usdc',
+            created_at: '2023-01-01T00:00:00Z',
+            updated_at: '2023-01-01T01:00:00Z',
+          },
+        ]),
+    });
 
     const items: any[] = [];
     for await (const item of client.iterateOrders({ maxItems: 1, limit: 10 })) {
       items.push(item);
     }
-    
+
     expect(items).toHaveLength(1);
     expect(items[0].id).toBe('1');
   });

@@ -117,13 +117,13 @@ describe('F1-app: X-Request-ID end-to-end', () => {
   });
 
   it('echoes a valid client-supplied X-Request-ID on the response', async () => {
-    const res = await request.get('/api/version').set('X-Request-ID', 'client-supplied-abc');
+    const res = await request.get('/status').set('X-Request-ID', 'client-supplied-abc');
     assert.equal(res.status, 200);
     assert.equal(res.headers['x-request-id'], 'client-supplied-abc');
   });
 
   it('generates a UUID when no X-Request-ID header is sent', async () => {
-    const res = await request.get('/api/version');
+    const res = await request.get('/status');
     assert.equal(res.status, 200);
     assert.match(
       res.headers['x-request-id'],
@@ -133,7 +133,7 @@ describe('F1-app: X-Request-ID end-to-end', () => {
 
   it('replaces an invalid X-Request-ID with a server-generated UUID', async () => {
     // Spaces are disallowed.
-    const res = await request.get('/api/version').set('X-Request-ID', 'has a space');
+    const res = await request.get('/status').set('X-Request-ID', 'has a space');
     assert.equal(res.status, 200);
     // The response header must be a freshly-generated UUID, not the
     // bad input and not a truncated version.
@@ -159,7 +159,7 @@ describe('F1-app: X-Request-ID end-to-end', () => {
     assert.equal(_validateRequestId(injected), null);
     // Unit test above already covers the CR/LF case; this e2e test
     // just pins that a long garbage string doesn't crash.
-    const res = await request.get('/api/version').set('X-Request-ID', 'a'.repeat(200));
+    const res = await request.get('/status').set('X-Request-ID', 'a'.repeat(200));
     assert.equal(res.status, 200);
     assert.match(
       res.headers['x-request-id'],
@@ -169,7 +169,7 @@ describe('F1-app: X-Request-ID end-to-end', () => {
 
   it('accepts an OpenTelemetry-style trace id', async () => {
     const traceId = 'a'.repeat(32);
-    const res = await request.get('/api/version').set('X-Request-ID', traceId);
+    const res = await request.get('/status').set('X-Request-ID', traceId);
     assert.equal(res.status, 200);
     assert.equal(res.headers['x-request-id'], traceId);
   });

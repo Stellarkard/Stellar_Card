@@ -15,7 +15,7 @@ import { withAdvancedRetry, type AdvancedRetryStrategy } from '../retry';
 // Base strategy used across tests — individual tests override specific fields.
 const BASE: AdvancedRetryStrategy = {
   maxAttempts: 3,
-  baseDelayMs: 1,   // tiny so fake timers advance instantly
+  baseDelayMs: 1, // tiny so fake timers advance instantly
   maxDelayMs: 100,
   multiplier: 2,
   jitterStrategy: 'none',
@@ -43,9 +43,7 @@ describe('withAdvancedRetry — success path', () => {
   });
 
   it('succeeds on the second attempt', async () => {
-    const fn = vi.fn()
-      .mockRejectedValueOnce(new Error('first'))
-      .mockResolvedValue('ok');
+    const fn = vi.fn().mockRejectedValueOnce(new Error('first')).mockResolvedValue('ok');
 
     const promise = withAdvancedRetry(fn, BASE);
     await vi.runAllTimersAsync();
@@ -54,7 +52,8 @@ describe('withAdvancedRetry — success path', () => {
   });
 
   it('passes the zero-based attempt index to fn', async () => {
-    const fn = vi.fn()
+    const fn = vi
+      .fn()
       .mockRejectedValueOnce(new Error('a'))
       .mockRejectedValueOnce(new Error('b'))
       .mockResolvedValue('c');
@@ -74,7 +73,8 @@ describe('withAdvancedRetry — success path', () => {
 describe('withAdvancedRetry — failure path (#149)', () => {
   it('throws the last error after all attempts are exhausted', async () => {
     const last = new Error('final');
-    const fn = vi.fn()
+    const fn = vi
+      .fn()
       .mockRejectedValueOnce(new Error('first'))
       .mockRejectedValueOnce(new Error('second'))
       .mockRejectedValue(last);
@@ -109,9 +109,7 @@ describe('withAdvancedRetry — shouldRetry predicate (#149)', () => {
   it('retries when shouldRetry returns true, stops when it returns false', async () => {
     const retryable = new Error('transient');
     const fatal = new Error('fatal');
-    const fn = vi.fn()
-      .mockRejectedValueOnce(retryable)
-      .mockRejectedValue(fatal);
+    const fn = vi.fn().mockRejectedValueOnce(retryable).mockRejectedValue(fatal);
 
     const shouldRetry = vi.fn((e: unknown) => e === retryable);
 
@@ -143,7 +141,8 @@ describe('withAdvancedRetry — shouldRetry predicate (#149)', () => {
 
 describe('withAdvancedRetry — exponential backoff (#151)', () => {
   it('performs more attempts when base is tiny (smoke test)', async () => {
-    const fn = vi.fn()
+    const fn = vi
+      .fn()
       .mockRejectedValueOnce(new Error('a'))
       .mockRejectedValueOnce(new Error('b'))
       .mockResolvedValue('ok');
@@ -170,9 +169,7 @@ describe('withAdvancedRetry — exponential backoff (#151)', () => {
       return originalSetTimeout(fn, 0) as unknown as ReturnType<typeof setTimeout>;
     });
 
-    const fn = vi.fn()
-      .mockRejectedValueOnce(new Error('x'))
-      .mockResolvedValue('ok');
+    const fn = vi.fn().mockRejectedValueOnce(new Error('x')).mockResolvedValue('ok');
 
     const promise = withAdvancedRetry(fn, {
       ...BASE,
@@ -192,7 +189,8 @@ describe('withAdvancedRetry — exponential backoff (#151)', () => {
 
 describe('withAdvancedRetry — linear backoff (#151)', () => {
   it('retries and resolves with linear strategy', async () => {
-    const fn = vi.fn()
+    const fn = vi
+      .fn()
       .mockRejectedValueOnce(new Error('a'))
       .mockRejectedValueOnce(new Error('b'))
       .mockResolvedValue('linear-ok');
@@ -228,7 +226,8 @@ describe('withAdvancedRetry — linear backoff (#151)', () => {
 
 describe('withAdvancedRetry — fixed backoff (#151)', () => {
   it('retries and resolves with fixed strategy', async () => {
-    const fn = vi.fn()
+    const fn = vi
+      .fn()
       .mockRejectedValueOnce(new Error('a'))
       .mockRejectedValueOnce(new Error('b'))
       .mockResolvedValue('fixed-ok');
@@ -265,9 +264,7 @@ describe('withAdvancedRetry — fixed backoff (#151)', () => {
 describe('withAdvancedRetry — jitter strategies (#151)', () => {
   it('full jitter: completes successfully', async () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
-    const fn = vi.fn()
-      .mockRejectedValueOnce(new Error('a'))
-      .mockResolvedValue('ok');
+    const fn = vi.fn().mockRejectedValueOnce(new Error('a')).mockResolvedValue('ok');
 
     const promise = withAdvancedRetry(fn, {
       ...BASE,
@@ -282,9 +279,7 @@ describe('withAdvancedRetry — jitter strategies (#151)', () => {
 
   it('equal jitter: completes successfully', async () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
-    const fn = vi.fn()
-      .mockRejectedValueOnce(new Error('a'))
-      .mockResolvedValue('ok');
+    const fn = vi.fn().mockRejectedValueOnce(new Error('a')).mockResolvedValue('ok');
 
     const promise = withAdvancedRetry(fn, {
       ...BASE,
@@ -299,9 +294,7 @@ describe('withAdvancedRetry — jitter strategies (#151)', () => {
 
   it('decorrelated jitter: completes successfully', async () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
-    const fn = vi.fn()
-      .mockRejectedValueOnce(new Error('a'))
-      .mockResolvedValue('ok');
+    const fn = vi.fn().mockRejectedValueOnce(new Error('a')).mockResolvedValue('ok');
 
     const promise = withAdvancedRetry(fn, {
       ...BASE,
@@ -315,9 +308,7 @@ describe('withAdvancedRetry — jitter strategies (#151)', () => {
   });
 
   it('none jitter: deterministic, completes successfully', async () => {
-    const fn = vi.fn()
-      .mockRejectedValueOnce(new Error('a'))
-      .mockResolvedValue('ok');
+    const fn = vi.fn().mockRejectedValueOnce(new Error('a')).mockResolvedValue('ok');
 
     const promise = withAdvancedRetry(fn, {
       ...BASE,
@@ -360,7 +351,12 @@ describe('AdvancedRetryStrategy type contract (#150)', () => {
   });
 
   it('accepts all four jitter strategies', () => {
-    const strategies: AdvancedRetryStrategy['jitterStrategy'][] = ['full', 'equal', 'decorrelated', 'none'];
+    const strategies: AdvancedRetryStrategy['jitterStrategy'][] = [
+      'full',
+      'equal',
+      'decorrelated',
+      'none',
+    ];
     for (const j of strategies) {
       const s: AdvancedRetryStrategy = { ...BASE, jitterStrategy: j };
       expect(s.jitterStrategy).toBe(j);

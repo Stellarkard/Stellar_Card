@@ -14,7 +14,10 @@
 // plaintext; lib/secret-box.open() pass-through handles that case
 // transparently when reading.
 
-const { seal, open, hasKey } = require('./secret-box');
+const { seal, open, hasKey, openToBuffer, zeroize } = require('./secret-box');
+
+// Exact shape seal() produces: enc:<24-hex iv>:<32-hex tag>:<hex ct>.
+const SEALED_RE = /^enc:[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]*$/i;
 
 /**
  * Seal the three sensitive card fields. card_brand is not sensitive
@@ -50,12 +53,50 @@ function sealCard(card) {
       `card-vault: sealCard expected a plain object, got ${Array.isArray(card) ? 'array' : typeof card}`,
     );
   }
-  return {
+  const sealed = {
     number: sealField('number', card.number),
     cvv: sealField('cvv', card.cvv),
     expiry: sealField('expiry', card.expiry),
     brand: card.brand ?? null,
   };
+  assertCvvNotPlaintext(sealed.cvv);
+  return sealed;
+}
+
+/**
+ * #595 — raw CVV must never reach a database column. Whenever a vault
+ * key is configured (always, in production — secret-box refuses to seal
+ * without one there), the value returned for `cvv` MUST be real
+ * ciphertext. This is a defence-in-depth check against a future
+ * secret-box regression (e.g. an idempotency bug returning its input)
+ * silently persisting the raw CVV.
+ * @param {string | null} sealedCvv
+ */
+function assertCvvNotPlaintext(sealedCvv) {
+  if (sealedCvv === null) return;
+  if ((hasKey() || process.env.NODE_ENV === 'production') && !SEALED_RE.test(sealedCvv)) {
+    throw new Error('card-vault: refusing to persist CVV that is not sealed ciphertext');
+  }
+}
+
+/**
+ * PCI-style display mask for a card number (#595): every digit except
+ * the last four is hidden, in fixed 4-4-4-4 groups so the mask doesn't
+ * reveal the PAN length — e.g. "****-****-****-1234".
+ *
+ * Accepts spaces/dashes in the input. Anything that isn't a plausible
+ * PAN (fewer than 4 digits, non-digit characters, non-string) returns a
+ * fully masked value rather than echoing the input, so this is safe to
+ * call on untrusted data in logs and error messages.
+ * @param {unknown} pan
+ * @returns {string}
+ */
+function maskCardNumber(pan) {
+  const FULLY_MASKED = '****-****-****-****';
+  if (typeof pan !== 'string') return FULLY_MASKED;
+  const digits = pan.replace(/[\s-]/g, '');
+  if (!/^\d{4,19}$/.test(digits)) return FULLY_MASKED;
+  return `****-****-****-${digits.slice(-4)}`;
 }
 
 // Adversarial audit F2-card-vault (2026-04-15): per-field maximum
@@ -151,4 +192,56 @@ function safeOpen(fieldName, value) {
   }
 }
 
-module.exports = { sealCard, openCard, vaultEnabled: hasKey };
+/**
+ * Open a card row into Buffers, hand them to `fn`, and zeroize every
+ * buffer afterwards — even if `fn` throws (#595). Use this on paths that
+ * only need the secrets briefly (forwarding to a processor, computing a
+ * digest) so decrypted card data doesn't outlive the call in memory the
+ * way immutable JS strings from openCard() do.
+ *
+ * `fn` receives `{ number, cvv, expiry }` as Buffers (or null) plus the
+ * non-sensitive `brand`. Do not retain the buffers beyond `fn`.
+ *
+ * @template T
+ * @param {Record<string, any>} row
+ * @param {(card: { number: Buffer|null, cvv: Buffer|null, expiry: Buffer|null, brand: string|null }) => T} fn
+ * @returns {Promise<Awaited<T>>}
+ */
+async function withOpenedCard(row, fn) {
+  if (!row) throw new Error('card-vault: withOpenedCard called without a row');
+  /** @type {Buffer[]} */
+  const opened = [];
+  const openField = (/** @type {string} */ fieldName, /** @type {unknown} */ value) => {
+    if (!value) return null;
+    try {
+      const buf = openToBuffer(/** @type {string} */ (value));
+      opened.push(buf);
+      return buf;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const wrapped = new Error(`card-vault: failed to open ${fieldName}: ${msg}`);
+      /** @type {any} */ (wrapped).cause = err;
+      /** @type {any} */ (wrapped).field = fieldName;
+      throw wrapped;
+    }
+  };
+  try {
+    const card = {
+      number: openField('card_number', row.card_number ?? row.number ?? null),
+      cvv: openField('card_cvv', row.card_cvv ?? row.cvv ?? null),
+      expiry: openField('card_expiry', row.card_expiry ?? row.expiry ?? null),
+      brand: row.card_brand ?? row.brand ?? null,
+    };
+    return await fn(card);
+  } finally {
+    for (const buf of opened) zeroize(buf);
+  }
+}
+
+module.exports = {
+  sealCard,
+  openCard,
+  withOpenedCard,
+  maskCardNumber,
+  vaultEnabled: hasKey,
+};

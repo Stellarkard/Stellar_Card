@@ -7,7 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('./db');
 const { assertSafeUrl } = require('./lib/ssrf');
 const { sendUsdc, sendXlm } = require('./payments/xlm-sender');
-const { event: bizEvent } = require('./lib/logger');
+const { event: bizEvent, log } = require('./lib/logger');
 
 function isFrozen() {
   return (
@@ -45,9 +45,285 @@ function redactCardFields(payload) {
   };
 }
 
-// Retry delays: attempt 1 → 30s, attempt 2 → 5m, attempt 3 → 30m
-const WEBHOOK_RETRY_DELAYS_MS = [30_000, 5 * 60_000, 30 * 60_000];
+// Default retry schedule: exponential backoff with base 30s and multiplier 2
+// (attempt 1 → 30s, attempt 2 → 60s, attempt 3 → 120s). The runtime ladder is
+// env-tunable — see webhookRetryConfig below — so these remain the documented
+// defaults. MAX_WEBHOOK_ATTEMPTS additionally feeds the /status permanently-
+// failed metric (app.js, api/status.js), which keeps the default here.
+const WEBHOOK_RETRY_DELAYS_MS = [30_000, 60_000, 120_000];
 const MAX_WEBHOOK_ATTEMPTS = 3;
+// ── Webhook retry configuration (Part 2 of #webhook-retry) ──────────────────
+//
+// Part 1 shipped a fixed WEBHOOK_RETRY_DELAYS_MS lookup table with three
+// hard-coded delays (30s / 60s / 120s). Part 2 replaces the ad-hoc table
+// with a proper exponential-backoff formula that:
+//
+//   1. Adds full jitter (AWS-style: random(0, computed_delay)) so a burst
+//      of simultaneous failures doesn't produce a thundering-herd retry
+//      wave at t+30s, t+60s, t+120s for every delivery in the queue. With
+//      jitter each row retries at a uniformly random offset inside the
+//      computed window; the mean matches the deterministic schedule but
+//      the variance breaks up the clusters.
+//
+//   2. Makes the three tuning knobs (base delay, multiplier, max delay)
+//      env-configurable so ops can tune retry aggressiveness without a
+//      code change — especially useful for staging environments where a
+//      faster schedule (e.g. WEBHOOK_RETRY_BASE_MS=5000) unblocks manual
+//      testing without loosening production knobs.
+//
+//   3. Keeps the WEBHOOK_RETRY_DELAYS_MS table in sync as a
+//      human-readable description of the default schedule (values are
+//      approximate given jitter), so existing tests that read the table
+//      directly continue to document the intended behaviour without
+//      being byte-for-byte contract tests of the formula output.
+//
+// The three env vars — all optional, fall back to production defaults:
+//
+//   WEBHOOK_RETRY_BASE_MS   (default 30 000) — first retry delay, base
+//   WEBHOOK_RETRY_FACTOR    (default 2)      — multiplier per attempt
+//   WEBHOOK_RETRY_MAX_MS    (default 3 600 000 = 1 h) — per-attempt cap
+
+// ── Part 4: ops-tunable retry schedule ─────────────────────────────────────
+//
+// The webhook retry ladder (attempt ceiling + exponential backoff base/factor/
+// cap) is operatively configurable instead of hardcoded, so ops can tune
+// delivery pressure without a redeploy:
+//
+//   WEBHOOK_MAX_ATTEMPTS          default 3       — attempts before abandon
+//   WEBHOOK_RETRY_BASE_DELAY_MS   default 30000   — first retry delay (30s)
+//   WEBHOOK_RETRY_FACTOR          default 2       — multiplier per attempt
+//   WEBHOOK_RETRY_MAX_DELAY_MS    default 3600000 — per-delay ceiling (1h)
+//
+// Config is resolved lazily on every use so jobs.js::retryWebhooks and the
+// exported schedule stay in agreement at runtime. Every value is validated:
+// anything missing, non-numeric, or out of range falls back to the default,
+// and the FIRST bad value is surfaced loudly via a
+// webhook.retry.config_invalid log line + webhook.retry_config_invalid
+// bizEvent — a misconfigured env must never silently change the queue
+// schedule (a 0 base, for example, would be a tight retry loop).
+let webhookRetryConfigWarned = false;
+
+function warnWebhookRetryConfig(key, raw) {
+  if (webhookRetryConfigWarned) return;
+  webhookRetryConfigWarned = true;
+  const fields = { key, raw_value: String(raw) };
+  log('error', 'webhook.retry.config_invalid', fields);
+  bizEvent('webhook.retry_config_invalid', fields);
+}
+
+// Positive-integer config read. `fallback` applies on a missing/invalid value.
+function readRetryInt(raw, key, fallback, min, max) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= min && n <= max) return n;
+  warnWebhookRetryConfig(key, raw);
+  return fallback;
+}
+
+// Positive-numeric config read; allows fractional values (e.g. factor 1.5).
+function readRetryNum(raw, key, fallback, min, max) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= min && n <= max) return n;
+  warnWebhookRetryConfig(key, raw);
+  return fallback;
+}
+
+/**
+ * Resolve the current retry-ladder configuration from the environment.
+ * @returns {{ maxAttempts: number, baseDelayMs: number, factor: number, maxDelayMs: number }}
+ */
+function webhookRetryConfig() {
+  return {
+    maxAttempts: readRetryInt(process.env.WEBHOOK_MAX_ATTEMPTS, 'WEBHOOK_MAX_ATTEMPTS', 3, 1, 50),
+    baseDelayMs: readRetryInt(
+      process.env.WEBHOOK_RETRY_BASE_DELAY_MS,
+      'WEBHOOK_RETRY_BASE_DELAY_MS',
+      30_000,
+      1,
+      3_600_000,
+    ),
+    factor: readRetryNum(process.env.WEBHOOK_RETRY_FACTOR, 'WEBHOOK_RETRY_FACTOR', 2, 1, 10),
+    maxDelayMs: readRetryInt(
+      process.env.WEBHOOK_RETRY_MAX_DELAY_MS,
+      'WEBHOOK_RETRY_MAX_DELAY_MS',
+      3_600_000,
+      1,
+      86_400_000,
+    ),
+  };
+}
+
+// Attempt ceiling for the queue worker (jobs.js::retryWebhooks) — same config
+// as backoff, so the ladder length and its delays can never disagree.
+function getWebhookMaxAttempts() {
+  return webhookRetryConfig().maxAttempts;
+}
+
+function _resetWebhookRetryConfigWarned() {
+  webhookRetryConfigWarned = false;
+}
+
+/**
+ * Finite-number guard. Every delay below lands in
+ * `new Date(Date.now() + delay).toISOString()`, which throws RangeError on a
+ * non-finite offset — and that throw happens inside the queue worker's catch,
+ * so the `UPDATE webhook_queue SET attempts` never runs and the row retries
+ * forever. A bad delay is therefore a hot loop, not a graceful failure.
+ *
+ * @param {unknown} value
+ * @param {number} fallback
+ * @returns {number}
+ */
+function finiteOr(value, fallback) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/**
+ * Parse an env var that must be a positive integer, with a safe fallback.
+ *
+ * Same fail-closed pattern as jobs.js::parsePositiveMs: a non-numeric env
+ * value must never silently collapse the retry schedule (e.g. a
+ * WEBHOOK_RETRY_BASE_MS typo of "30s" parsing to NaN → 0ms base → tight
+ * retry loop saturating the queue worker).
+ *
+ * @param {string} name  env var name, for the warning message
+ * @param {number} def   default value (must itself be a positive finite integer)
+ * @returns {number}
+ */
+function parseRetryEnv(name, def) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return def;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    console.warn(
+      `[webhook] ${name}=${JSON.stringify(raw)} is not a positive integer — using default ${def}ms`,
+    );
+    return def;
+  }
+  return parsed;
+}
+
+/**
+ * Build the retry configuration from env vars (or explicit overrides).
+ *
+ * Returning a config object rather than module-level constants means tests
+ * can call buildRetryConfig({ baseDelayMs: 100 }) without touching
+ * process.env, and the production singleton below is just one call to this
+ * factory with no arguments.
+ *
+ * @param {{ baseDelayMs?: number, factor?: number, maxDelayMs?: number, maxAttempts?: number, jitter?: boolean }} [overrides]
+ */
+function buildRetryConfig(overrides = {}) {
+  return {
+    // Base delay for the first retry. Env-tunable for dev/staging.
+    baseDelayMs: finiteOr(
+      overrides.baseDelayMs,
+      parseRetryEnv('WEBHOOK_RETRY_BASE_MS', 30_000),
+    ),
+    // Exponential factor. Must be >= 1 to avoid collapsing delays.
+    factor: Math.max(1, finiteOr(overrides.factor, parseRetryEnv('WEBHOOK_RETRY_FACTOR', 2))),
+    // Hard cap per attempt to prevent multi-day waits on extreme attempt counts.
+    maxDelayMs: finiteOr(
+      overrides.maxDelayMs,
+      parseRetryEnv('WEBHOOK_RETRY_MAX_MS', 3_600_000),
+    ),
+    // Total attempts before permanently abandoning the delivery.
+    maxAttempts: Math.max(
+      1,
+      finiteOr(overrides.maxAttempts, parseRetryEnv('WEBHOOK_RETRY_MAX_ATTEMPTS', 3)),
+    ),
+    // Full jitter (uniform random in [0, computedDelay]).
+    // Default true — breaks up thundering-herd retry waves when a burst of
+    // deliveries fail simultaneously (e.g. target endpoint goes down).
+    // Set false in tests to get deterministic delays.
+    jitter: overrides.jitter !== undefined ? Boolean(overrides.jitter) : true,
+  };
+}
+
+// Production singleton. Reads env at first require() so a restart picks
+// up any changes. Tests that need a different schedule call
+// buildRetryConfig() and pass the result explicitly.
+const DEFAULT_RETRY_CONFIG = buildRetryConfig();
+
+// WEBHOOK_RETRY_DELAYS_MS is kept as a documentation anchor: the three
+// values describe the *deterministic* (no-jitter) schedule for the default
+// config. They are NOT used directly by the formula — see calculateWebhookBackoff.
+const WEBHOOK_RETRY_DELAYS_MS = [
+  DEFAULT_RETRY_CONFIG.baseDelayMs,
+  DEFAULT_RETRY_CONFIG.baseDelayMs * DEFAULT_RETRY_CONFIG.factor,
+  DEFAULT_RETRY_CONFIG.baseDelayMs * Math.pow(DEFAULT_RETRY_CONFIG.factor, 2),
+];
+const MAX_WEBHOOK_ATTEMPTS = DEFAULT_RETRY_CONFIG.maxAttempts;
+
+/**
+ * Calculates exponential backoff delay for webhook retries, with optional
+ * full jitter.
+ *
+ * Full jitter (AWS recommendation): instead of delivering at exactly
+ * `base * factor^(n-1)`, deliver at a random point in [0, that computed
+ * value]. This spreads retries uniformly across the window, making the
+ * mean retry latency roughly half the deterministic value but preventing
+ * the synchronised retry spike that occurs when many deliveries fail at
+ * the same time (e.g. target endpoint restart).
+ *
+ * @param {number} attempt - Current attempt count (1-indexed).
+ * @param {ReturnType<typeof buildRetryConfig>} [config] - Retry config; defaults to the production singleton.
+ * @returns {number} Delay in ms, always a finite non-negative integer.
+ */
+function calculateWebhookBackoff(attempt, options = {}) {
+  // Unset options fall back to the env-tunable ladder (webhookRetryConfig);
+  // an explicit option always wins. Guard against collapse-to-zero either way.
+  const cfg = webhookRetryConfig();
+  const base = Math.max(0, finiteOr(options.baseDelayMs, cfg.baseDelayMs));
+  // factor < 1 would collapse the delay towards 0 — a tight retry loop.
+  const factor = Math.max(1, finiteOr(options.factor, cfg.factor));
+  const max = Math.max(0, finiteOr(options.maxDelayMs, cfg.maxDelayMs)); // 1 hour cap
+function calculateWebhookBackoff(attempt, config) {
+  const cfg = config || DEFAULT_RETRY_CONFIG;
+  const base = Math.max(0, finiteOr(cfg.baseDelayMs, 30_000));
+  const factor = Math.max(1, finiteOr(cfg.factor, 2));
+  const max = Math.max(0, finiteOr(cfg.maxDelayMs, 3_600_000));
+  // `attempt` comes off a SQL column and may be float or NULL.
+  const n = Number.isFinite(attempt) ? Math.max(1, Math.floor(attempt)) : 1;
+
+  const computed = base * Math.pow(factor, n - 1);
+  if (!Number.isFinite(computed)) return max;
+
+  const capped = Math.min(Math.max(0, Math.round(computed)), max);
+
+  // Full jitter: uniform random in [0, capped]. Math.random() returns a
+  // float in [0, 1); multiply by (capped + 1) and floor to get an integer
+  // in [0, capped].
+  if (cfg.jitter) {
+    return Math.floor(Math.random() * (capped + 1));
+  }
+  return capped;
+}
+
+/**
+ * Get retry delay in milliseconds for a specific attempt number.
+ *
+ * @param {number} attempt - Zero-indexed, i.e. the row's current `attempts`
+ *   count. 0 is the first retry after the initial send.
+ * @returns {number} Finite, non-negative delay for the attempt — resolve it
+ *   through calculateWebhookBackoff for EVERY rung (not just past the
+ *   predefined array) so a tuned base/factor/cap is honored end to end.
+ *   Under the default config this equals WEBHOOK_RETRY_DELAYS_MS exactly.
+ *   The "abandon once MAX_WEBHOOK_ATTEMPTS is reached" decision lives in
+ *   jobs.js::retryWebhooks via getWebhookMaxAttempts, not here.
+ * @param {ReturnType<typeof buildRetryConfig>} [config] - Retry config; defaults to the production singleton.
+ * @returns {number} Finite, non-negative delay in ms.
+ */
+function getWebhookRetryDelay(attempt, config) {
+  const cfg = config || DEFAULT_RETRY_CONFIG;
+  const index = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  return calculateWebhookBackoff(index + 1);
+  // calculateWebhookBackoff is 1-indexed; the queue `attempts` column is the
+  // number of sends that have already happened, so attempt=0 → first retry
+  // → attempt number 1 in the formula.
+  return calculateWebhookBackoff(index + 1, cfg);
+}
 
 // Audit A-7: per-origin circuit breaker. If a webhook origin fails
 // `CB_THRESHOLD` times inside `CB_WINDOW_MS`, subsequent calls to that
@@ -257,7 +533,7 @@ async function enqueueWebhook(url, payload, webhookSecret) {
   } catch (err) {
     deliveryErr = err;
   }
-  const nextAttempt = new Date(Date.now() + WEBHOOK_RETRY_DELAYS_MS[0]).toISOString();
+  const nextAttempt = new Date(Date.now() + getWebhookRetryDelay(0)).toISOString();
   const errMessage = /** @type {Error} */ (deliveryErr)?.message || String(deliveryErr);
   try {
     db.prepare(
@@ -589,12 +865,24 @@ module.exports = {
   enqueueWebhook,
   fireWebhook,
   redactCardFields,
+  calculateWebhookBackoff,
+  getWebhookRetryDelay,
+  getWebhookMaxAttempts,
+  webhookRetryConfig,
   WEBHOOK_RETRY_DELAYS_MS,
   MAX_WEBHOOK_ATTEMPTS,
+  // Test-only exports (audit hardening + retry-config introspection).
+  _resetWebhookRetryConfigWarned,
+  buildRetryConfig,
+  WEBHOOK_RETRY_DELAYS_MS,
+  MAX_WEBHOOK_ATTEMPTS,
+  DEFAULT_RETRY_CONFIG,
   // Test-only exports for the 2026-04-15 audit hardening.
   _computeUsdcRefundAmount: computeUsdcRefundAmount,
   _recordCircuitSuccess: recordCircuitSuccess,
   _recordCircuitFailure: recordCircuitFailure,
   _circuitIsOpen: circuitIsOpen,
   _circuitBreakerState: circuitBreakerState,
+  _parseRetryEnv: parseRetryEnv,
+  _finiteOr: finiteOr,
 };

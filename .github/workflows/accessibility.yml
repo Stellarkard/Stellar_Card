@@ -1,0 +1,55 @@
+name: Accessibility audit
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'stellar_card-frontend/**'
+      - '.github/workflows/accessibility.yml'
+  push:
+    branches: [main, develop]
+    paths:
+      - 'stellar_card-frontend/**'
+      - '.github/workflows/accessibility.yml'
+
+concurrency:
+  group: accessibility-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  axe:
+    name: Playwright + axe
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: stellar_card-frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+          cache-dependency-path: stellar_card-frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Audit critical and serious violations
+        run: npx playwright test e2e/accessibility.spec.ts
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accessibility-report
+          path: stellar_card-frontend/playwright-report
+          if-no-files-found: ignore
+          retention-days: 7

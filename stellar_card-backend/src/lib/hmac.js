@@ -267,9 +267,58 @@ function safeEqHex(a, b) {
   }
 }
 
+// ── Generic partner webhook signatures (issue #591) ─────────────────────────
+//
+// Simpler scheme for inbound partner webhooks that don't speak the vcc v3
+// protocol above: `sha256=<hex HMAC-SHA256(secret, rawBody)>` in an
+// `X-Webhook-Signature` / `X-Signature` header. No timestamp/order binding —
+// only use it on endpoints whose handlers are idempotent or carry their own
+// replay protection.
+
+const SHA256_HEX = /^[0-9a-f]{64}$/i;
+
+/**
+ * @param {{ secret: string, rawBody: string | Buffer }} args
+ * @returns {string} lowercase hex digest
+ */
+function signWebhookBody({ secret, rawBody }) {
+  if (!secret) throw new Error('signWebhookBody: secret is required');
+  return crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+}
+
+/**
+ * Parses `sha256=<64 hex>` (or bare `<64 hex>`). Returns the hex digest or
+ * null when the header is absent or not a well-formed SHA-256 signature.
+ * @param {unknown} header
+ * @returns {string | null}
+ */
+function parseSignatureHeader(header) {
+  if (typeof header !== 'string') return null;
+  const value = header.trim().replace(/^sha256=/i, '');
+  return SHA256_HEX.test(value) ? value.toLowerCase() : null;
+}
+
+/**
+ * Constant-time verification of a generic partner webhook signature.
+ * @param {{ secret: string | undefined, rawBody: string | Buffer | undefined | null, signatureHeader: unknown }} args
+ * @returns {{ ok: true } | { ok: false, reason: 'missing_fields' | 'bad_signature' }}
+ */
+function verifyWebhookBody({ secret, rawBody, signatureHeader }) {
+  if (!secret || rawBody === undefined || rawBody === null || !signatureHeader) {
+    return { ok: false, reason: 'missing_fields' };
+  }
+  const provided = parseSignatureHeader(signatureHeader);
+  if (!provided) return { ok: false, reason: 'bad_signature' };
+  const expected = signWebhookBody({ secret, rawBody });
+  return safeEqHex(provided, expected) ? { ok: true } : { ok: false, reason: 'bad_signature' };
+}
+
 module.exports = {
   signCallback,
   verifyCallback,
   safeEqHex,
   DEFAULT_SKEW_MS,
+  signWebhookBody,
+  parseSignatureHeader,
+  verifyWebhookBody,
 };

@@ -174,6 +174,56 @@ describe('POST /vcc-callback — field validation', () => {
     assert.equal(res.status, 404);
     assert.equal(res.body.error, 'order_not_found');
   });
+
+  // The card fields are attacker-influenced and get sealed verbatim into
+  // the card vault, so they carry length bounds. A body that trips the
+  // bound must be refused before sealCard()/the UPDATE, not written.
+  it('returns 400 invalid_card when card.number exceeds its bound', async () => {
+    const id = seedOrder();
+    const res = await postCallback({
+      order_id: id,
+      status: 'fulfilled',
+      card: { number: '4'.repeat(33), cvv: '123', expiry: '12/27' },
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_card');
+    assert.match(res.body.message, /card\.number is too long/);
+  });
+
+  it('returns 400 invalid_card when card.brand exceeds its bound', async () => {
+    const id = seedOrder();
+    const res = await postCallback({
+      order_id: id,
+      status: 'fulfilled',
+      card: {
+        number: '4111111111111111',
+        cvv: '123',
+        expiry: '12/27',
+        brand: 'V'.repeat(129),
+      },
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_card');
+    assert.match(res.body.message, /card\.brand is too long/);
+  });
+
+  it('leaves the order untouched when the card fails validation', async () => {
+    const { db } = require('../helpers/app');
+    const id = seedOrder();
+    // Read the seeded status rather than assuming it — the point of the
+    // assertion is that nothing moved, not what it started as.
+    const before = db.prepare('SELECT status, card_number FROM orders WHERE id = ?').get(id);
+    const res = await postCallback({
+      order_id: id,
+      status: 'fulfilled',
+      card: { number: '', cvv: '', expiry: '' },
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'invalid_card');
+    const after = db.prepare('SELECT status, card_number FROM orders WHERE id = ?').get(id);
+    assert.equal(after.status, before.status);
+    assert.equal(after.card_number, before.card_number);
+  });
 });
 
 // ── Fulfilled path ────────────────────────────────────────────────────────────
@@ -490,4 +540,42 @@ describe('POST /vcc-callback — F2 per-order secret decrypt failure', () => {
     const res = await postCallback(body);
     assert.equal(res.status, 200);
   });
+});
+
+// ── Issue #591: generic signature header aliases ─────────────────────────────
+
+describe('POST /vcc-callback — X-Webhook-Signature / X-Signature aliases (#591)', () => {
+  beforeEach(() => resetDb());
+
+  for (const alias of ['X-Webhook-Signature', 'X-Signature']) {
+    it(`verifies a correctly signed callback sent with ${alias}`, async () => {
+      const orderId = seedOrder({ status: 'ordering' });
+      const payload = { order_id: orderId, status: 'failed', error: 'declined' };
+      const { timestamp, signature, bodyStr } = sign(payload);
+      const res = await request
+        .post('/vcc-callback')
+        .set('Content-Type', 'application/json')
+        .set('X-VCC-Timestamp', timestamp)
+        .set('X-VCC-Order-Id', orderId)
+        .set(alias, signature)
+        .send(bodyStr);
+      assert.notEqual(res.status, 401, `expected the ${alias} alias to pass signature checks`);
+    });
+
+    it(`rejects a tampered body sent with ${alias}`, async () => {
+      const orderId = seedOrder({ status: 'ordering' });
+      const payload = { order_id: orderId, status: 'failed' };
+      const { timestamp, signature } = sign(payload);
+      const tampered = JSON.stringify({ order_id: orderId, status: 'fulfilled' });
+      const res = await request
+        .post('/vcc-callback')
+        .set('Content-Type', 'application/json')
+        .set('X-VCC-Timestamp', timestamp)
+        .set('X-VCC-Order-Id', orderId)
+        .set(alias, signature)
+        .send(tampered);
+      assert.equal(res.status, 401);
+      assert.equal(res.body.error, 'invalid_signature');
+    });
+  }
 });

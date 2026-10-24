@@ -34,6 +34,11 @@
 //     surface as a cryptic fetch error at runtime.
 
 const { z } = require('zod');
+// Single source of truth for the Sentry DSN shape. Importing it keeps
+// this schema and the runtime guard in lib/sentry-config.js from
+// drifting apart. Requiring the module has no side effects — Sentry is
+// not initialised until initSentry() is called from the entrypoint.
+const { _DSN_SHAPE: SENTRY_DSN_SHAPE } = require('./lib/sentry-config');
 
 // F1-env: Stellar StrKey format. Per https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0023.md
 // all strkeys (public key G..., secret key S..., contract C..., muxed M...)
@@ -176,6 +181,15 @@ const EnvSchema = z
     // recommended for HMAC-SHA256 — 16 was the historical floor but gives only
     // ~80 bits of strength. Audit finding C-13.
     VCC_CALLBACK_SECRET: z.string().min(32, 'VCC_CALLBACK_SECRET must be at least 32 characters'),
+    // Shared secret for generic partner webhooks verified by
+    // middleware/verifyWebhookSignature.js (issue #591). Optional.
+    PARTNER_WEBHOOK_SECRET: z
+      .string()
+      .min(32, 'PARTNER_WEBHOOK_SECRET must be at least 32 characters')
+      .optional(),
+    // Local-development-only escape hatch for webhook signature checks.
+    // Honoured only when NODE_ENV=development; refused at boot in production.
+    WEBHOOK_SIGNATURE_BYPASS: z.enum(['true', 'false']).optional(),
 
     // CORS — comma-separated list of allowed origins for the agent API.
     // F3-env: each entry is parsed as an http(s) URL origin at boot so
@@ -264,6 +278,59 @@ const EnvSchema = z
       .string()
       .regex(/^[0-9a-fA-F]{64}$/, 'CARDS402_SECRET_BOX_KEY must be 64 hex characters (32 bytes)')
       .optional(),
+
+    // ── Sentry error tracking (all optional) ───────────────────────────
+    //
+    // Validated here rather than only inside lib/sentry-config.js so a
+    // typo is caught at boot alongside every other env mistake, instead
+    // of degrading silently into "error tracking is off" — which is the
+    // failure mode nobody notices until an incident, when there is
+    // nothing to look at.
+    //
+    // lib/sentry-config.js re-checks the DSN shape and disables itself
+    // rather than throwing, so an operator who bypasses this validation
+    // still gets a running API. Belt and braces: this schema makes the
+    // mistake loud, sentry-config makes it non-fatal.
+    // The pattern is imported from lib/sentry-config rather than
+    // duplicated, so the boot-time check and the runtime check cannot
+    // drift apart — a DSN this schema accepts is always one
+    // sentry-config will actually use.
+    SENTRY_DSN: z
+      .string()
+      .regex(SENTRY_DSN_SHAPE, 'SENTRY_DSN must look like https://<publicKey>@<host>/<projectId>')
+      .optional(),
+    // Overrides the environment tag Sentry groups events by. Defaults to
+    // NODE_ENV, which is right for most deploys; set this when several
+    // NODE_ENV=production deploys (canary, region) need separate buckets.
+    SENTRY_ENVIRONMENT: z.string().min(1).optional(),
+    // Release identifier — a git SHA or semver tag. Without it Sentry
+    // cannot attribute a regression to a deploy.
+    SENTRY_RELEASE: z.string().min(1).optional(),
+    // Performance-trace sampling, 0..1. Default 0.1 in sentry-config.
+    SENTRY_TRACES_SAMPLE_RATE: z
+      .string()
+      .regex(/^(0(\.\d+)?|1(\.0+)?)$/, 'SENTRY_TRACES_SAMPLE_RATE must be a number between 0 and 1')
+      .optional(),
+    // CPU profiling sampling, 0..1. Defaults to 0 (off) because it needs
+    // the optional native @sentry/profiling-node addon.
+    SENTRY_PROFILES_SAMPLE_RATE: z
+      .string()
+      .regex(
+        /^(0(\.\d+)?|1(\.0+)?)$/,
+        'SENTRY_PROFILES_SAMPLE_RATE must be a number between 0 and 1',
+      )
+      .optional(),
+  })
+  .superRefine((val, ctx) => {
+    // Issue #591: the webhook signature bypass must never be enabled in
+    // production — fail boot rather than silently ignore it.
+    if (val.NODE_ENV === 'production' && val.WEBHOOK_SIGNATURE_BYPASS === 'true') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'WEBHOOK_SIGNATURE_BYPASS=true is not allowed in production.',
+        path: ['WEBHOOK_SIGNATURE_BYPASS'],
+      });
+    }
   })
   .superRefine((val, ctx) => {
     // Production must have a secret-box key set. Dev/test can skip it and

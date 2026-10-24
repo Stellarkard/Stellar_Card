@@ -34,3 +34,23 @@ export const typography = {
     md:   '0.78rem',
   },
 } as const;
+
+/**
+ * Spacing scale shared across dashboard UI components. Use these
+ * constants instead of magic numbers to keep gaps and paddings
+ * consistent across cards, tables, and layout containers.
+ */
+export const spacing = {
+  /** 0.25rem — tight inline gaps (icon + label, badge padding) */
+  xs:    '0.25rem',
+  /** 0.35rem — compact element spacing (breadcrumb separators) */
+  sm:    '0.35rem',
+  /** 0.55rem — default card inner gap (between KpiTile rows) */
+  md:    '0.55rem',
+  /** 0.75rem — comfortable section spacing (between Card children) */
+  lg:    '0.75rem',
+  /** 1.25rem — page-level gap between major sections */
+  xl:    '1.25rem',
+  /** 1.5rem — page container top/bottom padding */
+  '2xl': '1.5rem',
+} as const;

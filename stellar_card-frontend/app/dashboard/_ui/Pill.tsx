@@ -37,6 +37,7 @@ export function Pill({ tone = 'neutral', pulse, children, title }: Props) {
       }}
     >
       <span
+        aria-hidden="true"
         style={{
           width: 6,
           height: 6,

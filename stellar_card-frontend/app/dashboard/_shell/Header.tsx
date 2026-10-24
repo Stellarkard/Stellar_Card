@@ -33,21 +33,22 @@ function SvgIcon({ d, size = 16 }: { d: string; size?: number }) {
 export function Header({ onMenuToggle }: { onMenuToggle?: () => void }) {
   const { user, info, approvals } = useDashboard();
   const router = useRouter();
-  const [theme, setTheme] = useState<Theme>('dark');
+  const [theme, setTheme] = useState<Theme>(() => {
+    if (typeof window !== 'undefined') return loadTheme();
+    return 'dark';
+  });
   const [avatarOpen, setAvatarOpen] = useState(false);
   const [bellOpen, setBellOpen] = useState(false);
 
-  // Theme: load saved on mount, listen for system change in system mode.
+  // Apply initial theme on mount, listen for system change in system mode.
   useEffect(() => {
-    const initial = loadTheme();
-    setTheme(initial);
-    applyTheme(initial);
-    if (initial !== 'system') return;
+    applyTheme(theme);
+    if (theme !== 'system') return;
     const mq = window.matchMedia('(prefers-color-scheme: light)');
     const handler = () => applyTheme('system');
     mq.addEventListener('change', handler);
     return () => mq.removeEventListener('change', handler);
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function cycleTheme() {
     const next: Theme = theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark';

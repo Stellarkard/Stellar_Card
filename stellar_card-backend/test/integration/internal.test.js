@@ -199,7 +199,8 @@ describe('GET /internal/orders/:id/card — F1 audit row shape', () => {
     // order from each. The audit rows must reflect the different
     // roles. Pre-fix they'd both be 'internal_card_reveal' and
     // an ops query filtering by role couldn't distinguish them.
-    process.env.CARDS402_CARD_REVEAL_EMAILS = 'owner-test@stellar_card.com,admin-test@stellar_card.com';
+    process.env.CARDS402_CARD_REVEAL_EMAILS =
+      'owner-test@stellar_card.com,admin-test@stellar_card.com';
 
     const owner = createTestSession({ email: 'owner-test@stellar_card.com', role: 'owner' });
     const admin = createTestSession({ email: 'admin-test@stellar_card.com', role: 'admin' });

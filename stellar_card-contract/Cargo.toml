@@ -12,6 +12,7 @@ soroban-sdk = { version = "=22.0.11", features = [] }
 
 [dev-dependencies]
 soroban-sdk = { version = "=22.0.11", features = ["testutils"] }
+proptest = "1.4"
 
 [profile.release]
 opt-level = "z"
@@ -22,3 +23,9 @@ debug-assertions = false
 panic = "abort"
 codegen-units = 1
 lto = true
+incremental = false
+
+# Issue #422 (Part 4): Optimize all dependencies for WASM binary size
+[profile.release.package."*"]
+opt-level = "z"
+strip = "symbols"

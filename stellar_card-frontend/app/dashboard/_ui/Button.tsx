@@ -9,6 +9,13 @@
 // Bright #00ff88 fills are deliberately avoided — they read as
 // "hackathon" rather than "enterprise". The Live indicator's tone is
 // the green we use everywhere now.
+//
+// A11y (#136):
+//   - Explicit type="button" prevents accidental form submission.
+//   - aria-disabled mirrors the disabled prop for AT that reads
+//     aria attributes rather than the HTML attribute.
+//   - aria-label passthrough lets icon-only buttons be annotated
+//     by the caller.
 
 import type { CSSProperties, ReactNode, ButtonHTMLAttributes } from 'react';
 
@@ -30,6 +37,9 @@ export function Button({
   icon,
   children,
   style,
+  type = 'button',
+  disabled,
+  'aria-label': ariaLabelProp,
   ...rest
 }: Props) {
   const base: CSSProperties = {
@@ -43,10 +53,11 @@ export function Button({
     letterSpacing: '0.01em',
     padding: size === 'sm' ? '0.35rem 0.65rem' : '0.5rem 0.85rem',
     borderRadius: 6,
-    cursor: 'pointer',
+    cursor: disabled ? 'not-allowed' : 'pointer',
     transition: 'background 120ms, border-color 120ms, color 120ms',
     lineHeight: 1,
     whiteSpace: 'nowrap',
+    opacity: disabled ? 0.5 : 1,
   };
   const variants: Record<Variant, CSSProperties> = {
     primary: {
@@ -70,15 +81,18 @@ export function Button({
       border: '1px solid var(--red-border)',
     },
   };
-  const ariaLabel = rest['aria-label'] || (typeof children === 'string' ? children : undefined);
-  
+  const ariaLabel = ariaLabelProp || (typeof children === 'string' ? children : undefined);
+
   return (
-    <button 
-      {...rest} 
+    <button
+      {...rest}
+      type={type}
+      disabled={disabled}
+      aria-disabled={disabled}
       aria-label={ariaLabel}
       style={{ ...base, ...variants[variant], ...style }}
     >
-      {icon && <span aria-hidden="true" style={{ display: 'inline-flex', alignItems: 'center' }}>{icon}</span>}
+      {icon ? <span aria-hidden="true" style={{ display: 'inline-flex', alignItems: 'center' }}>{icon}</span> : null}
       {children}
     </button>
   );

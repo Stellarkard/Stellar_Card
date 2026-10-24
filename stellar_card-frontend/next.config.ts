@@ -45,6 +45,7 @@ const nextConfig: NextConfig = {
   // optimizePackageImports rewrites named imports from large packages into
   // per-module requires so unused exports are tree-shaken at the module
   // boundary rather than requiring explicit paths everywhere in app code.
+  // See docs/PERFORMANCE.md for detailed optimization strategies.
   experimental: {
     optimizePackageImports: ['geist', 'next/font/google'],
   },
@@ -89,6 +90,23 @@ const nextConfig: NextConfig = {
       };
     }
     return config;
+  },
+  // Image optimization hints (#133).
+  // remote patterns allow the dashboard to render user avatars / agent
+  // icons hosted on Cloudflare R2 without disabling the built-in
+  // image optimizer. Quality 85 is a good trade-off for dashboard UIs —
+  // crisp enough for data-dense tables, meaningfully smaller than 100.
+  images: {
+    formats: ['image/avif', 'image/webp'],
+    minimumCacheTTL: 3600,
+    deviceSizes: [640, 750, 828, 1080, 1200, 1920],
+    imageSizes: [16, 32, 48, 64, 96, 128, 256],
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: '**.r2.cloudflarestorage.com',
+      },
+    ],
   },
   async headers() {
     return [

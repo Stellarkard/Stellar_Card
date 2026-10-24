@@ -27,12 +27,18 @@ process.env.VCC_API_BASE = 'https://vcc.ctx.com';
 process.env.CARDS402_BASE_URL = 'https://api.stellar_card.test';
 process.env.VCC_CALLBACK_SECRET = 'test-vcc-callback-secret-32chars!!';
 
-// SMTP — fake values; email is not called in tests (createTestSession bypasses it)
+// SMTP — fake values; email is not called in tests (createTestSession bypasses it).
+// SMTP_FROM must satisfy the zod().email() rule in src/env.js, which
+// rejects an underscore in a domain label — `noreply@stellar_card.test`
+// looks like the natural choice next to the rest of the fixture values
+// but fails boot validation, and src/env.js calls process.exit(1) on a
+// schema failure, so every suite that requires it died at import with a
+// bare "[env] Invalid environment variables" line and no test output.
 process.env.SMTP_HOST = 'localhost';
 process.env.SMTP_PORT = '25';
 process.env.SMTP_USER = 'test';
 process.env.SMTP_PASS = 'test';
-process.env.SMTP_FROM = 'noreply@stellar_card.test';
+process.env.SMTP_FROM = 'noreply@stellar-card.test';
 
 // Zero out retry delays so failure-path tests don't take 10s+ each
 process.env.RETRY_BACKOFF_MS = '0';
@@ -55,3 +61,14 @@ process.env.MPP_ENABLED = 'true';
 // Generous challenge rate limit in tests — the limiter has its own
 // dedicated regression test that lowers it explicitly.
 process.env.MPP_CHALLENGE_RATE_LIMIT = '10000';
+
+// No process-exit teardown hook here on purpose. One briefly existed to
+// close src/db.js on the way out, working around test runs that aborted
+// with "Assertion failed: (env) != nullptr" in
+// node::RemoveEnvironmentCleanupHook — better-sqlite3 finalising cached
+// statements from V8's GC after the isolate had already dropped its
+// environment. It never actually fixed that: the abort came from
+// better-sqlite3 itself, not from the open connection, and the real fix
+// was upgrading to better-sqlite3@12. Suite runs are stable without it
+// (verified across repeated full runs), and dropping it means test files
+// that never touch the database do not drag src/db into their lifecycle.
