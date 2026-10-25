@@ -9,6 +9,40 @@
  *     if (err instanceof SpendLimitError) { ... }
  *     if (err instanceof ServiceUnavailableError) { ... }
  *   }
+ *
+ * Error Code Reference:
+ *
+ * Policy / Validation:
+ *   - `spend_limit_exceeded` (403): API key spend limit reached
+ *   - `invalid_amount` (400): amount_usdc outside valid range or invalid format
+ *   - `invalid_api_key` (401): Missing or invalid API key
+ *   - `validation_error` (400): Input parameter validation failed
+ *   - `invalid_memo` (400): Invalid memo type or value
+ *   - `invalid_order_id` (400): Order ID format invalid
+ *   - `configuration_error` (0): Invalid client configuration
+ *
+ * Rate Limiting & Throttling:
+ *   - `rate_limit_exceeded` (429): Too many requests (60 orders/hour or 600/min polling)
+ *
+ * Service & Network:
+ *   - `service_temporarily_unavailable` (503): Card fulfillment service circuit breaker
+ *   - `price_unavailable` (503): XLM price feed temporarily unavailable
+ *   - `network_error` (0): Network request failed (connection, DNS, timeout)
+ *   - `timeout` (0): Operation exceeded timeout duration
+ *   - `aborted` (0): Request aborted by caller
+ *
+ * Order & Fulfillment:
+ *   - `order_failed` (200): Order failed during fulfillment (may be refunding)
+ *   - `resumable` (0): Purchase incomplete but order persists (can resume)
+ *   - `wait_timeout` (408): Timed out waiting for card ready
+ *
+ * Blockchain & Contract:
+ *   - `soroban_rpc_error` (0): Soroban RPC request failed
+ *   - `horizon_error` (0): Horizon API request failed
+ *   - `wallet_error` (0): Wallet operation failed (OWS or Stellar)
+ *
+ * Unknown & Wrapper:
+ *   - `unknown_error` (0): Unclassified or wrapped error
  */
 
 /** Error source context for debugging. */
@@ -25,7 +59,28 @@ export interface ErrorContext {
   metadata?: Record<string, unknown>;
 }
 
-/** Base class — all stellar_card errors extend this. */
+/**
+ * Base class — all stellar_card errors extend this.
+ *
+ * Every error carries a structured error code and HTTP status, plus optional
+ * context (source, operation, recovery hint, cause) for debugging and routing.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await client.createOrder({ amount_usdc: '10.00' });
+ * } catch (err) {
+ *   if (err instanceof Stellar_CardError) {
+ *     console.log(`Error ${err.code} (HTTP ${err.status}): ${err.message}`);
+ *     console.log(`Source: ${err.context?.source}`);
+ *     console.log(`Recovery: ${err.context?.recoveryHint}`);
+ *     if (err.context?.cause) {
+ *       console.log(`Root cause: ${err.context.cause.message}`);
+ *     }
+ *   }
+ * }
+ * ```
+ */
 export class Stellar_CardError extends Error {
   constructor(
     message: string,
@@ -425,6 +480,39 @@ export class WalletError extends Stellar_CardError {
 /**
  * Parse a raw API error response into the appropriate typed error.
  * Falls back to generic Stellar_CardError for unknown codes.
+ *
+ * Maps error codes to their typed error classes for type-safe error handling.
+ * The code and status from the API response determine which error class is
+ * instantiated. Unknown codes fall back to the generic Stellar_CardError.
+ *
+ * @param status - HTTP status code (e.g., 400, 401, 403, 429, 503)
+ * @param body - Parsed error response body containing `error` code and `message`
+ * @param context - Optional context (source, operation, recovery hint, etc.)
+ * @returns Typed error instance (SpendLimitError, RateLimitError, etc.)
+ *
+ * Code to Class Mapping:
+ *   - `spend_limit_exceeded` → SpendLimitError (403)
+ *   - `rate_limit_exceeded` → RateLimitError (429)
+ *   - `service_temporarily_unavailable` → ServiceUnavailableError (503)
+ *   - `price_unavailable` | `xlm_price_unavailable` → PriceUnavailableError (503)
+ *   - `invalid_amount` → InvalidAmountError (400)
+ *   - `invalid_api_key` | `missing_api_key` → AuthError (401)
+ *   - Other codes → Stellar_CardError (generic)
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   const res = await fetch(url, opts);
+ *   if (!res.ok) {
+ *     const body = await res.json();
+ *     throw parseApiError(res.status, body, { operation: 'create_order' });
+ *   }
+ * } catch (err) {
+ *   if (err instanceof SpendLimitError) {
+ *     console.log(`Spend limit: $${err.limit} (spent: $${err.spent})`);
+ *   }
+ * }
+ * ```
  */
 export function parseApiError(
   status: number,
