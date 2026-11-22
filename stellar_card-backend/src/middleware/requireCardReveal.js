@@ -33,6 +33,7 @@
 //     gate's correctness.
 
 const { event: bizEvent } = require('../lib/logger');
+const { assertCardNotExpired } = require('../lib/card-vault');
 
 function getCardRevealEmails() {
   const raw = process.env.CARDS402_CARD_REVEAL_EMAILS || '';
@@ -144,6 +145,55 @@ module.exports = function requireCardReveal(req, res, next) {
       error: 'forbidden',
       message: 'Not authorised to reveal raw card data',
     });
+  }
+
+  // Issue #963: expired cards must never be revealed. The target order's
+  // card_expiry is resolved by the route (req.cardExpiry / req.order) or
+  // may be supplied directly on the request; when present we validate it
+  // and, if the card has passed its expiration month, persist the EXPIRED
+  // status and reject the reveal with a clear, human-readable error.
+  const cardExpiry =
+    (req.order && req.order.card_expiry) || req.cardExpiry || req.card_expiry || null;
+
+  if (cardExpiry) {
+    let expiryResult;
+    try {
+      expiryResult = assertCardNotExpired(cardExpiry, {
+        orderId: (req.order && req.order.id) || req.orderId || null,
+      });
+    } catch (err) {
+      // Validation failure (malformed MM/YY) — fail closed, never reveal.
+      safeBizEvent('card_reveal.denied', {
+        reason: 'invalid_expiry',
+        actor_user_id: req.user.id ?? null,
+        actor_email: email,
+        order_id: (req.order && req.order.id) || req.orderId || null,
+        ip: clientIpOf(req),
+        user_agent: userAgentOf(req),
+      });
+      return res.status(400).json({
+        error: 'invalid_card_expiry',
+        message: 'Card expiration date is invalid; raw card data cannot be revealed.',
+      });
+    }
+
+    if (expiryResult && expiryResult.expired) {
+      safeBizEvent('card_reveal.denied', {
+        reason: 'card_expired',
+        actor_user_id: req.user.id ?? null,
+        actor_email: email,
+        order_id: (req.order && req.order.id) || req.orderId || null,
+        card_expiry: cardExpiry,
+        ip: clientIpOf(req),
+        user_agent: userAgentOf(req),
+      });
+      return res.status(409).json({
+        error: 'card_expired',
+        message:
+          'This card has expired and can no longer be revealed. ' +
+          'Please use a different payment method for new orders.',
+      });
+    }
   }
 
   // F1-card-reveal: observability on successful authorization too. The
