@@ -33,6 +33,7 @@
 //     gate's correctness.
 
 const { event: bizEvent } = require('../lib/logger');
+const db = require('../db');
 
 function getCardRevealEmails() {
   const raw = process.env.CARDS402_CARD_REVEAL_EMAILS || '';
@@ -159,5 +160,80 @@ module.exports = function requireCardReveal(req, res, next) {
     user_agent: userAgentOf(req),
   });
 
+  // Terminated cards must never be revealed again, even to an authorised
+  // operator. The card/order id is taken from the route params (:id) or,
+  // failing that, the query string (?order_id= / ?id=). If no id can be
+  // determined we skip the check — the downstream route is responsible for
+  // resolving the target and will itself refuse terminated cards.
+  const cardId = resolveCardId(req);
+  if (cardId == null) {
+    return next();
+  }
+
+  let status;
+  try {
+    status = lookupCardStatus(cardId);
+  } catch (err) {
+    // Fail closed: if we cannot determine the card status we must not
+    // reveal raw card data. Emit a denial so ops sees the failure.
+    safeBizEvent('card_reveal.denied', {
+      reason: 'status_lookup_failed',
+      actor_user_id: req.user.id ?? null,
+      actor_email: email,
+      card_id: cardId,
+      error: err && err.message ? err.message : String(err),
+      ip: clientIpOf(req),
+      user_agent: userAgentOf(req),
+    });
+    return res.status(500).json({ error: 'card_status_unavailable' });
+  }
+
+  if (status === 'terminated') {
+    safeBizEvent('card_reveal.denied', {
+      reason: 'card_terminated',
+      actor_user_id: req.user.id ?? null,
+      actor_email: email,
+      card_id: cardId,
+      ip: clientIpOf(req),
+      user_agent: userAgentOf(req),
+    });
+    return res.status(410).json({
+      error: 'card_terminated',
+      message: 'This card has been terminated and can no longer be revealed.',
+    });
+  }
+
   next();
 };
+
+/**
+ * Resolve the target card/order id from the request. Prefers route params
+ * (:id), then query string (?order_id= / ?id=). Returns null when no id is
+ * present so the caller can defer to the downstream route.
+ * @param {any} req
+ * @returns {string|number|null}
+ */
+function resolveCardId(req) {
+  const params = req.params || {};
+  if (params.id != null && params.id !== '') return params.id;
+  if (params.order_id != null && params.order_id !== '') return params.order_id;
+  const query = req.query || {};
+  if (query.order_id != null && query.order_id !== '') return query.order_id;
+  if (query.id != null && query.id !== '') return query.id;
+  return null;
+}
+
+/**
+ * Look up the current status of a card/order. Returns a lowercased status
+ * string, or null when the card is unknown. Throws on database errors so
+ * the caller can fail closed.
+ * @param {string|number} cardId
+ * @returns {string|null}
+ */
+function lookupCardStatus(cardId) {
+  const row = db
+    .prepare('SELECT status FROM orders WHERE id = ?')
+    .get(cardId);
+  if (!row || row.status == null) return null;
+  return String(row.status).toLowerCase();
+}

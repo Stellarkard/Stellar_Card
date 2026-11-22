@@ -1048,9 +1048,70 @@ applyMigration(32, () => {
   }
 });
 
+// Migration 35: virtual card lifecycle + velocity tracking.
+//
+// Supports three related features:
+//
+//   1. Card spend velocity rate limiter (policy.js). Every successful
+//      card issuance appends a row to card_velocity_events. The limiter
+//      counts rows for an api_key inside a sliding window and rejects
+//      issuance once the threshold is crossed. The composite index on
+//      (api_key_id, created_at) makes the window count an index range
+//      scan instead of a table scan.
+//
+//   2. Hourly balance sync job (jobs.js). remaining_balance and
+//      settled_spend are refreshed from the upstream VCC provider for
+//      active cards created within the past 30 days. The partial index
+//      on (status, created_at) keeps that sweep bounded to the active
+//      subset.
+//
+//   3. Freeze / terminate API routes (api/orders.js). Cards carry a
+//      lifecycle status plus terminated_at so terminated cards can be
+//      permanently barred from reveal calls.
+//
+// All ALTERs are wrapped in try/catch for duplicate-column idempotency,
+// matching the pattern used by migrations 25-34.
+applyMigration(35, () => {
+  for (const sql of [
+    // Lifecycle: 'active' | 'frozen' | 'terminated'
+    `ALTER TABLE orders ADD COLUMN card_status TEXT NOT NULL DEFAULT 'active'`,
+    `ALTER TABLE orders ADD COLUMN frozen_at TEXT`,
+    `ALTER TABLE orders ADD COLUMN terminated_at TEXT`,
+    // Balance sync columns — decimal strings, same convention as
+    // amount_usdc / total_spent_usdc elsewhere in this schema.
+    `ALTER TABLE orders ADD COLUMN remaining_balance TEXT`,
+    `ALTER TABLE orders ADD COLUMN settled_spend TEXT`,
+    `ALTER TABLE orders ADD COLUMN balance_synced_at TEXT`,
+  ]) {
+    try {
+      db.prepare(sql).run();
+    } catch (err) {
+      if (!/duplicate column name/.test(/** @type {Error} */ (err)?.message || '')) throw err;
+    }
+  }
+
+  db.exec(`
+    -- Sliding-window velocity lookups: COUNT(*) WHERE api_key_id = ?
+    -- AND created_at >= ? resolves entirely from this index.
+    CREATE TABLE IF NOT EXISTS card_velocity_events (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      api_key_id  TEXT NOT NULL,
+      order_id    TEXT,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_card_velocity_api_key_created
+      ON card_velocity_events(api_key_id, created_at);
+
+    -- Balance sync sweep: active cards created in the last 30 days.
+    CREATE INDEX IF NOT EXISTS idx_orders_card_status_created
+      ON orders(card_status, created_at)
+      WHERE card_number IS NOT NULL;
+  `);
+});
+
 // EXPECTED_SCHEMA_VERSION must match the last `applyMigration(N)` call
 // above. Bump it in lock-step with any new migration.
-const EXPECTED_SCHEMA_VERSION = 34;
+const EXPECTED_SCHEMA_VERSION = 35;
 const actualVersion = getSchemaVersion();
 if (actualVersion > EXPECTED_SCHEMA_VERSION) {
   console.error(

@@ -473,6 +473,125 @@ async function getVccJobStatus(vccJobId) {
   return res.json();
 }
 
+// ── Card balance sync ─────────────────────────────────────────────────────────
+
+// Fetches authorized balances for a batch of cards from the upstream issuer.
+// Returns an array of { card_id, remaining_balance, settled_spend } entries.
+// The provider endpoint accepts up to VCC_BALANCE_BATCH_SIZE ids per call;
+// callers (jobs.js) are expected to chunk larger sets before invoking this.
+async function getCardBalances(cardIds) {
+  if (!Array.isArray(cardIds) || cardIds.length === 0) return [];
+  vccCircuitGuard();
+  const token = await getVccToken();
+
+  let res;
+  try {
+    res = await fetch(`${VCC_API_BASE}/api/cards/balances`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-VCC-Token': token,
+      },
+      body: JSON.stringify({ card_ids: cardIds }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (err) {
+    // Network-level failure (timeout, DNS, ECONNREFUSED). Count it against
+    // the breaker so a black-holed vcc doesn't soak up the sync budget.
+    recordVccFailure();
+    throw err;
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    if (res.status === 401) {
+      bizEvent('vcc.token_rotated', {
+        reason: 'card_balances_401',
+        response_snippet: text.slice(0, 120),
+      });
+      db.prepare(`DELETE FROM system_state WHERE key = 'vcc_token'`).run();
+    }
+    if (res.status >= 500) recordVccFailure();
+    throw new Error(`VCC card balances failed: HTTP ${res.status} ${text}`.trim());
+  }
+
+  recordVccSuccess();
+  const body = await res.json();
+
+  // Validate the response shape before trusting any field. A malformed or
+  // hostile payload must not corrupt remaining_balance / settled_spend in
+  // the database, so we drop entries that don't match the expected shape
+  // rather than coercing them.
+  const raw = body && Array.isArray(body.balances) ? body.balances : [];
+  const out = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (typeof entry.card_id !== 'string' || entry.card_id.length === 0) continue;
+    const remaining = Number(entry.remaining_balance);
+    const settled = Number(entry.settled_spend);
+    if (!Number.isFinite(remaining) || !Number.isFinite(settled)) continue;
+    out.push({
+      card_id: entry.card_id,
+      remaining_balance: remaining,
+      settled_spend: settled,
+    });
+  }
+  return out;
+}
+
+// ── Card lifecycle (freeze / terminate) ───────────────────────────────────────
+
+// Shared helper for the freeze/terminate endpoints. Both are POSTs with no
+// body, share the token + circuit breaker, and only differ by path segment
+// and the event name used for observability.
+async function _cardLifecycleAction(cardId, action) {
+  vccCircuitGuard();
+  const token = await getVccToken();
+
+  let res;
+  try {
+    res = await fetch(`${VCC_API_BASE}/api/cards/${encodeURIComponent(cardId)}/${action}`, {
+      method: 'POST',
+      headers: { 'X-VCC-Token': token },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (err) {
+    // Network-level failure (timeout, DNS, ECONNREFUSED). Count it against
+    // the breaker so a black-holed vcc doesn't soak up the request budget.
+    recordVccFailure();
+    throw err;
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    if (res.status === 401) {
+      bizEvent('vcc.token_rotated', {
+        reason: `card_${action}_401`,
+        card_id: cardId,
+        response_snippet: text.slice(0, 120),
+      });
+      db.prepare(`DELETE FROM system_state WHERE key = 'vcc_token'`).run();
+    }
+    if (res.status >= 500) recordVccFailure();
+    throw new Error(`VCC card ${action} failed: HTTP ${res.status} ${text}`.trim());
+  }
+
+  recordVccSuccess();
+  bizEvent(`vcc.card_${action}`, { card_id: cardId });
+  // The issuer may return the updated card record; tolerate an empty body.
+  return res.json().catch(() => ({}));
+}
+
+// Freeze (suspend) a virtual card at the upstream issuer.
+async function freezeCard(cardId) {
+  return _cardLifecycleAction(cardId, 'freeze');
+}
+
+// Terminate (cancel) a virtual card at the upstream issuer.
+async function terminateCard(cardId) {
+  return _cardLifecycleAction(cardId, 'terminate');
+}
+
 // ── Callback verification ─────────────────────────────────────────────────────
 
 // Verify an incoming VCC callback HMAC signature. VCC signs with the
@@ -516,6 +635,9 @@ module.exports = {
   getInvoice,
   notifyPaid,
   getVccJobStatus,
+  getCardBalances,
+  freezeCard,
+  terminateCard,
   verifyVccSignature,
   // Test-only exports for the circuit-breaker hardening audit.
   _resetVccCircuit,
