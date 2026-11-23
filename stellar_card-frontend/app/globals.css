@@ -14,8 +14,10 @@
   --bg-elev-2: #111111;
   --fg: #f4f4f4;
   --fg-muted: rgba(255, 255, 255, 0.66);
-  --fg-dim: rgba(255, 255, 255, 0.44);
-  --muted: rgba(255, 255, 255, 0.44);
+  /* AA: dim/muted labels raised from 0.44 -> 0.50 to clear 4.5:1 on every
+     dark surface (worst case rgba on --surface-3 measured 5.24:1). */
+  --fg-dim: rgba(255, 255, 255, 0.5);
+  --muted: rgba(255, 255, 255, 0.5);
 
   /* ── Surfaces ─────────────────────────────────────────────────────── */
   --surface: #0c0c0c;
@@ -74,8 +76,10 @@ html[data-theme='light'] {
   --bg-elev-2: #f2f1ec;
   --fg: #0a0a0a;
   --fg-muted: rgba(10, 10, 10, 0.68);
-  --fg-dim: rgba(10, 10, 10, 0.46);
-  --muted: rgba(10, 10, 10, 0.5);
+  /* AA: dim/muted labels raised from 0.46/0.50 -> 0.62 to clear 4.5:1 on
+     every light surface (worst case rgba on --surface-3 measured 5.30:1). */
+  --fg-dim: rgba(10, 10, 10, 0.62);
+  --muted: rgba(10, 10, 10, 0.62);
 
   --surface: #ffffff;
   --surface-2: #f4f3ef;
@@ -85,24 +89,26 @@ html[data-theme='light'] {
   --border-strong: rgba(10, 10, 10, 0.16);
   --border-hairline: rgba(10, 10, 10, 0.05);
 
-  --green: #059669;
+  /* AA: badge foregrounds darkened so each accent clears 4.5:1 against its
+     own muted background composited over the lightest surface (--surface-3). */
+  --green: #065f46;
   --green-dim: #047857;
-  --green-muted: rgba(5, 150, 105, 0.1);
-  --green-border: rgba(5, 150, 105, 0.26);
-  --green-glow: rgba(5, 150, 105, 0.18);
+  --green-muted: rgba(6, 95, 70, 0.1);
+  --green-border: rgba(6, 95, 70, 0.26);
+  --green-glow: rgba(6, 95, 70, 0.18);
 
-  --red: #dc2626;
-  --red-muted: rgba(220, 38, 38, 0.08);
-  --red-border: rgba(220, 38, 38, 0.22);
-  --yellow: #d97706;
-  --yellow-muted: rgba(217, 119, 6, 0.08);
-  --yellow-border: rgba(217, 119, 6, 0.22);
-  --blue: #2563eb;
-  --blue-muted: rgba(37, 99, 235, 0.08);
-  --blue-border: rgba(37, 99, 235, 0.22);
-  --purple: #7c3aed;
-  --purple-muted: rgba(124, 58, 237, 0.08);
-  --purple-border: rgba(124, 58, 237, 0.22);
+  --red: #b91c1c;
+  --red-muted: rgba(185, 28, 28, 0.08);
+  --red-border: rgba(185, 28, 28, 0.22);
+  --yellow: #92400e;
+  --yellow-muted: rgba(146, 64, 14, 0.08);
+  --yellow-border: rgba(146, 64, 14, 0.22);
+  --blue: #1d4ed8;
+  --blue-muted: rgba(29, 78, 216, 0.08);
+  --blue-border: rgba(29, 78, 216, 0.22);
+  --purple: #6d28d9;
+  --purple-muted: rgba(109, 40, 217, 0.08);
+  --purple-border: rgba(109, 40, 217, 0.22);
 
   --shadow-card: 0 1px 2px rgba(10, 10, 10, 0.06), 0 0 0 1px rgba(10, 10, 10, 0.03);
   --shadow-hero: 0 40px 120px -40px rgba(10, 10, 10, 0.22), 0 0 0 1px rgba(10, 10, 10, 0.06);
