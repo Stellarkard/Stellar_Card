@@ -34,6 +34,34 @@ npm run test:e2e
 npm run test:a11y
 ```
 
+### Visual regression
+
+`e2e/visual-regression.spec.ts` diffs full-page screenshots of the Overview,
+Orders and Settings dashboard screens against committed golden images to catch
+unintended styling/CSS regressions (see `playwright.config.ts` for the pixel
+tolerances). It is **opt-in** and runs on the `chromium` project only, because
+pixel comparisons need reviewed baselines and font rasterisation differs
+between engines.
+
+```bash
+# Capture / refresh the golden baselines (commit the generated PNGs)
+PW_VISUAL=1 npx playwright test e2e/visual-regression.spec.ts --project=chromium --update-snapshots
+
+# Compare the current UI against the committed baselines
+PW_VISUAL=1 npx playwright test e2e/visual-regression.spec.ts --project=chromium
+```
+
+On Windows PowerShell, set the flag separately since the inline `VAR=value`
+prefix is POSIX-only:
+
+```powershell
+$env:PW_VISUAL=1; npx playwright test e2e/visual-regression.spec.ts --project=chromium --update-snapshots
+```
+
+Baselines land next to the spec in `e2e/visual-regression.spec.ts-snapshots/`
+and should be committed. Re-run with `--update-snapshots` only after visually
+confirming the diff is intentional.
+
 ## Environment variables
 
 | Variable | Required | Description |
