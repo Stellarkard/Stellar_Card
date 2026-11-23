@@ -9,20 +9,39 @@
 
 const USDC_ISSUER_DEFAULT = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
 
+const DEFAULT_BASE_URL = 'http://localhost:3000';
+const CHALLENGE_RESOURCE_PATTERN = '/v1/cards/visa/{amount_usdc}';
+
 /**
  * Return the /v1/.well-known/mpp discovery document.
+ *
+ * Includes the RFC-style fields (assets, contract_id, challenge_endpoint,
+ * public_key, schemes) alongside the legacy fields kept for backward
+ * compatibility with existing MPP clients.
  */
 function buildDiscoveryDoc() {
   const network = process.env.STELLAR_NETWORK || 'mainnet';
   const contractId = process.env.RECEIVER_CONTRACT_ID || '';
   const usdcIssuer = process.env.STELLAR_USDC_ISSUER || USDC_ISSUER_DEFAULT;
+  const publicKey = process.env.STELLAR_PUBLIC_KEY || '';
+  const baseUrl = (process.env.CARDS402_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const challengeEndpoint = `${baseUrl}${CHALLENGE_RESOURCE_PATTERN}`;
+  const schemes = ['stellar_soroban_usdc', 'stellar_soroban_xlm'];
   return {
     version: '1.0',
     protocol: 'mpp/1.0',
     accepts: ['stellar'],
+    assets: [
+      { code: 'USDC', issuer: usdcIssuer, type: 'credit_alphanum4' },
+      { code: 'XLM', issuer: null, type: 'native' },
+    ],
+    contract_id: contractId,
+    challenge_endpoint: challengeEndpoint,
+    public_key: publicKey,
+    schemes,
     resources: [
       {
-        pattern: '/v1/cards/visa/{amount_usdc}',
+        pattern: CHALLENGE_RESOURCE_PATTERN,
         description: 'Virtual Visa card, face-value 0.01–10000 USDC',
         bounds: { min: '0.01', max: '10000.00', currency: 'USDC' },
       },

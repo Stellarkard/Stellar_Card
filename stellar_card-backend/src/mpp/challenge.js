@@ -10,9 +10,26 @@
 const crypto = require('crypto');
 const { z } = require('zod');
 const db = require('../db');
+const { bizEvent } = require('../lib/logger');
 
 const CHALLENGE_ID_PREFIX = 'mpp_c_';
 const RECEIPT_ID_PREFIX = 'mpp_r_';
+
+// Default challenge lifetime: 15 minutes. Overridable via env for tests
+// and for operators who need a tighter window under abuse.
+const DEFAULT_CHALLENGE_TTL_MS = 15 * 60 * 1000;
+const CHALLENGE_TTL_MS = (() => {
+  const raw = Number(process.env.MPP_CHALLENGE_TTL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CHALLENGE_TTL_MS;
+})();
+
+// In-memory index of live challenges: id → { createdAt, expiresAt }.
+// Mirrors the DB rows so the cleanup worker and verification path can
+// answer "is this still alive?" without a round-trip. Entries are
+// removed on purge; redeemed rows are dropped from the index too.
+/** @type {Map<string, { createdAt: number, expiresAt: number }>} */
+const activeChallenges = new Map();
+=======
 
 // ── Request validation ───────────────────────────────────────────────────
 // Rejects malformed challenge requests before any row is written. Error
@@ -92,7 +109,9 @@ function generateReceiptId() {
 function createChallenge(opts) {
   const id = generateChallengeId();
   const createdAt = new Date();
-  const expiresAt = new Date(createdAt.getTime() + opts.ttlMs);
+  const ttlMs =
+    Number.isFinite(opts.ttlMs) && opts.ttlMs > 0 ? opts.ttlMs : CHALLENGE_TTL_MS;
+  const expiresAt = new Date(createdAt.getTime() + ttlMs);
   db.prepare(
     `INSERT INTO mpp_challenges
         (id, resource_path, amount_usdc, amount_xlm, client_ip, created_at, expires_at)
@@ -105,6 +124,10 @@ function createChallenge(opts) {
     client_ip: opts.clientIp,
     created_at: createdAt.toISOString(),
     expires_at: expiresAt.toISOString(),
+  });
+  activeChallenges.set(id, {
+    createdAt: createdAt.getTime(),
+    expiresAt: expiresAt.getTime(),
   });
   return {
     id,
@@ -124,6 +147,22 @@ function loadChallenge(id) {
   if (typeof id !== 'string' || !id.startsWith(CHALLENGE_ID_PREFIX)) return null;
   const row = /** @type {any} */ (db.prepare(`SELECT * FROM mpp_challenges WHERE id = ?`).get(id));
   return row || null;
+}
+
+/**
+ * True when the challenge's expires_at is at or before `now`.
+ * Accepts either a DB row (snake_case expires_at) or the object shape
+ * returned by createChallenge (camelCase expiresAt).
+ * @param {{ expires_at?: string|Date, expiresAt?: string|Date }|null|undefined} challenge
+ * @param {Date} [now]
+ */
+function isChallengeExpired(challenge, now = new Date()) {
+  if (!challenge) return true;
+  const raw = challenge.expires_at ?? challenge.expiresAt;
+  if (!raw) return true;
+  const ts = raw instanceof Date ? raw.getTime() : Date.parse(raw);
+  if (!Number.isFinite(ts)) return true;
+  return now.getTime() >= ts;
 }
 
 /**
@@ -224,16 +263,91 @@ function sweepExpiredChallenges() {
   return { deleted: result.changes };
 }
 
+/**
+ * Purge every challenge whose expires_at has passed. Unlike the nightly
+ * sweep this runs on a short interval and removes rows immediately, so
+ * the table never accumulates stale entries between sweeps. Emits an
+ * observability metric with the number of rows removed.
+ * @param {Date} [now]
+ * @returns {{ purged: number }}
+ */
+function purgeExpiredChallenges(now = new Date()) {
+  const nowIso = now.toISOString();
+  const result = db
+    .prepare(`DELETE FROM mpp_challenges WHERE expires_at < ?`)
+    .run(nowIso);
+  const purged = result.changes;
+
+  // Drop matching entries from the in-memory index. Anything already
+  // past its expiry is dead regardless of whether the DB row survived.
+  const nowMs = now.getTime();
+  for (const [id, meta] of activeChallenges) {
+    if (meta.expiresAt <= nowMs) activeChallenges.delete(id);
+  }
+
+  if (purged > 0) {
+    bizEvent('mpp.challenge_expired_purged', { count: purged });
+  }
+  return { purged };
+}
+
+// Handle for the singleton cleanup worker so double-start is a no-op.
+/** @type {NodeJS.Timeout|null} */
+let cleanupTimer = null;
+
+/**
+ * Start the background TTL cleanup worker. Runs purgeExpiredChallenges
+ * every `intervalMs` (default 60s). The timer is unref'd so it never
+ * keeps the process alive on its own. Calling this twice returns the
+ * existing stop function rather than scheduling a second timer.
+ * @param {number} [intervalMs]
+ * @returns {() => void} stop function
+ */
+function startChallengeCleanupWorker(intervalMs = 60_000) {
+  if (cleanupTimer) {
+    return stopChallengeCleanupWorker;
+  }
+  const period = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 60_000;
+  cleanupTimer = setInterval(() => {
+    try {
+      purgeExpiredChallenges();
+    } catch (err) {
+      bizEvent('mpp.challenge_purge_failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, period);
+  if (typeof cleanupTimer.unref === 'function') cleanupTimer.unref();
+  return stopChallengeCleanupWorker;
+}
+
+/**
+ * Stop the cleanup worker if running. Safe to call when not started.
+ */
+function stopChallengeCleanupWorker() {
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+    cleanupTimer = null;
+  }
+}
+
 module.exports = {
   CHALLENGE_ID_PREFIX,
   RECEIPT_ID_PREFIX,
+  CHALLENGE_TTL_MS,
+  DEFAULT_CHALLENGE_TTL_MS,
+  activeChallenges,
   parseChallengeRequest,
   generateChallengeId,
   generateReceiptId,
   createChallenge,
   loadChallenge,
+  isChallengeExpired,
   redeemChallenge,
   attachReceiptId,
   loadOrderByReceiptId,
   sweepExpiredChallenges,
+  purgeExpiredChallenges,
+  startChallengeCleanupWorker,
+  stopChallengeCleanupWorker,
 };

@@ -25,6 +25,7 @@ const {
 } = require('./challenge');
 const { buildDiscoveryDoc, buildChallengeBody, buildWwwAuthenticate } = require('./discovery');
 const { verifyAndCreateMppOrder } = require('./verify');
+const { signCredential } = require('./credential');
 const { waitForDelivery, streamDelivery } = require('./wait-for-delivery');
 
 // Rate limiters for public endpoints.
@@ -86,8 +87,19 @@ function buildMppRouter(opts = {}) {
   const ttlMs = opts.ttlMs ?? (() => parseInt(process.env.MPP_CHALLENGE_TTL_MS || '600000', 10));
 
   // ── Discovery ─────────────────────────────────────────────────────────
+  // RFC-style discovery document. Served both at the legacy /v1-prefixed
+  // path and at the canonical /.well-known/mpp.json location. The
+  // canonical endpoint is open to any agent, so it advertises permissive
+  // CORS and a one-hour public cache.
   router.get('/.well-known/mpp', discoveryLimiter, (_req, res) => {
     res.set('Cache-Control', 'public, max-age=60');
+    return res.json(buildDiscoveryDoc());
+  });
+
+  router.get('/.well-known/mpp.json', discoveryLimiter, (_req, res) => {
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.set('Content-Type', 'application/json');
     return res.json(buildDiscoveryDoc());
   });
 
@@ -116,6 +128,8 @@ function buildMppRouter(opts = {}) {
         expectedAmount: amountUsdc,
       });
       if (!verdict.ok) {
+        // 410 (expired challenge) and 409 (replayed nonce) verdicts from
+        // verify.js are surfaced verbatim via sendProblem.
         const v = /** @type {any} */ (verdict);
         bizEvent('mpp.verify_rejected', {
           status: v.status,
@@ -243,6 +257,10 @@ async function handleDeliveryForVerdict(req, res, verdict) {
   const syncWaitMs = parseInt(process.env.MPP_SYNC_WAIT_MS || '10000', 10);
   const result = await waitForDelivery({ orderId: verdict.orderId, timeoutMs: syncWaitMs });
 
+  // Issue a scoped, short-lived credential so the agent can make
+  // subsequent card requests without re-running the challenge flow.
+  const credential = issueCredentialForVerdict(verdict);
+
   if (result.state === 'delivered') {
     res.set('Payment-Receipt', buildPaymentReceiptHeader(result.order));
     return res.status(200).json({
@@ -253,6 +271,7 @@ async function handleDeliveryForVerdict(req, res, verdict) {
       card: extractCardFields(result.order),
       challenge_id: verdict.challengeId,
       tx_hash: verdict.txHash,
+      ...credential,
     });
   }
   if (result.state === 'failed') {
@@ -272,7 +291,26 @@ async function handleDeliveryForVerdict(req, res, verdict) {
     receipt_id: verdict.receiptId,
     order_id: verdict.orderId,
     poll_url: location,
+    ...credential,
   });
+}
+
+/**
+ * Sign a credential for a verified agent. Failures are non-fatal: the
+ * delivery payload is still returned, just without a credential.
+ * @param {any} verdict
+ * @returns {{ credential?: string, expires_in?: number }}
+ */
+function issueCredentialForVerdict(verdict) {
+  try {
+    const agentId = verdict.agentId ?? verdict.challengeId ?? verdict.orderId;
+    const scope = verdict.scope ?? { amount_usdc: verdict.amountUsdc ?? null };
+    const token = signCredential({ agentId, scope });
+    return { credential: token, expires_in: 3600 };
+  } catch (err) {
+    bizEvent('mpp.credential_issue_failed', { error: err?.message });
+    return {};
+  }
 }
 
 function extractCardFields(row) {

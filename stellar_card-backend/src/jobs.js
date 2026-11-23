@@ -1062,6 +1062,22 @@ function pruneExpiredAgentClaims() {
   if (result.changes > 0) log(`pruned ${result.changes} stale agent claim(s)`);
 }
 
+// Purge expired MPP agent payment challenges. The in-process TTL worker in
+// src/mpp/challenge.js handles the steady-state sweep; this sub-job is the
+// belt-and-braces pass that runs on the scheduler tick so a challenge can
+// never outlive its 15-minute TTL even if the worker was never started (or
+// died). purgeExpiredChallenges() is idempotent and returns the number of
+// entries removed from the in-memory store.
+function pruneExpiredMppChallenges() {
+  const { purgeExpiredChallenges } = require('./mpp/challenge');
+  const purged = purgeExpiredChallenges();
+  if (purged > 0) {
+    log(`pruned ${purged} expired MPP challenge(s)`);
+    logger.event('mpp.challenges_purged', { count: purged, via: 'scheduler' });
+  }
+  return purged;
+}
+
 // Delete webhook_deliveries rows older than WEBHOOK_LOG_RETENTION_DAYS
 // (default 30). The table is a debugging / replay surface for
 // operators — the recent window is useful, the historical tail is
@@ -1346,6 +1362,7 @@ async function runJobs() {
     await _runSubJob('pruneExpiredAgentClaims', async () => pruneExpiredAgentClaims());
     await _runSubJob('pruneWebhookDeliveries', async () => pruneWebhookDeliveries());
     await _runSubJob('prunePolicyDecisions', async () => prunePolicyDecisions());
+    await _runSubJob('pruneExpiredMppChallenges', async () => pruneExpiredMppChallenges());
     await _runSubJob('purgeOldCards', async () => purgeOldCards());
   } finally {
     jobsRunning = false;
@@ -1629,6 +1646,7 @@ module.exports = {
   pruneExpiredAgentClaims,
   pruneWebhookDeliveries,
   prunePolicyDecisions,
+  pruneExpiredMppChallenges,
   purgeOldCards,
   // Test-only exports for the 2026-04-16 audit hardening.
   _parsePositiveMs: parsePositiveMs,

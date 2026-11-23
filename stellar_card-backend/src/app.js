@@ -553,6 +553,48 @@ app.get('/status', statusLimiter, (req, res) => {
 // Register all application routes via the route registry (src/routes/index.js)
 registerRoutes(app);
 
+// ── MPP challenge TTL cleanup worker (issue #965) ───────────────────────
+//
+// Agent payment challenges carry an explicit 15-minute expiration and are
+// rejected with HTTP 410 Gone once past it. Rejection alone is not enough:
+// the challenge records themselves stay resident in memory until something
+// removes them, so a busy agent endpoint accumulates stale entries
+// indefinitely. startChallengeCleanupWorker() runs a repeating interval
+// that purges expired challenges and emits an expiration metric for
+// observability.
+//
+// Guarded so it never runs under the test suite (NODE_ENV === 'test'):
+// the worker holds a live timer, and a timer left running after a test
+// file finishes keeps the Jest process alive and leaks state between
+// suites. Tests exercise the purge logic directly instead.
+//
+// The worker is idempotent — startChallengeCleanupWorker() is a no-op if
+// already started — so a double require of this module cannot spawn two
+// intervals.
+if (process.env.NODE_ENV !== 'test') {
+  try {
+    const { startChallengeCleanupWorker, stopChallengeCleanupWorker } = require('./mpp/challenge');
+    startChallengeCleanupWorker();
+
+    // Shutdown hook: clear the interval so the process can exit cleanly
+    // on SIGTERM/SIGINT (container orchestration, Ctrl-C in dev) instead
+    // of being held open by the timer until the orchestrator SIGKILLs it.
+    const _stopChallengeCleanup = () => {
+      try {
+        stopChallengeCleanupWorker();
+      } catch {
+        /* shutdown must not throw */
+      }
+    };
+    process.once('SIGTERM', _stopChallengeCleanup);
+    process.once('SIGINT', _stopChallengeCleanup);
+  } catch (err) {
+    // The cleanup worker is a hygiene task, not a request-path dependency.
+    // A failure to start it must not take the API down — log and continue.
+    console.warn(`[app] MPP challenge cleanup worker could not be started: ${err.message}`);
+  }
+}
+
 // The error-handling middleware above owns every request globally; the
 // route mounting that used to sit between registerRoutes() and this
 // terminal section is gone — it duplicated routes/index.js, and the

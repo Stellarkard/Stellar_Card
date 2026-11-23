@@ -281,13 +281,30 @@ const EnvSchema = z
     // Phased rollout: ship the code dark in prod, flip the flag after
     // staging bake.
     MPP_ENABLED: z.enum(['true', 'false']).optional().default('false'),
-    // Challenge TTL in milliseconds. 10 minutes is tight for the
-    // Stellar confirmation timeline (~5s) but gives agents ample slack.
+    // Challenge TTL in milliseconds. Issue #965 sets an explicit
+    // 15-minute expiration on every generated challenge; 15 minutes is
+    // tight for the Stellar confirmation timeline (~5s) but gives
+    // agents ample slack. The cleanup worker purges anything past this.
     MPP_CHALLENGE_TTL_MS: z
       .string()
       .regex(/^\d+$/, 'MPP_CHALLENGE_TTL_MS must be a positive integer (milliseconds)')
       .optional()
-      .default('600000'),
+      .default('900000'),
+    // HMAC SHA-256 secret used to sign agent credential JWTs (issue
+    // #968). Optional: when unset, credential.js falls back to
+    // VCC_CALLBACK_SECRET so existing deploys keep working without a
+    // new secret. When set, it must be 32+ chars — a short secret
+    // weakens HMAC-SHA256 to a brute-forceable key.
+    MPP_CREDENTIAL_SECRET: z
+      .string()
+      .min(32, 'MPP_CREDENTIAL_SECRET must be at least 32 characters')
+      .optional(),
+    // Public Stellar account (G...) advertised in the MPP discovery
+    // document (issue #967) as the service public key. Optional — the
+    // discovery endpoint omits the field when unset. Validated as a
+    // full StrKey so a typo fails at boot instead of shipping a
+    // malformed discovery payload to agents.
+    STELLAR_PUBLIC_KEY: stellarStrkey('G', 'STELLAR_PUBLIC_KEY').optional(),
     // Max seconds a 402 retry blocks waiting for card fulfillment before
     // handing off to a 202 + Location receipt URL. Keep well under any
     // reverse-proxy idle timeout (nginx 60s, Cloudflare 100s).

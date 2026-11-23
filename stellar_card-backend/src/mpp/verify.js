@@ -28,6 +28,33 @@ const { verifyStellarPayment } = require('../payments/verify-stellar-payment');
 const { insertPendingPaymentOrder } = require('../orders/core');
 const handlePaymentModule = require('../payment-handler');
 
+// Nonce replay protection. A valid credential must carry a 32-byte
+// (64 hex char) random nonce. Once a nonce has been used to verify a
+// payment it is recorded here and any subsequent credential reusing it
+// is rejected with 409. Entries are lazily evicted once they are older
+// than the challenge validity window (15 minutes) — after that point
+// the associated challenge has expired anyway, so the nonce can no
+// longer be replayed against it.
+const NONCE_TTL_MS = 15 * 60 * 1000;
+const NONCE_HEX_RE = /^[0-9a-fA-F]{64}$/;
+
+/** @type {Map<string, number>} nonce (lowercased) -> insertedAtMs */
+const _usedNonces = new Map();
+
+function _evictExpiredNonces(now = Date.now()) {
+  for (const [nonce, insertedAt] of _usedNonces) {
+    if (now - insertedAt >= NONCE_TTL_MS) {
+      _usedNonces.delete(nonce);
+    }
+  }
+}
+
+// Test hook — clears the nonce cache between unit tests.
+function _resetNonceCache() {
+  _usedNonces.clear();
+}
+=======
+
 // Lazy — only constructed when a credential arrives.
 let _rpcServer = null;
 function getRpcServer() {
@@ -82,13 +109,26 @@ async function verifyAndCreateMppOrder(opts) {
     return { ok: false, status: 409, reason: 'challenge_already_redeemed' };
   }
   if (new Date(challenge.expires_at).getTime() <= Date.now() && !challenge.redeemed_at) {
-    return { ok: false, status: 401, reason: 'challenge_expired' };
+    bizEvent('mpp.challenge_expired', { challenge_id: challenge.id });
+    return { ok: false, status: 410, reason: 'challenge_expired' };
   }
   // Sanity: the challenge must belong to the resource the client is
   // paying against, otherwise a challenge issued for a $1 card could
   // be redeemed against a $1000 endpoint.
   if (challenge.resource_path !== opts.resourcePath) {
     return { ok: false, status: 400, reason: 'resource_mismatch' };
+  }
+
+  // Replay protection: require a well-formed nonce and reject any nonce
+  // that has already been used within the active validity window.
+  const nonce = credential.nonce;
+  if (typeof nonce !== 'string' || !NONCE_HEX_RE.test(nonce)) {
+    return { ok: false, status: 400, reason: 'malformed_nonce' };
+  }
+  const nonceKey = nonce.toLowerCase();
+  _evictExpiredNonces();
+  if (_usedNonces.has(nonceKey)) {
+    return { ok: false, status: 409, reason: 'nonce_replayed' };
   }
 
   // Idempotent retry: same tx for same challenge already succeeded.
@@ -209,6 +249,11 @@ async function verifyAndCreateMppOrder(opts) {
     throw err;
   }
 
+  // Record the nonce now that verification has succeeded. Doing this
+  // after the atomic redeem means a failed verification never burns a
+  // nonce, so the client can retry with the same credential.
+  _usedNonces.set(nonceKey, Date.now());
+
   bizEvent('mpp.payment_verified', {
     challenge_id: challenge.id,
     order_id: orderId,
@@ -269,4 +314,6 @@ module.exports = {
   verifyAndCreateMppOrder,
   _setRpcServer,
   _setHandlePayment,
+  _resetNonceCache,
+  NONCE_TTL_MS,
 };

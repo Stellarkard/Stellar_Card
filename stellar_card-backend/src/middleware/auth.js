@@ -13,6 +13,7 @@
 const bcrypt = require('bcryptjs');
 const db = require('../db');
 const { validateApiKeyFormat } = require('../lib/api-key');
+const { verifyCredential } = require('../mpp/credential');
 
 // Legacy v1 format constants (unchanged).
 const LEGACY_PREFIX = 'stellar_card_';
@@ -56,7 +57,86 @@ try {
   /* table doesn't exist yet — module load during fresh-install migration */
 }
 
+/**
+ * Extract an MPP credential token from the request, if present.
+ *
+ * Accepted locations (checked in order):
+ *   - `Authorization: Bearer <jwt>`  (only when the value looks like a JWT)
+ *   - `X-MPP-Credential: <jwt>`
+ *
+ * Returns the raw token string, or null when the request carries no MPP
+ * credential. A malformed `Authorization` header that is not a Bearer JWT
+ * is ignored here so the API-key path can still run.
+ *
+ * @param {import('express').Request} req
+ * @returns {string | null}
+ */
+function extractMppCredential(req) {
+  const header = req.headers['x-mpp-credential'];
+  if (typeof header === 'string' && header.trim()) return header.trim();
+
+  const authz = req.headers['authorization'];
+  if (typeof authz === 'string') {
+    const match = /^Bearer\s+(.+)$/i.exec(authz.trim());
+    if (match) {
+      const token = match[1].trim();
+      // Only treat it as an MPP credential when it looks like a JWT
+      // (three dot-separated segments). Anything else falls through to
+      // the API-key path untouched.
+      if (token.split('.').length === 3) return token;
+    }
+  }
+  return null;
+}
+
+/**
+ * Build a synthetic apiKey-shaped object from verified MPP credential
+ * claims so downstream handlers (which expect `req.apiKey`) keep working.
+ *
+ * @param {any} claims
+ */
+function syntheticApiKeyFromClaims(claims) {
+  const scope = claims && typeof claims.scope === 'object' && claims.scope !== null ? claims.scope : {};
+  return {
+    id: null,
+    agent_id: claims.agent_id ?? null,
+    name: claims.agent_id ?? 'mpp-credential',
+    key_prefix: 'mpp',
+    enabled: 1,
+    suspended: 0,
+    expires_at: claims.exp ? new Date(claims.exp * 1000).toISOString() : null,
+    scope,
+    source: 'mpp_credential',
+  };
+}
+
 module.exports = async function auth(req, res, next) {
+  // ── MPP credential path ─────────────────────────────────────────────────
+  //
+  // If the request carries an MPP credential token, validate it before
+  // touching the API-key flow. A present-but-invalid token is rejected
+  // outright (we do not silently fall back to API-key auth) so callers
+  // get a clear signal that their credential is bad.
+  const mppToken = extractMppCredential(req);
+  if (mppToken) {
+    const result = verifyCredential(mppToken);
+    if (!result.valid) {
+      if (result.error === 'expired') {
+        return res.status(401).json({
+          error: 'mpp_credential_expired',
+          message: 'MPP credential has expired. Re-verify the challenge to obtain a new one.',
+        });
+      }
+      return res.status(401).json({
+        error: 'mpp_credential_invalid',
+        message: 'MPP credential is invalid.',
+      });
+    }
+    req.mppCredential = result.claims;
+    req.apiKey = syntheticApiKeyFromClaims(result.claims);
+    return next();
+  }
+
   const rawKey = req.headers['x-api-key'];
   // Coerce to a single string. Express hands duplicated headers through
   // as either a joined string or (for some header names) an array; reject
