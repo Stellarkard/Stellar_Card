@@ -15,14 +15,29 @@ const { parsePaymentEvent } = require('./parse-payment-event');
 const { createBatchProcessor, DEFAULT_BATCH_SIZE } = require('./batch-processor');
 
 const NETWORK = process.env.STELLAR_NETWORK || 'mainnet';
-const SOROBAN_RPC_URL =
-  process.env.SOROBAN_RPC_URL ||
-  (NETWORK === 'mainnet'
+const DEFAULT_SOROBAN_RPC_URL =
+  NETWORK === 'mainnet'
     ? 'https://mainnet.sorobanrpc.com'
-    : 'https://soroban-testnet.stellar.org');
+    : 'https://soroban-testnet.stellar.org';
 const RECEIVER_CONTRACT_ID = process.env.RECEIVER_CONTRACT_ID;
 
-const rpcServer = new rpc.Server(SOROBAN_RPC_URL);
+// Multi-endpoint failover pool. SOROBAN_RPC_URLS (comma-separated) wins
+// when set; otherwise the legacy single SOROBAN_RPC_URL is used; otherwise
+// the network default. With a single URL the pool is behaviourally
+// identical to the previous `new rpc.Server(url)` — it just exposes the
+// same getLatestLedger/getEvents surface so poll() below is unchanged.
+function resolveSorobanRpcUrls() {
+  const fromList = parseRpcUrls(process.env.SOROBAN_RPC_URLS);
+  if (fromList.length > 0) return fromList;
+  const fromSingle = parseRpcUrls(process.env.SOROBAN_RPC_URL);
+  if (fromSingle.length > 0) return fromSingle;
+  return [DEFAULT_SOROBAN_RPC_URL];
+}
+
+const rpcServer = createRpcServerPool({
+  urls: resolveSorobanRpcUrls(),
+  serverFactory: (url) => new rpc.Server(url),
+});
 
 // (topic filter removed — mainnet Soroban RPC does not match topic XDR correctly;
 //  events are filtered by symbol in handlePaymentEvent instead)

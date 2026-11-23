@@ -131,6 +131,38 @@ function commaSeparatedOrigins(fieldName) {
     );
 }
 
+// Validator for a comma-separated list of http(s) URLs — used by the
+// SOROBAN_RPC_URLS failover pool (src/lib/rpc-pool.js). Each entry is
+// parsed at boot so a typo doesn't silently shrink the watcher's
+// fallback set (the exact failure mode the pool exists to prevent).
+// Empty entries from trailing commas are dropped.
+function commaSeparatedHttpUrls(fieldName) {
+  return z
+    .string()
+    .optional()
+    .transform((v) => {
+      if (!v) return undefined;
+      return v
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    })
+    .refine(
+      (list) => {
+        if (!list) return true;
+        return list.every((u) => {
+          try {
+            const parsed = new URL(u);
+            return parsed.hostname !== '' && /^https?:$/i.test(parsed.protocol);
+          } catch {
+            return false;
+          }
+        });
+      },
+      { message: `${fieldName} must be a comma-separated list of http(s) URLs` },
+    );
+}
+
 const EnvSchema = z
   .object({
     // Server. PORT validated as numeric so a typo ("abc") fails at
@@ -171,6 +203,10 @@ const EnvSchema = z
     // Soroban receiver contract — agents pay this; the watcher detects events and triggers VCC
     RECEIVER_CONTRACT_ID: stellarStrkey('C', 'RECEIVER_CONTRACT_ID'),
     SOROBAN_RPC_URL: httpUrl('SOROBAN_RPC_URL').optional(),
+    // Optional comma-separated fallback endpoints for the payment-event
+    // watcher's health-aware pool (src/lib/rpc-pool.js). Takes precedence
+    // over the single SOROBAN_RPC_URL above when set.
+    SOROBAN_RPC_URLS: commaSeparatedHttpUrls('SOROBAN_RPC_URLS'),
 
     // VCC fulfillment service (vcc.ctx.com) — handles CTX ordering + card scraping
     // F4-env: http(s)-only, rejects ftp:// / file:// / javascript: etc.
