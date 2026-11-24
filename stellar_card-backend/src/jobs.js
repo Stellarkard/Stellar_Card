@@ -280,6 +280,87 @@ async function expireStaleOrders() {
   }
 }
 
+// ── Stale unconfirmed transaction sweep (#953) ───────────────────────────────
+//
+// pending_payment orders older than 30 minutes have almost certainly been
+// abandoned by the agent (network hiccup, closed browser, stale wallet
+// session). Keeping them open inflates the in-flight count, blocks
+// idempotency keys, and confuses the reconcile path. This worker marks
+// them EXPIRED so resources are released promptly.
+//
+// The 2-hour expiry in expireStaleOrders() is the final safety net.
+// This 30-minute sweep is an earlier, faster release for unambiguously
+// stale rows — ones that have never received any payment confirmation.
+// We only target orders with NO vcc_job_id (the vcc job is created the
+// moment the agent calls GET /v1/pay, so a non-null vcc_job_id means
+// the agent at least started the payment path and deserves the full
+// 2-hour window for the Stellar tx to confirm).
+//
+// Runs as a sub-job on the existing 5-minute JOBS_INTERVAL_MS tick so no
+// new interval is needed.
+
+const STALE_UNCONFIRMED_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+
+async function sweepStaleUnconfirmedTransactions() {
+  const { emitOrderExpired } = require('./lib/event-bus');
+  const { recordAudit } = require('./lib/audit');
+
+  const now = new Date().toISOString();
+  const cutoff = new Date(Date.now() - STALE_UNCONFIRMED_WINDOW_MS).toISOString();
+  const reason = 'Unconfirmed payment window expired after 30 minutes — no payment received';
+
+  // Atomic UPDATE-then-SELECT pattern (same as expireStaleOrders F1-expire):
+  // UPDATE first with a unique marker timestamp, then SELECT on that marker
+  // so we only process rows we actually flipped — not rows a concurrent
+  // path already moved to a terminal state.
+  const result = db
+    .prepare(
+      `UPDATE orders SET status = 'expired', updated_at = ?
+       WHERE status = 'pending_payment'
+         AND vcc_job_id IS NULL
+         AND datetime(created_at) < datetime(?)`,
+    )
+    .run(now, cutoff);
+
+  if (result.changes === 0) return;
+
+  const expired = /** @type {any[]} */ (
+    db
+      .prepare(
+        `SELECT o.id, o.api_key_id, k.dashboard_id
+         FROM orders o
+         LEFT JOIN api_keys k ON o.api_key_id = k.id
+         WHERE o.status = 'expired' AND o.updated_at = ?`,
+      )
+      .all(now)
+  );
+
+  log(`sweep: expired ${result.changes} stale unconfirmed order(s) (>30 min, no payment)`);
+
+  for (const order of expired) {
+    // Audit trail — permanent record of the system-initiated transition.
+    if (order.dashboard_id) {
+      recordAudit({
+        dashboardId: order.dashboard_id,
+        actor: null,
+        action: 'order.expired.stale_unconfirmed',
+        resourceType: 'order',
+        resourceId: order.id,
+        details: { reason, cutoff_iso: cutoff },
+      });
+    }
+
+    // Emit order-expiration event so SSE subscribers and any future
+    // webhook fan-out can react without polling.
+    emitOrderExpired({
+      order_id: order.id,
+      api_key_id: order.api_key_id ?? null,
+      reason,
+      expired_at: now,
+    });
+  }
+}
+
 // Reconcile orders that crashed mid-fulfillment in handlePayment (index.js).
 // These are orders in 'ordering' status where one of the steps didn't finish:
 //
@@ -1351,6 +1432,7 @@ async function runJobs() {
     // parallel) because several of these hold brief write locks and
     // we don't want them racing each other for BEGIN IMMEDIATE.
     await _runSubJob('expireStaleOrders', expireStaleOrders);
+    await _runSubJob('sweepStaleUnconfirmedTransactions', sweepStaleUnconfirmedTransactions);
     await _runSubJob('expireApprovalRequests', async () => expireApprovalRequests());
     await _runSubJob('reconcileOrderingFulfillment', reconcileOrderingFulfillment);
     await _runSubJob('recoverStuckOrders', recoverStuckOrders);
@@ -1635,6 +1717,7 @@ module.exports = {
   startJobs,
   stopJobs,
   expireStaleOrders,
+  sweepStaleUnconfirmedTransactions,
   expireApprovalRequests,
   reconcileOrderingFulfillment,
   recoverStuckOrders,

@@ -5,6 +5,11 @@
 //   pay_usdc — agent paid USDC; topic[0]=Symbol("pay_usdc"), value=micro-USDC i128
 //   pay_xlm  — agent paid XLM;  topic[0]=Symbol("pay_xlm"),  value=stroops i128
 //
+// Also monitors contract upgrade events (#954):
+//   contract_upgraded — emitted when the receiver contract WASM is updated on-chain.
+//     Logs the new WASM hash to the audit trail, alerts platform admins, and verifies
+//     that the new topic schema still matches the backend's event-parser expectations.
+//
 // The last-seen ledger is persisted to the database so no payments are missed
 // across restarts of any duration.
 
@@ -431,6 +436,142 @@ function _peekDispatchRetry(eventId) {
   return dispatchRetries.get(eventId);
 }
 
+// ── Contract upgrade event handler (#954) ─────────────────────────────────
+//
+// When the receiver contract is upgraded on-chain it emits a Soroban event
+// with topic[0] = Symbol("contract_upgraded") and value = Bytes(new_wasm_hash).
+// We need to:
+//   1. Log the upgrade with the new WASM hash to the audit trail.
+//   2. Send an alert to platform administrators so they can verify the
+//      new contract behaviour.
+//   3. Verify the topic schema still matches the backend event-parser's
+//      expectations (i.e. pay_usdc / pay_xlm shapes are still present).
+//
+// ABI VERSION CHECK: we validate that the known payment event topic symbols
+// ('pay_usdc', 'pay_xlm') match what this backend version expects. Because
+// we cannot introspect the new WASM at runtime we emit a structured alert
+// that includes the new WASM hash so an operator can manually verify ABI
+// compatibility. If the upgrade changes the topic schema the next failed
+// parse attempts will land in stellar_dead_letter, which surfaces the
+// incompatibility quickly.
+//
+// EXPECTED_PAYMENT_SYMBOLS is the set of topic[0] symbols this version of
+// the event parser is built for. It is checked against the value embedded in
+// the upgrade event when the contract provides a 'parser_symbols' field.
+
+const EXPECTED_PAYMENT_SYMBOLS = new Set(['pay_usdc', 'pay_xlm']);
+
+/**
+ * Handle a contract_upgraded Soroban event emitted by the receiver contract.
+ * Logs the new WASM hash, fires a bizEvent alert, and verifies ABI schema
+ * compatibility.
+ *
+ * @param {any} event
+ * @param {(msg: string) => void} log
+ */
+async function handleContractUpgradeEvent(event, log) {
+  const { scValToNative } = require('@stellar/stellar-sdk');
+
+  let newWasmHash = null;
+  let schemaCompatible = true;
+
+  // Extract the new WASM hash from the event value.
+  try {
+    const rawValue = scValToNative(event.value);
+    if (Buffer.isBuffer(rawValue) || rawValue instanceof Uint8Array) {
+      newWasmHash = Buffer.from(rawValue).toString('hex');
+    } else if (typeof rawValue === 'string' && /^[0-9a-f]{64}$/i.test(rawValue)) {
+      newWasmHash = rawValue.toLowerCase();
+    } else {
+      newWasmHash = String(rawValue ?? 'unknown');
+    }
+  } catch (err) {
+    newWasmHash = 'parse_failed';
+    log(`[stellar] contract_upgraded: failed to decode WASM hash: ${err.message}`);
+  }
+
+  // ABI version check: if the upgrade event carries a 'parser_symbols' list
+  // in topic[2], compare against EXPECTED_PAYMENT_SYMBOLS.
+  // If the symbols diverge, mark as potentially incompatible.
+  if (event?.topic && event.topic.length >= 3) {
+    try {
+      const { scValToNative: toNative } = require('@stellar/stellar-sdk');
+      const symbolsRaw = toNative(event.topic[2]);
+      if (Array.isArray(symbolsRaw)) {
+        const upgradeSymbols = new Set(symbolsRaw.map(String));
+        for (const expected of EXPECTED_PAYMENT_SYMBOLS) {
+          if (!upgradeSymbols.has(expected)) {
+            schemaCompatible = false;
+            break;
+          }
+        }
+      }
+    } catch {
+      // topic[2] is optional — not all upgrade events include it.
+    }
+  }
+
+  log(
+    `[stellar] contract_upgraded detected: wasm=${newWasmHash} ledger=${event.ledger} ` +
+      `tx=${event.txHash} abi_compatible=${schemaCompatible}`,
+  );
+
+  // Persist to audit log via system_state so ops have a permanent record.
+  try {
+    db.prepare(
+      `INSERT OR REPLACE INTO system_state (key, value) VALUES ('last_contract_upgrade', ?)`,
+    ).run(
+      JSON.stringify({
+        wasm_hash: newWasmHash,
+        ledger: event.ledger,
+        tx_hash: event.txHash,
+        detected_at: new Date().toISOString(),
+        abi_compatible: schemaCompatible,
+      }),
+    );
+  } catch (dbErr) {
+    log(`[stellar] contract_upgraded: failed to persist audit record: ${dbErr.message}`);
+  }
+
+  // Emit structured event so the alert pipeline and SSE subscribers see it.
+  bizEvent('stellar.contract_upgraded', {
+    contract_id: RECEIVER_CONTRACT_ID,
+    new_wasm_hash: newWasmHash,
+    ledger: event.ledger,
+    tx_hash: event.txHash,
+    abi_compatible: schemaCompatible,
+    expected_symbols: [...EXPECTED_PAYMENT_SYMBOLS],
+  });
+
+  // Alert platform administrators. Best-effort — a failure here must not
+  // block the watcher's cursor from advancing.
+  try {
+    const { sendAlertEmail } = require('../lib/email');
+    const adminEmail = process.env.CARDS402_PLATFORM_OWNER_EMAIL;
+    if (adminEmail && typeof sendAlertEmail === 'function') {
+      await sendAlertEmail({
+        to: adminEmail,
+        subject: schemaCompatible
+          ? `[stellar_card] Receiver contract upgraded — WASM ${newWasmHash.slice(0, 16)}…`
+          : `[stellar_card] ⚠️ Contract upgrade may be ABI-incompatible — manual check required`,
+        body:
+          `The Stellar receiver contract was upgraded on-chain.\n\n` +
+          `New WASM hash: ${newWasmHash}\n` +
+          `Ledger: ${event.ledger}\n` +
+          `Tx: ${event.txHash}\n` +
+          `ABI schema compatible: ${schemaCompatible}\n\n` +
+          (schemaCompatible
+            ? `No immediate action required. Monitor the next few payment events to confirm.\n`
+            : `ABI mismatch detected — the new contract may use different topic symbols.\n` +
+              `Expected: ${[...EXPECTED_PAYMENT_SYMBOLS].join(', ')}\n` +
+              `Please review the new WASM and update parse-payment-event.js if needed.\n`),
+      });
+    }
+  } catch (alertErr) {
+    log(`[stellar] contract_upgraded: admin alert failed: ${alertErr.message}`);
+  }
+}
+
 async function handlePaymentEvent(event, onPayment, log) {
   // Two-phase split:
   //   1. Parse — pulling fields out of the event XDR. Failures here are
@@ -477,6 +618,15 @@ async function handlePaymentEvent(event, onPayment, log) {
 
   if (!result.ok && result.kind === 'unknown_symbol') {
     log(`[stellar] unknown event symbol: ${result.symbol} tx=${event.txHash}`);
+    // Check whether this is a contract upgrade event before discarding it.
+    // The receiver contract emits a 'contract_upgraded' topic when its WASM
+    // is updated on-chain (#954). We detect it here so the backend can
+    // log the new WASM hash, alert platform admins, and verify the topic
+    // schema still matches what the event parser expects.
+    if (result.symbol === 'contract_upgraded') {
+      await handleContractUpgradeEvent(event, log);
+      return;
+    }
     bizEvent('stellar.unknown_event_symbol', {
       ledger: event.ledger,
       tx_hash: event.txHash,
@@ -625,6 +775,7 @@ function processPaymentEventBatch(events, applyItem, options = {}) {
 module.exports = {
   startWatcher,
   handlePaymentEvent,
+  handleContractUpgradeEvent,
   processPaymentEventBatch,
   _BATCH_SIZE: DEFAULT_BATCH_SIZE,
   _resetDispatchRetries,

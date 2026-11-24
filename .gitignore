@@ -36,6 +36,9 @@ node_modules/
 /test-results
 /blob-report
 /storybook-static
+# Test snapshots
+**/__snapshots__/
+*.snap
 
 # Databases & logs
 *.db
@@ -72,3 +75,11 @@ temp_issue_body.md
 generate_and_push_issues.js
 make_issues.py
 push_200_issues.py
+
+# CI / tooling temporary outputs
+*.tmp
+*.bak
+*.orig
+.nyc_output/
+junit.xml
+test-report*.xml

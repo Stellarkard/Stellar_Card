@@ -204,6 +204,25 @@ function emitOrderFailed(payload) {
   });
 }
 
+/** @type {'order:expired'} */
+const ORDER_EXPIRED = 'order:expired';
+
+/**
+ * Emitted by the stale-unconfirmed sweep worker when a pending_payment
+ * order older than 30 minutes is transitioned to 'expired'.
+ *
+ * @param {{ order_id: string; api_key_id: string | null; reason: string;
+ *            expired_at: string }} payload
+ */
+function emitOrderExpired(payload) {
+  emit(ORDER_EXPIRED, {
+    order_id: payload.order_id,
+    api_key_id: payload.api_key_id ?? null,
+    reason: payload.reason,
+    expired_at: payload.expired_at,
+  });
+}
+
 module.exports = {
   emit,
   subscribe,
@@ -212,8 +231,10 @@ module.exports = {
   ORDER_PAID,
   ORDER_FULFILLED,
   ORDER_FAILED,
+  ORDER_EXPIRED,
   emitOrderCreated,
   emitOrderPaid,
   emitOrderFulfilled,
   emitOrderFailed,
+  emitOrderExpired,
 };
