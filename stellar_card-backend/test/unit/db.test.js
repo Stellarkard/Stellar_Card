@@ -1448,3 +1448,74 @@ describe('db.js - listOrders helper and query plan diagnostics (Part 3)', () => 
   });
 });
 
+// ── Migration 35: composite indexes on orders (#987) ─────────────────────────
+//
+// Verifies that the two composite indexes introduced in migration 35 are
+// present in sqlite_master after the database initialises, and that the
+// SQLite query planner uses them (not a full table scan) for the queries
+// they were designed to accelerate.
+
+describe('db.js — composite orders indexes (migration 35, #987)', () => {
+  it('idx_orders_status_created exists in sqlite_master', () => {
+    const row = db
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type='index' AND name='idx_orders_status_created'`,
+      )
+      .get();
+    assert.ok(row, 'idx_orders_status_created must exist after migration 35');
+  });
+
+  it('idx_orders_agent_created exists in sqlite_master', () => {
+    const row = db
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type='index' AND name='idx_orders_agent_created'`,
+      )
+      .get();
+    assert.ok(row, 'idx_orders_agent_created must exist after migration 35');
+  });
+
+  it('EXPLAIN QUERY PLAN uses idx_orders_status_created for status+created_at filter', () => {
+    // The query planner should use the composite index when both columns
+    // appear in the WHERE / ORDER BY clause instead of scanning the table.
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT id, status, created_at FROM orders
+         WHERE status = 'pending_payment'
+         ORDER BY created_at DESC
+         LIMIT 20`,
+      )
+      .all();
+    const details = plan.map((/** @type {any} */ p) => p.detail ?? p.opcode ?? '').join(' ');
+    assert.match(
+      details,
+      /idx_orders_status_created|idx_orders_list_status/,
+      `Expected query planner to use a composite status+created_at index, got: ${details}`,
+    );
+    assert.doesNotMatch(details, /SCAN orders(?!\s+USING)/,
+      'Full table scan must not appear in the plan');
+  });
+
+  it('EXPLAIN QUERY PLAN uses idx_orders_agent_created for agent_id+created_at filter', () => {
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT id, agent_id, created_at FROM orders
+         WHERE agent_id = 'agent-test-1'
+         ORDER BY created_at DESC
+         LIMIT 20`,
+      )
+      .all();
+    const details = plan.map((/** @type {any} */ p) => p.detail ?? p.opcode ?? '').join(' ');
+    assert.match(
+      details,
+      /idx_orders_agent_created/,
+      `Expected query planner to use idx_orders_agent_created, got: ${details}`,
+    );
+    assert.doesNotMatch(details, /SCAN orders(?!\s+USING)/,
+      'Full table scan must not appear in the plan');
+  });
+});
+

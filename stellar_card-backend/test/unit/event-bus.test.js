@@ -207,6 +207,174 @@ describe('event-bus — F1 controlled fields win over payload spread', () => {
   });
 });
 
+// ── Order lifecycle event constants and typed emitters (#984) ────────
+//
+// Tests cover:
+//   - Constants export the correct string values.
+//   - Each typed emitter (emitOrderCreated, emitOrderPaid,
+//     emitOrderFulfilled, emitOrderFailed) emits an event whose `type`
+//     matches the constant and whose payload fields are present.
+//   - Default values are applied for optional fields.
+//   - Listener exceptions during order events are isolated (no crash).
+//   - Async listeners during order events are error-isolated.
+
+describe('event-bus — order lifecycle event constants (#984)', () => {
+  let bus;
+
+  beforeEach(() => {
+    bus = freshBus();
+  });
+
+  it('exports ORDER_CREATED, ORDER_PAID, ORDER_FULFILLED, ORDER_FAILED constants', () => {
+    assert.equal(bus.ORDER_CREATED,   'order:created');
+    assert.equal(bus.ORDER_PAID,      'order:paid');
+    assert.equal(bus.ORDER_FULFILLED, 'order:fulfilled');
+    assert.equal(bus.ORDER_FAILED,    'order:failed');
+  });
+
+  it('emitOrderCreated emits type=ORDER_CREATED with required fields', () => {
+    const seen = [];
+    bus.subscribe((evt) => seen.push(evt));
+    bus.emitOrderCreated({
+      order_id: 'ord-1',
+      api_key_id: 'key-abc',
+      amount_usdc: 42.5,
+    });
+    assert.equal(seen.length, 1);
+    const evt = seen[0];
+    assert.equal(evt.type, 'order:created');
+    assert.equal(evt.order_id, 'ord-1');
+    assert.equal(evt.api_key_id, 'key-abc');
+    assert.equal(evt.amount_usdc, 42.5);
+    assert.ok(evt.at, 'must have an at timestamp');
+  });
+
+  it('emitOrderCreated applies default currency=USDC and merchant_id=null', () => {
+    const seen = [];
+    bus.subscribe((evt) => seen.push(evt));
+    bus.emitOrderCreated({ order_id: 'ord-2', api_key_id: 'k1', amount_usdc: 10 });
+    assert.equal(seen[0].currency, 'USDC');
+    assert.equal(seen[0].merchant_id, null);
+  });
+
+  it('emitOrderCreated forwards optional currency and merchant_id when provided', () => {
+    const seen = [];
+    bus.subscribe((evt) => seen.push(evt));
+    bus.emitOrderCreated({
+      order_id: 'ord-3',
+      api_key_id: 'k1',
+      amount_usdc: 10,
+      currency: 'XLM',
+      merchant_id: 'merch-99',
+    });
+    assert.equal(seen[0].currency, 'XLM');
+    assert.equal(seen[0].merchant_id, 'merch-99');
+  });
+
+  it('emitOrderPaid emits type=ORDER_PAID with required and optional fields', () => {
+    const seen = [];
+    bus.subscribe((evt) => seen.push(evt));
+    bus.emitOrderPaid({
+      order_id: 'ord-4',
+      api_key_id: 'k2',
+      amount_usdc: 100,
+      tx_hash: '0xabc',
+      stellar_tx_id: 'stellar-xyz',
+    });
+    const evt = seen[0];
+    assert.equal(evt.type, 'order:paid');
+    assert.equal(evt.order_id, 'ord-4');
+    assert.equal(evt.amount_usdc, 100);
+    assert.equal(evt.tx_hash, '0xabc');
+    assert.equal(evt.stellar_tx_id, 'stellar-xyz');
+    assert.ok(evt.at);
+  });
+
+  it('emitOrderPaid defaults tx_hash and stellar_tx_id to null', () => {
+    const seen = [];
+    bus.subscribe((evt) => seen.push(evt));
+    bus.emitOrderPaid({ order_id: 'ord-5', api_key_id: 'k2', amount_usdc: 50 });
+    assert.equal(seen[0].tx_hash, null);
+    assert.equal(seen[0].stellar_tx_id, null);
+  });
+
+  it('emitOrderFulfilled emits type=ORDER_FULFILLED with card_last4 and fulfilled_at', () => {
+    const seen = [];
+    bus.subscribe((evt) => seen.push(evt));
+    bus.emitOrderFulfilled({
+      order_id: 'ord-6',
+      api_key_id: 'k3',
+      card_last4: '4242',
+      fulfilled_at: '2026-01-01T00:00:00.000Z',
+    });
+    const evt = seen[0];
+    assert.equal(evt.type, 'order:fulfilled');
+    assert.equal(evt.order_id, 'ord-6');
+    assert.equal(evt.card_last4, '4242');
+    assert.equal(evt.fulfilled_at, '2026-01-01T00:00:00.000Z');
+  });
+
+  it('emitOrderFulfilled defaults card_last4=null and stamps fulfilled_at when omitted', () => {
+    const seen = [];
+    bus.subscribe((evt) => seen.push(evt));
+    bus.emitOrderFulfilled({ order_id: 'ord-7', api_key_id: 'k3' });
+    assert.equal(seen[0].card_last4, null);
+    assert.match(seen[0].fulfilled_at, /^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('emitOrderFailed emits type=ORDER_FAILED with reason', () => {
+    const seen = [];
+    bus.subscribe((evt) => seen.push(evt));
+    bus.emitOrderFailed({
+      order_id: 'ord-8',
+      api_key_id: 'k4',
+      reason: 'payment_timeout',
+    });
+    const evt = seen[0];
+    assert.equal(evt.type, 'order:failed');
+    assert.equal(evt.order_id, 'ord-8');
+    assert.equal(evt.reason, 'payment_timeout');
+    assert.ok(evt.at);
+  });
+
+  it('a listener that throws on ORDER_CREATED does not block subsequent listeners', () => {
+    const errors = [];
+    const origError = console.error;
+    console.error = (...args) => errors.push(args.join(' '));
+    const secondSeen = [];
+    bus.subscribe(() => { throw new Error('order-listener-boom'); });
+    bus.subscribe((evt) => secondSeen.push(evt));
+    try {
+      bus.emitOrderCreated({ order_id: 'ord-9', api_key_id: 'k5', amount_usdc: 1 });
+    } finally {
+      console.error = origError;
+    }
+    assert.equal(secondSeen.length, 1, 'second listener must still run');
+    assert.ok(errors.some((e) => /handler threw/.test(e)));
+  });
+
+  it('async listener rejection on ORDER_PAID is caught and logged', async () => {
+    const errors = [];
+    const origError = console.error;
+    console.error = (...args) => errors.push(args.join(' '));
+    bus.subscribe(async () => { throw new Error('async-order-paid-rejection'); });
+    bus.emitOrderPaid({ order_id: 'ord-10', api_key_id: 'k6', amount_usdc: 20 });
+    await new Promise((r) => setImmediate(r));
+    console.error = origError;
+    assert.ok(
+      errors.some((e) => /async handler rejected/.test(e)),
+      `expected async-rejection log, got ${JSON.stringify(errors)}`,
+    );
+  });
+
+  it('order events carry a frozen payload', () => {
+    const seen = [];
+    bus.subscribe((evt) => seen.push(evt));
+    bus.emitOrderFulfilled({ order_id: 'ord-11', api_key_id: 'k7', card_last4: '0000' });
+    assert.equal(Object.isFrozen(seen[0]), true, 'order events must be frozen');
+  });
+});
+
 // ── F2-event-bus (2026-04-15): events are frozen ─────────────────────
 //
 // Emitted events are a SINGLE shared object reference passed to every

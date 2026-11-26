@@ -52,6 +52,7 @@ const agentClaimRouter = require('../api/agent-claim');
 const agentRouter = require('../api/agent');
 const usageRouter = require('../api/usage');
 const ordersRouter = require('../api/orders');
+const cardsRouter = require('../api/cards');
 const authRouter = require('../api/auth');
 // Legacy /admin/* router was retired with the ampersand dashboard
 // rewrite. The /dashboard surface is the canonical operator API and is
@@ -185,6 +186,13 @@ function registerRoutes(app) {
   app.use('/v1/orders', ordersRouter);
   app.use('/v1', usageRouter);
   app.use('/v1', agentRouter);
+
+  // ── Authenticated cardholder surface ───────────────────────────────
+  // Virtual card lifecycle (freeze / terminate) lives under /api/cards.
+  // Mounted after the /v1 auth boundary and the agent surface so the
+  // ordering rules in the module header are untouched; the router
+  // enforces card ownership itself via its own middleware.
+  app.use('/api/cards', auth, cardsRouter);
 
   // ── Operator surface ───────────────────────────────────────────────
   app.use('/auth', authRouter);

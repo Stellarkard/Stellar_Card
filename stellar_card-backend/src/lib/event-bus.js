@@ -124,4 +124,96 @@ function listenerCount() {
   return bus.listenerCount('event');
 }
 
-module.exports = { emit, subscribe, listenerCount };
+// ---------------------------------------------------------------------------
+// Order lifecycle event constants and typed emitters (#984)
+//
+// These build on the generic emit/subscribe primitives above. Each constant
+// is the value of the `type` field that listeners can filter on.  The typed
+// helpers enforce a consistent payload shape so callers don't have to
+// remember field names or risk type divergence between emitters and listeners.
+//
+// Event shapes:
+//
+//   ORDER_CREATED  → { type, order_id, api_key_id, amount_usdc, currency,
+//                       merchant_id, at }
+//   ORDER_PAID     → { type, order_id, api_key_id, amount_usdc, tx_hash,
+//                       stellar_tx_id, at }
+//   ORDER_FULFILLED→ { type, order_id, api_key_id, card_last4, fulfilled_at,
+//                       at }
+//   ORDER_FAILED   → { type, order_id, api_key_id, reason, at }
+// ---------------------------------------------------------------------------
+
+/** @type {'order:created'} */
+const ORDER_CREATED = 'order:created';
+/** @type {'order:paid'} */
+const ORDER_PAID = 'order:paid';
+/** @type {'order:fulfilled'} */
+const ORDER_FULFILLED = 'order:fulfilled';
+/** @type {'order:failed'} */
+const ORDER_FAILED = 'order:failed';
+
+/**
+ * @param {{ order_id: string; api_key_id: string; amount_usdc: number;
+ *            currency?: string; merchant_id?: string }} payload
+ */
+function emitOrderCreated(payload) {
+  emit(ORDER_CREATED, {
+    order_id: payload.order_id,
+    api_key_id: payload.api_key_id,
+    amount_usdc: payload.amount_usdc,
+    currency: payload.currency ?? 'USDC',
+    merchant_id: payload.merchant_id ?? null,
+  });
+}
+
+/**
+ * @param {{ order_id: string; api_key_id: string; amount_usdc: number;
+ *            tx_hash?: string; stellar_tx_id?: string }} payload
+ */
+function emitOrderPaid(payload) {
+  emit(ORDER_PAID, {
+    order_id: payload.order_id,
+    api_key_id: payload.api_key_id,
+    amount_usdc: payload.amount_usdc,
+    tx_hash: payload.tx_hash ?? null,
+    stellar_tx_id: payload.stellar_tx_id ?? null,
+  });
+}
+
+/**
+ * @param {{ order_id: string; api_key_id: string; card_last4?: string;
+ *            fulfilled_at?: string }} payload
+ */
+function emitOrderFulfilled(payload) {
+  emit(ORDER_FULFILLED, {
+    order_id: payload.order_id,
+    api_key_id: payload.api_key_id,
+    card_last4: payload.card_last4 ?? null,
+    fulfilled_at: payload.fulfilled_at ?? new Date().toISOString(),
+  });
+}
+
+/**
+ * @param {{ order_id: string; api_key_id: string; reason: string }} payload
+ */
+function emitOrderFailed(payload) {
+  emit(ORDER_FAILED, {
+    order_id: payload.order_id,
+    api_key_id: payload.api_key_id,
+    reason: payload.reason,
+  });
+}
+
+module.exports = {
+  emit,
+  subscribe,
+  listenerCount,
+  ORDER_CREATED,
+  ORDER_PAID,
+  ORDER_FULFILLED,
+  ORDER_FAILED,
+  emitOrderCreated,
+  emitOrderPaid,
+  emitOrderFulfilled,
+  emitOrderFailed,
+};

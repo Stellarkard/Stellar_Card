@@ -28,6 +28,29 @@ const crypto = require('crypto');
 
 const KEY_HEX_RE = /^[0-9a-fA-F]{64}$/;
 
+// #960: versioned sealed-blob format. New blobs are written as
+//   "v1:<salt_hex>:<iv_hex>:<tag_hex>:<ciphertext_hex>"
+// where the key is derived from the environment master secret plus the
+// per-blob random salt via scrypt. The legacy "enc:<iv>:<tag>:<ct>"
+// format (raw 32-byte key, no salt) is still accepted on read so rows
+// written before this change keep decrypting.
+const V1_PREFIX = 'v1';
+const V1_BLOB_RE = /^v1:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]*$/i;
+const SALT_BYTES = 16;
+const SALT_HEX_LEN = SALT_BYTES * 2;
+// scrypt cost parameters. N=2^15 keeps derivation well under ~100ms on
+// commodity hardware while making offline brute force of a weak master
+// secret expensive. r/p follow the scrypt paper's defaults.
+const SCRYPT_N = 32768;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEYLEN = 32;
+// scrypt's memory use is ~128 * N * r bytes; Node's default maxmem
+// (32 MiB) is too small for N=32768, r=8 (~32 MiB + overhead), so raise
+// it explicitly.
+const SCRYPT_MAXMEM = 64 * 1024 * 1024;
+=======
+
 // Adversarial audit F1-secret-box (2026-04-15): strict regex for the
 // "already sealed" idempotency check in seal(). The previous impl
 // used `startsWith('enc:')`, so a plaintext value that happened to
@@ -101,6 +124,60 @@ function loadKeyFromEnv() {
   return Buffer.from(hex, 'hex');
 }
 
+/**
+ * #960: load the master secret used for v1 (salt-derived) blobs. The
+ * master secret is an arbitrary-length string; it is NOT the raw AES
+ * key — the AES key is derived per-blob via scrypt(master, salt). This
+ * lets operators rotate the master secret without re-keying every row
+ * by hand (see rotateKey()).
+ *
+ * Resolution order:
+ *   CARDS402_SECRET_BOX_MASTER_SECRET  (preferred, new)
+ *   CARDS402_SECRET_BOX_KEY            (64-hex legacy key, reused as master)
+ *   VCC_TOKEN_KEY                      (legacy, kept for backwards-compat)
+ *
+ * Returns null when none are set.
+ */
+function loadMasterSecret() {
+  const master = process.env.CARDS402_SECRET_BOX_MASTER_SECRET;
+  if (master) {
+    if (master.length < 16) {
+      throw new Error(
+        'secret-box: CARDS402_SECRET_BOX_MASTER_SECRET must be at least 16 characters. ' +
+          'Generate one with `openssl rand -hex 32`.',
+      );
+    }
+    return master;
+  }
+  // Fall back to the legacy 64-hex key as the master secret so existing
+  // deployments keep working without a new env var.
+  const hex = process.env.CARDS402_SECRET_BOX_KEY || process.env.VCC_TOKEN_KEY;
+  if (!hex) return null;
+  if (!KEY_HEX_RE.test(hex)) {
+    throw new Error(
+      'secret-box: CARDS402_SECRET_BOX_KEY / VCC_TOKEN_KEY must be 64 hex characters (32 bytes). ' +
+        'Generate one with `openssl rand -hex 32`.',
+    );
+  }
+  return hex;
+}
+
+/**
+ * Derive a 32-byte AES key from a master secret and a per-blob salt
+ * using scrypt. The returned Buffer is the caller's to zeroize.
+ * @param {string} master
+ * @param {Buffer} salt
+ * @returns {Buffer}
+ */
+function deriveKey(master, salt) {
+  return crypto.scryptSync(master, salt, SCRYPT_KEYLEN, {
+    N: SCRYPT_N,
+    r: SCRYPT_R,
+    p: SCRYPT_P,
+    maxmem: SCRYPT_MAXMEM,
+  });
+}
+
 function getKey() {
   // Re-read the env on every call so tests that mutate process.env
   // between cases see fresh values. The validation loop above is
@@ -148,6 +225,46 @@ function seal(plaintext) {
     // JS string is immutable and can't be wiped — callers holding raw
     // card secrets should prefer sealBuffer() with a Buffer they own.
     zeroize(data);
+    zeroize(key);
+  }
+}
+
+/**
+ * #960: seal a plaintext secret into the versioned v1 format using a
+ * per-blob random salt and a scrypt-derived key. This is the preferred
+ * entry point for new CVV / card-secret writes. Falls back to the
+ * legacy seal() behaviour when no master secret is configured (dev/test
+ * plaintext fallback, or prod throw) so callers can migrate gradually.
+ * @param {string} plaintext
+ */
+function sealV1(plaintext) {
+  if (typeof plaintext !== 'string') throw new Error('sealV1: plaintext must be a string');
+  if (V1_BLOB_RE.test(plaintext) || SEALED_BLOB_RE.test(plaintext)) return plaintext;
+  const master = loadMasterSecret();
+  if (!master) {
+    // No master secret: defer to seal() so prod still throws and
+    // dev/test still gets the plaintext fallback with its warning.
+    return seal(plaintext);
+  }
+  const data = Buffer.from(plaintext, 'utf8');
+  const salt = crypto.randomBytes(SALT_BYTES);
+  let key = null;
+  try {
+    key = deriveKey(master, salt);
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
+    const ct = Buffer.concat([cipher.update(data), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    try {
+      return `${V1_PREFIX}:${salt.toString('hex')}:${iv.toString('hex')}:${tag.toString(
+        'hex',
+      )}:${ct.toString('hex')}`;
+    } finally {
+      zeroize(ct);
+    }
+  } finally {
+    zeroize(data);
+    zeroize(salt);
     zeroize(key);
   }
 }
@@ -220,6 +337,14 @@ function sealBuffer(data, opts = {}) {
  */
 function open(stored) {
   if (typeof stored !== 'string') throw new Error('open: stored must be a string');
+  if (stored.startsWith(`${V1_PREFIX}:`)) {
+    const plain = openV1ToBuffer(stored);
+    try {
+      return plain.toString('utf8');
+    } finally {
+      zeroize(plain);
+    }
+  }
   if (!stored.startsWith('enc:')) return stored;
   const { key, ivHex, tagHex, ctHex } = parseSealed(stored);
   const plain = decryptBytes(key, ivHex, tagHex, ctHex);
@@ -228,6 +353,64 @@ function open(stored) {
   } finally {
     // #595: wipe the decrypted bytes and the key copy.
     zeroize(plain);
+  }
+}
+
+/**
+ * #960: decrypt a v1 blob into a Buffer the caller owns. Validates the
+ * blob shape and salt/IV/tag lengths before touching the crypto layer,
+ * then derives the key from the master secret and the stored salt.
+ * @param {string} stored
+ * @returns {Buffer}
+ */
+function openV1ToBuffer(stored) {
+  const master = loadMasterSecret();
+  if (!master) {
+    throw new Error(
+      'secret-box: CARDS402_SECRET_BOX_MASTER_SECRET (or CARDS402_SECRET_BOX_KEY) not set, cannot decrypt v1 blob. ' +
+        'Generate one with `openssl rand -hex 32` and set it in the environment.',
+    );
+  }
+  const parts = stored.split(':');
+  if (parts.length !== 5) {
+    throw new Error(
+      `secret-box: malformed v1 sealed blob (expected 5 colon-separated parts, got ${parts.length})`,
+    );
+  }
+  const [, saltHex, ivHex, tagHex, ctHex] = parts;
+  if (
+    !/^[0-9a-f]+$/i.test(saltHex) ||
+    !/^[0-9a-f]+$/i.test(ivHex) ||
+    !/^[0-9a-f]+$/i.test(tagHex) ||
+    !/^[0-9a-f]*$/i.test(ctHex)
+  ) {
+    throw new Error(
+      'secret-box: malformed v1 sealed blob (non-hex characters in salt/iv/tag/ciphertext)',
+    );
+  }
+  if (saltHex.length !== SALT_HEX_LEN) {
+    throw new Error(
+      `secret-box: malformed v1 sealed blob (salt is ${saltHex.length / 2} bytes, expected ${SALT_BYTES})`,
+    );
+  }
+  if (ivHex.length !== IV_HEX_LEN) {
+    throw new Error(
+      `secret-box: malformed v1 sealed blob (IV is ${ivHex.length / 2} bytes, expected 12)`,
+    );
+  }
+  if (tagHex.length !== TAG_HEX_LEN) {
+    throw new Error(
+      `secret-box: malformed v1 sealed blob (auth tag is ${tagHex.length / 2} bytes, expected 16)`,
+    );
+  }
+  const salt = Buffer.from(saltHex, 'hex');
+  let key = null;
+  try {
+    key = deriveKey(master, salt);
+    return decryptBytes(key, ivHex, tagHex, ctHex);
+  } finally {
+    zeroize(salt);
+    zeroize(key);
   }
 }
 
@@ -269,9 +452,59 @@ function decryptBytes(key, ivHex, tagHex, ctHex) {
  */
 function openToBuffer(stored) {
   if (typeof stored !== 'string') throw new Error('openToBuffer: stored must be a string');
+  if (stored.startsWith(`${V1_PREFIX}:`)) return openV1ToBuffer(stored);
   if (!stored.startsWith('enc:')) return Buffer.from(stored, 'utf8');
   const { key, ivHex, tagHex, ctHex } = parseSealed(stored);
   return decryptBytes(key, ivHex, tagHex, ctHex);
+}
+
+/**
+ * #960: re-encrypt a stored secret under a new master secret. Decrypts
+ * `stored` using the CURRENT environment master secret, then re-seals
+ * the plaintext into the v1 format using `newMasterSecret`. Returns the
+ * new stored string; the caller is responsible for persisting it.
+ *
+ * Plaintext (unsealed) values are sealed under the new master secret
+ * directly, so this doubles as a migration helper for legacy rows.
+ *
+ * Throws if `stored` cannot be decrypted under the current master
+ * secret (tampered blob, wrong key) — rotation must never silently
+ * drop or corrupt a record.
+ * @param {string} stored
+ * @param {string} newMasterSecret
+ * @returns {string}
+ */
+function rotateKey(stored, newMasterSecret) {
+  if (typeof stored !== 'string') throw new Error('rotateKey: stored must be a string');
+  if (typeof newMasterSecret !== 'string' || newMasterSecret.length < 16) {
+    throw new Error('rotateKey: newMasterSecret must be a string of at least 16 characters');
+  }
+  // Decrypt under the current master secret. Plaintext rows pass
+  // through open() unchanged; sealed rows are authenticated first.
+  const plain = openToBuffer(stored);
+  try {
+    const salt = crypto.randomBytes(SALT_BYTES);
+    let key = null;
+    try {
+      key = deriveKey(newMasterSecret, salt);
+      const iv = crypto.randomBytes(12);
+      const cipher = crypto.createCipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
+      const ct = Buffer.concat([cipher.update(plain), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      try {
+        return `${V1_PREFIX}:${salt.toString('hex')}:${iv.toString('hex')}:${tag.toString(
+          'hex',
+        )}:${ct.toString('hex')}`;
+      } finally {
+        zeroize(ct);
+      }
+    } finally {
+      zeroize(salt);
+      zeroize(key);
+    }
+  } finally {
+    zeroize(plain);
+  }
 }
 
 
@@ -332,4 +565,14 @@ function hasKey() {
   return key !== null;
 }
 
-module.exports = { seal, open, hasKey, sealBuffer, openToBuffer, zeroize };
+module.exports = {
+  seal,
+  open,
+  hasKey,
+  sealBuffer,
+  openToBuffer,
+  zeroize,
+  // #960: versioned (salt-derived) format + key rotation.
+  sealV1,
+  rotateKey,
+};

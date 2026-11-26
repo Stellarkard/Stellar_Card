@@ -269,3 +269,159 @@ describe("useAsyncState", () => {
     });
   });
 });
+
+// Transition sequences, overlapping runs and lifecycle safety.
+// Real timers are used here so promise settlement is deterministic.
+describe("useAsyncState transitions and lifecycle", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("walks the idle -> loading -> success transition", async () => {
+    let resolveRequest!: (value: string) => void;
+    const request = new Promise<string>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const mockFn = vi.fn(() => request);
+
+    const { result } = renderHook(() =>
+      useAsyncState(mockFn, { immediate: false }),
+    );
+
+    expect(result.current.status).toBe("idle");
+    expect(result.current.loading).toBe(false);
+
+    let runPromise!: Promise<void>;
+    act(() => {
+      runPromise = result.current.run();
+    });
+
+    expect(result.current.status).toBe("loading");
+    expect(result.current.loading).toBe(true);
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toBeNull();
+
+    await act(async () => {
+      resolveRequest("resolved");
+      await runPromise;
+    });
+
+    expect(result.current.status).toBe("success");
+    expect(result.current.loading).toBe(false);
+    expect(result.current.data).toBe("resolved");
+    expect(result.current.error).toBeNull();
+  });
+
+  it("walks the idle -> loading -> error transition and keeps data null", async () => {
+    let rejectRequest!: (reason: Error) => void;
+    const request = new Promise<string>((_resolve, reject) => {
+      rejectRequest = reject;
+    });
+    const mockFn = vi.fn(() => request);
+    const failure = new Error("request failed");
+
+    const { result } = renderHook(() =>
+      useAsyncState(mockFn, { immediate: false }),
+    );
+
+    let runPromise!: Promise<void>;
+    act(() => {
+      runPromise = result.current.run();
+    });
+
+    expect(result.current.status).toBe("loading");
+
+    await act(async () => {
+      rejectRequest(failure);
+      await runPromise;
+    });
+
+    expect(result.current.status).toBe("error");
+    expect(result.current.loading).toBe(false);
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toBe(failure);
+  });
+
+  it("resolves run() instead of rethrowing when the async function rejects", async () => {
+    const mockFn = vi.fn().mockRejectedValue(new Error("boom"));
+    const { result } = renderHook(() =>
+      useAsyncState(mockFn, { immediate: false }),
+    );
+
+    await act(async () => {
+      await expect(result.current.run()).resolves.toBeUndefined();
+    });
+
+    expect(result.current.status).toBe("error");
+    expect(result.current.error?.message).toBe("boom");
+  });
+
+  it("applies overlapping runs in settlement order", async () => {
+    let resolveFirst!: (value: string) => void;
+    let resolveSecond!: (value: string) => void;
+    const first = new Promise<string>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const second = new Promise<string>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const mockFn = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(second);
+
+    const { result } = renderHook(() =>
+      useAsyncState(mockFn, { immediate: false }),
+    );
+
+    let firstRun!: Promise<void>;
+    let secondRun!: Promise<void>;
+    act(() => {
+      firstRun = result.current.run();
+      secondRun = result.current.run();
+    });
+
+    expect(mockFn).toHaveBeenCalledTimes(2);
+    expect(result.current.status).toBe("loading");
+
+    // Newest request settles first...
+    await act(async () => {
+      resolveSecond("second");
+      await secondRun;
+    });
+    expect(result.current.status).toBe("success");
+    expect(result.current.data).toBe("second");
+
+    // ...then the earlier, still in-flight request settles last.
+    await act(async () => {
+      resolveFirst("first");
+      await firstRun;
+    });
+    expect(result.current.status).toBe("success");
+    expect(result.current.data).toBe("first");
+  });
+
+  it("settles an in-flight request without throwing after unmount", async () => {
+    let resolveRequest!: (value: string) => void;
+    const request = new Promise<string>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const mockFn = vi.fn(() => request);
+
+    const { result, unmount } = renderHook(() =>
+      useAsyncState(mockFn, { immediate: false }),
+    );
+
+    let runPromise!: Promise<void>;
+    act(() => {
+      runPromise = result.current.run();
+    });
+
+    unmount();
+
+    await act(async () => {
+      resolveRequest("late");
+      await expect(runPromise).resolves.toBeUndefined();
+    });
+  });
+});

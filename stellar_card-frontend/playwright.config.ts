@@ -15,6 +15,19 @@ export default defineConfig({
   timeout: process.env.CI ? 60_000 : 30_000,
   expect: {
     timeout: 10_000,
+    // Visual-regression tolerances (used by e2e/visual-regression.spec.ts).
+    // A byte-for-byte match is unattainable across machines: sub-pixel
+    // anti-aliasing and font hinting differ, so a small, bounded budget
+    // keeps genuine layout/styling regressions failing while absorbing
+    // rendering noise. `threshold` is the per-pixel colour distance that
+    // counts as "the same"; the two pixel budgets cap how much of the image
+    // may differ overall. Kept intentionally low — raise only with a reason.
+    toHaveScreenshot: {
+      threshold: 0.2, // per-pixel YIQ colour delta; Playwright's default
+      maxDiffPixels: 100, // absolute floor for tiny anti-aliasing jitter
+      maxDiffPixelRatio: 0.01, // ≤1% of the image may differ
+      animations: 'disabled', // freeze CSS animations/transitions mid-shot
+    },
   },
   // CI gets a machine-readable JUnit report (for annotations), an HTML
   // report that .github/workflows/e2e.yml uploads as an artifact on

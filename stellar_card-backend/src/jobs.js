@@ -1062,6 +1062,22 @@ function pruneExpiredAgentClaims() {
   if (result.changes > 0) log(`pruned ${result.changes} stale agent claim(s)`);
 }
 
+// Purge expired MPP agent payment challenges. The in-process TTL worker in
+// src/mpp/challenge.js handles the steady-state sweep; this sub-job is the
+// belt-and-braces pass that runs on the scheduler tick so a challenge can
+// never outlive its 15-minute TTL even if the worker was never started (or
+// died). purgeExpiredChallenges() is idempotent and returns the number of
+// entries removed from the in-memory store.
+function pruneExpiredMppChallenges() {
+  const { purgeExpiredChallenges } = require('./mpp/challenge');
+  const purged = purgeExpiredChallenges();
+  if (purged > 0) {
+    log(`pruned ${purged} expired MPP challenge(s)`);
+    logger.event('mpp.challenges_purged', { count: purged, via: 'scheduler' });
+  }
+  return purged;
+}
+
 // Delete webhook_deliveries rows older than WEBHOOK_LOG_RETENTION_DAYS
 // (default 30). The table is a debugging / replay surface for
 // operators — the recent window is useful, the historical tail is
@@ -1346,6 +1362,7 @@ async function runJobs() {
     await _runSubJob('pruneExpiredAgentClaims', async () => pruneExpiredAgentClaims());
     await _runSubJob('pruneWebhookDeliveries', async () => pruneWebhookDeliveries());
     await _runSubJob('prunePolicyDecisions', async () => prunePolicyDecisions());
+    await _runSubJob('pruneExpiredMppChallenges', async () => pruneExpiredMppChallenges());
     await _runSubJob('purgeOldCards', async () => purgeOldCards());
   } finally {
     jobsRunning = false;
@@ -1464,7 +1481,198 @@ async function runDatabaseBackup() {
   }
 }
 
+// ── Hourly card balance sync (#958) ──────────────────────────────────────────
+//
+// Pulls authoritative authorized balances from the VCC issuer for every
+// active card created in the last 30 days, then reconciles our local
+// remaining_balance / settled_spend columns against it. Runs hourly.
+//
+// Why a separate job rather than folding into runJobs: the VCC balance
+// endpoint is a batch API with its own rate limits and a much slower
+// cadence than the 5-minute reconciler tick. Keeping it on its own
+// interval means a slow/degraded VCC balance endpoint can't stretch the
+// main reconciler tick, and the batch size can be tuned independently.
+//
+// Depletion detection: we only fire the webhook on the *transition* to
+// zero (previous remaining_balance > 0 → new remaining_balance <= 0).
+// Firing on every tick where balance is zero would spam the agent with
+// duplicate notifications for a card that's been empty for days.
+const CARD_BALANCE_SYNC_WINDOW_DAYS = 30;
+const CARD_BALANCE_SYNC_BATCH_SIZE = parseInt(
+  process.env.CARD_BALANCE_SYNC_BATCH_SIZE || '50',
+  10,
+);
+
+/**
+ * Fetch authoritative balances for a batch of card ids from the VCC
+ * provider. Returns a map of cardId → { remaining_balance, settled_spend }.
+ * Throws on transport failure so the caller can skip the DB update and
+ * retry on the next tick.
+ *
+ * @param {string[]} cardIds
+ * @returns {Promise<Map<string, { remaining_balance: number, settled_spend: number }>>}
+ */
+async function fetchVccCardBalances(cardIds) {
+  const result = new Map();
+  if (cardIds.length === 0) return result;
+
+  // vcc-client exposes getCardBalances as the batch endpoint. Kept as a
+  // single call per batch (not per-card) to respect the provider's
+  // documented batch contract and minimise round-trips.
+  const response = await vccClient.getCardBalances(cardIds);
+  const balances = Array.isArray(response?.balances) ? response.balances : [];
+  for (const entry of balances) {
+    if (!entry || typeof entry.card_id !== 'string') continue;
+    const remaining = Number(entry.remaining_balance);
+    const settled = Number(entry.settled_spend);
+    if (!Number.isFinite(remaining) || !Number.isFinite(settled)) continue;
+    result.set(entry.card_id, {
+      remaining_balance: remaining,
+      settled_spend: settled,
+    });
+  }
+  return result;
+}
+
+/**
+ * Sync authorized balances for active cards created in the last 30 days.
+ * Updates remaining_balance and settled_spend in a single transaction and
+ * fires a depletion webhook for any card that transitioned to zero.
+ *
+ * @param {{ now?: Date }} [opts]
+ * @returns {Promise<{ synced: number, depleted: number }>}
+ */
+async function syncCardBalances(opts = {}) {
+  const now = opts.now || new Date();
+  const cutoff = new Date(
+    now.getTime() - CARD_BALANCE_SYNC_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  // "Active" = the card has been issued (card_number populated) and the
+  // order hasn't been refunded/failed. We deliberately exclude
+  // pending_manual_recovery rows — those are under operator review and
+  // their balance is not authoritative until the review resolves.
+  const cards = /** @type {any[]} */ (
+    db
+      .prepare(
+        `SELECT o.id, o.api_key_id, o.remaining_balance, o.settled_spend,
+                o.vcc_card_id, k.webhook_secret, k.default_webhook_url,
+                k.webhook_event_filter
+         FROM orders o
+         LEFT JOIN api_keys k ON o.api_key_id = k.id
+         WHERE o.vcc_card_id IS NOT NULL
+           AND o.card_number IS NOT NULL
+           AND o.status IN ('delivered', 'completed')
+           AND datetime(o.created_at) >= datetime(?)`,
+      )
+      .all(cutoff)
+  );
+
+  if (cards.length === 0) return { synced: 0, depleted: 0 };
+
+  // Batch the VCC calls. A single failed batch is logged and skipped —
+  // the next hourly tick will retry it. We never abort the whole sync
+  // because one batch's transport error shouldn't block the others.
+  const updates = [];
+  const depleted = [];
+  for (let i = 0; i < cards.length; i += CARD_BALANCE_SYNC_BATCH_SIZE) {
+    const batch = cards.slice(i, i + CARD_BALANCE_SYNC_BATCH_SIZE);
+    const cardIds = batch.map((c) => c.vcc_card_id);
+    let balances;
+    try {
+      balances = await fetchVccCardBalances(cardIds);
+    } catch (err) {
+      log(
+        `card-balance-sync: batch ${i / CARD_BALANCE_SYNC_BATCH_SIZE} failed: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      continue;
+    }
+    for (const card of batch) {
+      const next = balances.get(card.vcc_card_id);
+      if (!next) continue;
+      const prevRemaining = Number(card.remaining_balance) || 0;
+      updates.push({
+        id: card.id,
+        remaining_balance: next.remaining_balance,
+        settled_spend: next.settled_spend,
+      });
+      // Transition-to-zero detection: only fire when the card had a
+      // positive balance before and is now at/below zero.
+      if (prevRemaining > 0 && next.remaining_balance <= 0) {
+        depleted.push(card);
+      }
+    }
+  }
+
+  if (updates.length > 0) {
+    const stmt = db.prepare(
+      `UPDATE orders
+       SET remaining_balance = ?, settled_spend = ?, updated_at = ?
+       WHERE id = ?`,
+    );
+    const nowIso = now.toISOString();
+    const applyAll = db.transaction((rows) => {
+      for (const row of rows) {
+        stmt.run(row.remaining_balance, row.settled_spend, nowIso, row.id);
+      }
+    });
+    applyAll(updates);
+  }
+
+  // Fire depletion webhooks outside the transaction so a slow endpoint
+  // can't hold the write lock. fireWebhook is fire-and-forget here —
+  // failures are logged but don't fail the sync.
+  for (const card of depleted) {
+    const webhookUrl = card.default_webhook_url;
+    if (!webhookUrl) continue;
+    const payload = {
+      order_id: card.id,
+      status: 'card_depleted',
+      phase: 'card_depleted',
+      note: 'Virtual card balance has been depleted to zero.',
+    };
+    fireWebhook(webhookUrl, payload, card.webhook_secret || null, null).catch((err) =>
+      log(
+        `card-balance-sync: depletion webhook for ${card.id.slice(0, 8)} failed: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      ),
+    );
+    logger.event('card.balance_depleted', {
+      order_id: card.id,
+      vcc_card_id: card.vcc_card_id,
+    });
+  }
+
+  if (updates.length > 0) {
+    log(`card-balance-sync: synced ${updates.length} card(s), ${depleted.length} depleted`);
+  }
+  return { synced: updates.length, depleted: depleted.length };
+}
+
+// Mutex for the hourly card-balance sync, same rationale as jobsRunning:
+// setInterval doesn't await async callbacks, so a slow VCC batch could
+// stack concurrent executions.
+let cardBalanceSyncRunning = false;
+
+async function syncCardBalancesGuarded() {
+  if (cardBalanceSyncRunning) {
+    log('card-balance-sync: previous tick still in flight — skipping');
+    return;
+  }
+  cardBalanceSyncRunning = true;
+  try {
+    await syncCardBalances();
+  } catch (err) {
+    log(`card-balance-sync error: ${err instanceof Error ? err.message : String(err)}`);
+    reportSchedulerError(err, 'syncCardBalances');
+  } finally {
+    cardBalanceSyncRunning = false;
+  }
+}
+
 // ── Interval registry ─────────────────────────────────────────────────────────
+=======
 
 // ── Nightly daily-stats job (issue #1008) ────────────────────────────────────
 //
@@ -1571,7 +1779,20 @@ function startJobs() {
   // Schedules itself to fire at the next 00:05 UTC and then every 24 h.
   scheduleDailyStats();
 
+  // Hourly card balance sync (#958) — pulls authoritative authorized
+  // balances from the VCC issuer for active cards created in the last
+  // 30 days and reconciles remaining_balance / settled_spend. Runs on
+  // its own hourly interval so a slow VCC balance endpoint can't
+  // stretch the 5-minute reconciler tick.
+  const CARD_BALANCE_SYNC_INTERVAL_MS = parsePositiveMs(
+    'CARD_BALANCE_SYNC_INTERVAL_MS',
+    60 * 60 * 1000,
+  );
+  syncCardBalancesGuarded();
+  _jobIntervals.push(setInterval(syncCardBalancesGuarded, CARD_BALANCE_SYNC_INTERVAL_MS));
+
   log('background jobs started');
+=======
 }
 
 // Cancel every interval started by startJobs(). Called from the
@@ -1629,6 +1850,7 @@ module.exports = {
   pruneExpiredAgentClaims,
   pruneWebhookDeliveries,
   prunePolicyDecisions,
+  pruneExpiredMppChallenges,
   purgeOldCards,
   // Test-only exports for the 2026-04-16 audit hardening.
   _parsePositiveMs: parsePositiveMs,
@@ -1653,4 +1875,9 @@ module.exports = {
   // Daily-stats job exports (issue #1008).
   _runDailyStats: runDailyStats,
   _msUntilNext0005UTC: msUntilNext0005UTC,
+  // Hourly card balance sync (#958).
+  syncCardBalances,
+  _syncCardBalancesGuarded: syncCardBalancesGuarded,
+  _fetchVccCardBalances: fetchVccCardBalances,
+  _CARD_BALANCE_SYNC_WINDOW_DAYS: CARD_BALANCE_SYNC_WINDOW_DAYS,
 };

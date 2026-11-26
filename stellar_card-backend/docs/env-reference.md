@@ -29,6 +29,7 @@ Generation hints use `openssl` or `stellar` CLI where relevant.
 | `STELLAR_XLM_SECRET` | **yes** | — | Treasury wallet secret key (StrKey `S…`, 56 chars). Used for XLM refunds. |
 | `RECEIVER_CONTRACT_ID` | **yes** | — | Soroban receiver contract id (StrKey `C…`, 56 chars). |
 | `SOROBAN_RPC_URL` | no | — | Soroban RPC endpoint. Must be `http(s)://`. |
+| `SOROBAN_RPC_URLS` | no | — | Comma-separated fallback RPC endpoints for the payment-event watcher's health-aware pool (fail-over + circuit breaking). Each entry `http(s)://`. Takes precedence over `SOROBAN_RPC_URL` when set. |
 
 ## VCC fulfillment
 
