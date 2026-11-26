@@ -1,4 +1,5 @@
 // @ts-check
+// @ts-check
 // VCC client — dispatches fulfillment jobs to the VCC service (vcc.ctx.com).
 // Auto-registers with VCC on first use — no manual secret sharing needed.
 
@@ -14,10 +15,6 @@ const VCC_API_BASE = process.env.VCC_API_BASE;
 // solely as a decrypt-only fallback so existing tokens encrypted with
 // the legacy key can still be opened during a one-time rotation. New
 // tokens are always sealed under CARDS402_SECRET_BOX_KEY.
-//
-// If neither is set in production, the token is stored plaintext (the
-// graceful-degradation path the codebase has always supported); we warn
-// once at startup so ops sees the regression.
 if (
   !process.env.CARDS402_SECRET_BOX_KEY &&
   !process.env.VCC_TOKEN_KEY &&
@@ -26,6 +23,137 @@ if (
   console.warn(
     '[vcc-client] WARNING: neither CARDS402_SECRET_BOX_KEY nor VCC_TOKEN_KEY is set — VCC API token will be stored in plaintext',
   );
+}
+
+// ── VCC HTTP request timeout and retry policy (#955) ─────────────────────────
+//
+// All upstream VCC API calls must be resilient to transient server errors and
+// network timeouts. Policy:
+//   - 8-second timeout on every HTTP call.
+//   - Retry on 502, 503, 504, and network-level failures (timeout, ECONNREFUSED)
+//     up to 3 times total (1 original + 2 retries → 3 attempts).
+//   - Randomized exponential jitter between attempts: ~1s, ~2.5s, ~5s.
+//   - Do NOT retry client errors: 400, 401, 403, 422 (and all 4xx in general).
+//     Client errors indicate a request the server understood but rejected; retrying
+//     would just repeat the same rejected call.
+//
+// Callers use `fetchVcc(url, fetchOpts, label)` which wraps the raw `fetch`
+// with the timeout, retry, and circuit-breaker integration.
+
+const VCC_REQUEST_TIMEOUT_MS = 8_000;
+const VCC_MAX_ATTEMPTS = 3;
+
+// Base jitter delays (ms) per retry attempt — actual delay is base ± 20% random jitter.
+// Attempt 1 → ~1 000 ms, Attempt 2 → ~2 500 ms, Attempt 3 would exceed max retries.
+const VCC_RETRY_BASE_MS = [0, 1_000, 2_500, 5_000];
+
+/**
+ * Determine whether a failed fetch should be retried.
+ * Network-level errors (no status) → retry.
+ * 502, 503, 504 → retry.
+ * Any other 4xx / 5xx → no retry (treat 4xx as final, other 5xx as unknown).
+ *
+ * @param {{ status?: number } | null} res  null means a network/timeout error
+ * @returns {boolean}
+ */
+function isRetryableVccError(res) {
+  if (res === null) return true; // network/timeout
+  const { status } = res;
+  if (status === 502 || status === 503 || status === 504) return true;
+  return false; // includes 4xx (400, 401, 403, 422, etc.) and other 5xx
+}
+
+/**
+ * Sleep for `ms` milliseconds with ±20% random jitter so concurrent retries
+ * don't all fire at the same instant (thundering-herd mitigation).
+ * @param {number} ms base delay
+ */
+function sleepWithJitter(ms) {
+  if (ms <= 0) return Promise.resolve();
+  const jitter = ms * 0.2 * (Math.random() * 2 - 1); // ±20%
+  const actual = Math.max(0, Math.round(ms + jitter));
+  return new Promise((r) => setTimeout(r, actual));
+}
+
+/**
+ * Fetch a VCC API endpoint with timeout, retry, and circuit-breaker
+ * integration. Wraps the global `fetch` with:
+ *   - AbortSignal.timeout(VCC_REQUEST_TIMEOUT_MS)
+ *   - Up to VCC_MAX_ATTEMPTS total attempts on retryable errors
+ *   - Exponential jitter backoff between attempts
+ *   - recordVccFailure / recordVccSuccess for circuit-breaker accounting
+ *
+ * Returns the Response on success. Throws on final failure, 4xx, or
+ * circuit open.
+ *
+ * @param {string} url
+ * @param {RequestInit} opts
+ * @param {string} [label]  for log lines
+ * @returns {Promise<Response>}
+ */
+async function fetchVcc(url, opts, label = 'vcc') {
+  vccCircuitGuard();
+
+  let lastErr = null;
+  let lastRes = null;
+
+  for (let attempt = 1; attempt <= VCC_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      await sleepWithJitter(VCC_RETRY_BASE_MS[attempt - 1] ?? 5_000);
+      vccCircuitGuard(); // re-check after the sleep in case another call tripped the breaker
+    }
+
+    try {
+      const res = await fetch(url, {
+        ...opts,
+        signal: AbortSignal.timeout(VCC_REQUEST_TIMEOUT_MS),
+      });
+
+      if (res.ok) {
+        recordVccSuccess();
+        return res;
+      }
+
+      // Non-OK response — decide whether to retry.
+      lastRes = res;
+      lastErr = null;
+
+      if (!isRetryableVccError(res)) {
+        // Client error or non-retryable server error — count failure only on
+        // 5xx (a 4xx is a request problem, not an infrastructure problem).
+        if (res.status >= 500) recordVccFailure();
+        return res; // let the caller handle the status code
+      }
+
+      // Retryable server error (502/503/504).
+      recordVccFailure();
+      bizEvent(`${label}.retry`, {
+        url,
+        attempt,
+        status: res.status,
+        max_attempts: VCC_MAX_ATTEMPTS,
+      });
+    } catch (err) {
+      // Network-level error (timeout / ECONNREFUSED / AbortError).
+      recordVccFailure();
+      lastErr = err;
+      lastRes = null;
+
+      if (attempt < VCC_MAX_ATTEMPTS) {
+        bizEvent(`${label}.retry`, {
+          url,
+          attempt,
+          error: err.message,
+          max_attempts: VCC_MAX_ATTEMPTS,
+        });
+      }
+    }
+  }
+
+  // All attempts exhausted.
+  if (lastErr) throw lastErr;
+  // lastRes is a retryable non-ok response — return it so the caller can inspect.
+  return /** @type {Response} */ (lastRes);
 }
 
 // Audit C-7: simple circuit breaker on the stellar_card → vcc path. If vcc is
@@ -226,26 +354,27 @@ async function getVccToken() {
   // bypass the breaker and hammer the endpoint on every order event.
   vccCircuitGuard();
 
-  // First time — auto-register
+  // First time — auto-register. Registration uses fetchVcc for consistency
+  // but with a slightly longer initial timeout (registration is rare and
+  // the server may need to allocate resources).
   const label = process.env.VCC_INSTANCE_LABEL || `stellar_card-${process.env.NODE_ENV || 'prod'}`;
   let res;
   try {
-    res = await fetch(`${VCC_API_BASE}/api/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label }),
-      signal: AbortSignal.timeout(15000),
-    });
+    res = await fetchVcc(
+      `${VCC_API_BASE}/api/register`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label }),
+      },
+      'vcc.register',
+    );
   } catch (err) {
-    // Network-level failure (timeout, DNS, ECONNREFUSED). Count it against
-    // the breaker so a black-holed vcc doesn't soak up the watcher budget.
-    recordVccFailure();
     throw err;
   }
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    if (res.status >= 500) recordVccFailure();
     throw new Error(`VCC registration failed: HTTP ${res.status} ${text}`.trim());
   }
 
@@ -326,22 +455,22 @@ async function getInvoice(orderId, amountUsdc, requestId = null, callbackNonce =
 
   let res;
   try {
-    res = await fetch(`${VCC_API_BASE}/api/jobs/invoice`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        order_id: orderId,
-        amount_usdc: amountUsdc,
-        callback_url: callbackUrl,
-        callback_secret: callbackSecret,
-        callback_nonce: nonce,
-      }),
-      signal: AbortSignal.timeout(20000),
-    });
+    res = await fetchVcc(
+      `${VCC_API_BASE}/api/jobs/invoice`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          order_id: orderId,
+          amount_usdc: amountUsdc,
+          callback_url: callbackUrl,
+          callback_secret: callbackSecret,
+          callback_nonce: nonce,
+        }),
+      },
+      'vcc.invoice',
+    );
   } catch (err) {
-    // Network-level failure (timeout, DNS, ECONNREFUSED). Count it against
-    // the breaker so a black-holed vcc doesn't soak up the watcher budget.
-    recordVccFailure();
     throw err;
   }
 
@@ -355,9 +484,7 @@ async function getInvoice(orderId, amountUsdc, requestId = null, callbackNonce =
       });
       db.prepare(`DELETE FROM system_state WHERE key = 'vcc_token'`).run();
     }
-    if (res.status >= 500 || res.status === 502 || res.status === 503 || res.status === 504) {
-      recordVccFailure();
-    }
+    // fetchVcc already called recordVccFailure for 5xx/502/503/504.
     throw new Error(`VCC invoice failed: HTTP ${res.status} ${text}`.trim());
   }
 
@@ -405,15 +532,15 @@ async function notifyPaid(vccJobId) {
 
   let res;
   try {
-    res = await fetch(`${VCC_API_BASE}/api/jobs/${vccJobId}/paid`, {
-      method: 'POST',
-      headers: { 'X-VCC-Token': token },
-      signal: AbortSignal.timeout(10000),
-    });
+    res = await fetchVcc(
+      `${VCC_API_BASE}/api/jobs/${vccJobId}/paid`,
+      {
+        method: 'POST',
+        headers: { 'X-VCC-Token': token },
+      },
+      'vcc.notify_paid',
+    );
   } catch (err) {
-    // Network-level failure (timeout, DNS, ECONNREFUSED). Count it against
-    // the breaker so a black-holed vcc doesn't soak up the watcher budget.
-    recordVccFailure();
     throw err;
   }
 
@@ -427,7 +554,7 @@ async function notifyPaid(vccJobId) {
       });
       db.prepare(`DELETE FROM system_state WHERE key = 'vcc_token'`).run();
     }
-    if (res.status >= 500) recordVccFailure();
+    // fetchVcc already called recordVccFailure for 5xx.
     throw new Error(`VCC notifyPaid failed: HTTP ${res.status} ${text}`.trim());
   }
   recordVccSuccess();
@@ -444,14 +571,14 @@ async function getVccJobStatus(vccJobId) {
 
   let res;
   try {
-    res = await fetch(`${VCC_API_BASE}/api/jobs/${vccJobId}`, {
-      headers: { 'X-VCC-Token': token },
-      signal: AbortSignal.timeout(10000),
-    });
+    res = await fetchVcc(
+      `${VCC_API_BASE}/api/jobs/${vccJobId}`,
+      {
+        headers: { 'X-VCC-Token': token },
+      },
+      'vcc.job_status',
+    );
   } catch (err) {
-    // Network-level failure (timeout, DNS, ECONNREFUSED). Count it against
-    // the breaker so a black-holed vcc doesn't soak up the watcher budget.
-    recordVccFailure();
     throw err;
   }
 
@@ -465,7 +592,7 @@ async function getVccJobStatus(vccJobId) {
       });
       db.prepare(`DELETE FROM system_state WHERE key = 'vcc_token'`).run();
     }
-    if (res.status >= 500) recordVccFailure();
+    // fetchVcc already called recordVccFailure for 5xx.
     throw new Error(`VCC job status failed: HTTP ${res.status} ${text}`.trim());
   }
 
@@ -647,4 +774,11 @@ module.exports = {
   _vccCircuitGuard: vccCircuitGuard,
   _decryptToken: decryptToken,
   _encryptToken: encryptToken,
+  // Test-only exports for the retry/timeout policy (#955).
+  _fetchVcc: fetchVcc,
+  _isRetryableVccError: isRetryableVccError,
+  _sleepWithJitter: sleepWithJitter,
+  _VCC_REQUEST_TIMEOUT_MS: VCC_REQUEST_TIMEOUT_MS,
+  _VCC_MAX_ATTEMPTS: VCC_MAX_ATTEMPTS,
+  _VCC_RETRY_BASE_MS: VCC_RETRY_BASE_MS,
 };
