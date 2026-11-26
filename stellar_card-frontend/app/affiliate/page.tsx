@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { PageHero, PageSection } from '@/app/components/MarketingPage';
 import { ogForPage, twitterForPage } from '@/app/lib/seo';
+import { AffiliateCalculator } from '@/app/components/AffiliateCalculator';
 
 export const metadata: Metadata = {
   title: 'Affiliate program',
@@ -182,6 +183,11 @@ export default function AffiliatePage() {
             </div>
           ))}
         </div>
+      </PageSection>
+
+      {/* Referral Link Generator & Commission Calculator */}
+      <PageSection eyebrow="Tools" title="Referral link generator & commission estimator">
+        <AffiliateCalculator />
       </PageSection>
 
       {/* Waitlist CTA */}

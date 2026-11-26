@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { PageHero, PageSection } from '@/app/components/MarketingPage';
 import { ogForPage, twitterForPage } from '@/app/lib/seo';
+import { UptimeHistory, generateMockUptimeData, calculateOverallUptime } from '@/app/components/UptimeHistory';
 
 export const metadata: Metadata = {
   title: 'Status',
@@ -648,6 +649,31 @@ export default async function StatusPage() {
           </div>
         </div>
       </section>
+
+      {/* 90-Day Uptime History */}
+      <PageSection background="bordered" eyebrow="History" title="90-day system status">
+        <UptimeHistory
+          data={generateMockUptimeData()}
+          overallUptime={calculateOverallUptime(generateMockUptimeData())}
+          incidents={[
+            {
+              date: '2024-01-15',
+              title: 'Horizon RPC latency spike',
+              description: 'Elevated p99 latency on Horizon endpoints for ~45 minutes. Root cause: upstream Stellar Core sync delay. Mitigated by failing over to backup RPC nodes.',
+            },
+            {
+              date: '2024-02-03',
+              title: 'Card Issuance partial degradation',
+              description: 'Intermittent failures in the card provisioning pipeline due to issuer API rate limiting. Automatically resolved after backoff retry logic engaged. No customer impact.',
+            },
+            {
+              date: '2024-02-20',
+              title: 'HTTP API brief outage',
+              description: '5-minute outage during scheduled deployment. Health check misconfiguration caused premature traffic routing. Fixed by adjusting readiness probe thresholds.',
+            },
+          ]}
+        />
+      </PageSection>
     </>
   );
 }
