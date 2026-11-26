@@ -19,6 +19,121 @@ const { seal, open, hasKey, openToBuffer, zeroize } = require('./secret-box');
 // Exact shape seal() produces: enc:<24-hex iv>:<32-hex tag>:<hex ct>.
 const SEALED_RE = /^enc:[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]*$/i;
 
+// #963 — card expiration validation. Expiries are stored as MM/YY (the
+// shape VCC providers return); MM/YYYY is also accepted for tolerance.
+// A card is valid through the last day of its expiration month, so the
+// "expired" comparison is against the current UTC calendar month.
+const EXPIRY_RE = /^(\d{2})\s*\/\s*(\d{2}|\d{4})$/;
+const MAX_EXPIRY_YEARS_AHEAD = 10;
+
+/**
+ * Parse and validate a card expiration string (#963).
+ *
+ * Accepts `MM/YY` and `MM/YYYY` (whitespace around the slash tolerated).
+ * The month must be 01-12 and the year must fall within the current UTC
+ * year .. current UTC year + 10. Returns a structured result rather than
+ * throwing so callers can branch on `ok` without try/catch:
+ *
+ *   { ok: true, month, year, formatted: 'MM/YY' }
+ *   { ok: false, error: 'card-vault: ...' }
+ *
+ * @param {unknown} expiry
+ * @param {Date} [now] injectable clock for deterministic tests
+ * @returns {{ ok: true, month: number, year: number, formatted: string } | { ok: false, error: string }}
+ */
+function validateExpiry(expiry, now = new Date()) {
+  if (typeof expiry !== 'string') {
+    return { ok: false, error: 'card-vault: expiry must be a string in MM/YY format' };
+  }
+  const match = EXPIRY_RE.exec(expiry.trim());
+  if (!match) {
+    return { ok: false, error: 'card-vault: expiry must be in MM/YY format' };
+  }
+  const month = Number(match[1]);
+  if (!Number.isInteger(month) || month < 1 || month > 12) {
+    return { ok: false, error: 'card-vault: expiry month must be between 01 and 12' };
+  }
+  // Two-digit years are interpreted as 20YY (card expiries never predate
+  // 2000 in practice). Four-digit years are used as-is.
+  const rawYear = Number(match[2]);
+  const year = match[2].length === 2 ? 2000 + rawYear : rawYear;
+  const currentYear = now.getUTCFullYear();
+  if (year < currentYear) {
+    return { ok: false, error: `card-vault: expiry year must be ${currentYear} or later` };
+  }
+  if (year > currentYear + MAX_EXPIRY_YEARS_AHEAD) {
+    return {
+      ok: false,
+      error: `card-vault: expiry year must be at most ${currentYear + MAX_EXPIRY_YEARS_AHEAD}`,
+    };
+  }
+  const formatted = `${String(month).padStart(2, '0')}/${String(year % 100).padStart(2, '0')}`;
+  return { ok: true, month, year, formatted };
+}
+
+/**
+ * Parse a card expiration string into `{ month, year }` or `null` when
+ * the value is missing/invalid (#963). Thin wrapper over validateExpiry
+ * for callers that only need the numeric parts.
+ * @param {unknown} expiry
+ * @param {Date} [now]
+ * @returns {{ month: number, year: number } | null}
+ */
+function parseExpiry(expiry, now = new Date()) {
+  const result = validateExpiry(expiry, now);
+  return result.ok ? { month: result.month, year: result.year } : null;
+}
+
+/**
+ * True when the card's expiration month is strictly before the current
+ * UTC calendar month (#963). A card expiring this month is still valid.
+ * Invalid/missing expiries return `false` — validation is a separate
+ * concern (see validateExpiry) and callers should reject those first.
+ * @param {unknown} expiry
+ * @param {Date} [now]
+ * @returns {boolean}
+ */
+function isExpired(expiry, now = new Date()) {
+  const parsed = parseExpiry(expiry, now);
+  if (!parsed) return false;
+  const currentYear = now.getUTCFullYear();
+  const currentMonth = now.getUTCMonth() + 1;
+  if (parsed.year < currentYear) return true;
+  if (parsed.year > currentYear) return false;
+  return parsed.month < currentMonth;
+}
+
+/**
+ * Ensure a card has not expired before it is revealed or used for a new
+ * order (#963). When the card has passed its expiration month, the
+ * order's status is persisted as `EXPIRED` (best-effort — a DB failure
+ * must not mask the expiration error) and a clear, greppable error is
+ * thrown so reveal paths can surface it to the agent.
+ *
+ * @param {unknown} expiry
+ * @param {{ orderId?: string|number|null, db?: { query: Function }|null, now?: Date }} [opts]
+ * @returns {Promise<void>}
+ */
+async function ensureNotExpired(expiry, opts = {}) {
+  const now = opts.now ?? new Date();
+  if (!isExpired(expiry, now)) return;
+  const { orderId = null, db = null } = opts;
+  if (db && orderId !== null && orderId !== undefined) {
+    try {
+      await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['EXPIRED', orderId]);
+    } catch (err) {
+      // Swallow: the expiration error below is the actionable signal.
+      // Persisting status is a side effect, not the primary contract.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`card-vault: failed to mark order ${orderId} EXPIRED: ${msg}`);
+    }
+  }
+  const err = new Error('card-vault: card has expired and cannot be revealed or used');
+  /** @type {any} */ (err).code = 'CARD_EXPIRED';
+  /** @type {any} */ (err).orderId = orderId;
+  throw err;
+}
+
 /**
  * Seal the three sensitive card fields. card_brand is not sensitive
  * (Visa, Mastercard) and is left as-is. `null` / `undefined` inputs are
@@ -243,5 +358,9 @@ module.exports = {
   openCard,
   withOpenedCard,
   maskCardNumber,
+  validateExpiry,
+  parseExpiry,
+  isExpired,
+  ensureNotExpired,
   vaultEnabled: hasKey,
 };

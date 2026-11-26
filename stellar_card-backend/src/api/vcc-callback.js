@@ -14,6 +14,46 @@ const { FulfillmentCard } = require('../lib/validate');
 const { event: bizEvent } = require('../lib/logger');
 const { recordAudit } = require('../lib/audit');
 const { verifyWebhookSignature } = require('../middleware/verifyWebhookSignature');
+const { verifyVccWebhookSignature } = require('../lib/hmac');
+const { sendAlertEmail } = require('../lib/email');
+const { fireWebhook } = require('../lib/alerts');
+
+// Issue #964: provider decline codes → human-friendly explanation.
+// Unknown codes fall back to a generic message that still names the code
+// so support can trace it back to the provider.
+const DECLINE_MESSAGES = {
+  insufficient_funds: 'The card was declined because the account has insufficient funds.',
+  do_not_honor: 'The card was declined by the issuing bank (do not honor).',
+  expired_card: 'The card was declined because it has expired.',
+  incorrect_cvv: 'The card was declined because the security code (CVV) was incorrect.',
+  invalid_card_number: 'The card was declined because the card number is invalid.',
+  card_not_supported: 'The card was declined because this card type is not supported.',
+  restricted_card: 'The card was declined because it is restricted for this type of transaction.',
+  transaction_not_allowed:
+    'The card was declined because this transaction is not allowed by the issuer.',
+  limit_exceeded: 'The card was declined because a spending limit was exceeded.',
+  fraud_suspected: 'The card was declined because the issuer flagged it as suspected fraud.',
+  issuer_unavailable: 'The card was declined because the issuing bank is temporarily unavailable.',
+  invalid_merchant: 'The card was declined because the merchant is not recognized by the issuer.',
+};
+
+/**
+ * Map a provider decline code to a human-friendly explanation.
+ * @param {string|null|undefined} code
+ * @returns {{ code: string, message: string }}
+ */
+function explainDecline(code) {
+  const normalized = typeof code === 'string' ? code.trim().toLowerCase() : '';
+  if (normalized && DECLINE_MESSAGES[normalized]) {
+    return { code: normalized, message: DECLINE_MESSAGES[normalized] };
+  }
+  return {
+    code: normalized || 'unknown',
+    message: normalized
+      ? `The card was declined by the issuer (reason code: ${normalized}).`
+      : 'The card was declined by the issuer for an unspecified reason.',
+  };
+}
 
 // Look up the dashboard that owns an order so vcc-callback can write
 // audit rows scoped to it. Returns null if the order has no api_key
@@ -103,7 +143,40 @@ router.post('/', webhookSignaturePrecheck, (req, res) => {
   }
 
   if (!signatureBypassed && (!signature || !timestamp)) {
+    bizEvent('callback.rejected', {
+      reason: 'missing_signature',
+      order_id: headerOrderId || null,
+    });
     return res.status(401).json({ error: 'missing_signature' });
+  }
+
+  // Issue #961: cryptographic HMAC-SHA256 verification of the raw body
+  // against X-VCC-Signature, with a 5-minute replay window enforced on
+  // X-VCC-Timestamp. This runs before any order-row read or state
+  // mutation so unsigned/malformed/stale payloads never reach business
+  // logic. The v3 verification below remains the authoritative check for
+  // per-order secrets and nonces; this is the provider-level gate.
+  if (!signatureBypassed) {
+    const providerSecret = perOrderSecret || process.env.VCC_CALLBACK_SECRET || '';
+    const sigVerdict = verifyVccWebhookSignature({
+      rawBody: req.rawBody,
+      signature,
+      timestamp,
+      secret: providerSecret,
+    });
+    if (!sigVerdict.ok) {
+      bizEvent('callback.rejected', {
+        reason: sigVerdict.reason,
+        order_id: headerOrderId || null,
+      });
+      const wireError =
+        sigVerdict.reason === 'timestamp_expired'
+          ? 'timestamp_expired'
+          : sigVerdict.reason === 'missing_signature'
+            ? 'missing_signature'
+            : 'invalid_signature';
+      return res.status(401).json({ error: wireError });
+    }
   }
 
   // req.rawBody is set by the express.json verify callback in app.js.
@@ -239,7 +312,7 @@ router.post('/', webhookSignaturePrecheck, (req, res) => {
   }
   const { order_id, status } = baseParsed.data;
   const { error } = req.body;
-  if (status !== 'fulfilled' && status !== 'failed') {
+  if (status !== 'fulfilled' && status !== 'failed' && status !== 'transaction.declined') {
     return res.status(400).json({ error: 'invalid_status' });
   }
 
@@ -387,6 +460,85 @@ router.post('/', webhookSignaturePrecheck, (req, res) => {
         keyRow?.webhook_secret || null,
         keyRow?.webhook_event_filter ?? null,
       ).catch(() => {});
+    }
+  } else if (status === 'transaction.declined') {
+    // Issue #964: card decline notification. Map the provider decline
+    // code to a human-friendly explanation, alert the user/agent, and
+    // record the event in the audit trail for fraud analysis. Declines
+    // do not change order status — the order may still be retried or
+    // fulfilled by a subsequent callback.
+    const declineCode =
+      req.body.decline_code || req.body.declineCode || req.body.reason_code || null;
+    const { code: mappedCode, message: declineMessage } = explainDecline(declineCode);
+
+    bizEvent('card.declined', {
+      order_id,
+      decline_code: mappedCode,
+      amount_usd: order.amount_usdc,
+      payment_asset: order.payment_asset,
+      api_key_id: order.api_key_id,
+    });
+
+    // Audit trail row for fraud analysis. Scoped to the owning dashboard
+    // when resolvable; declines on orders without a dashboard are still
+    // logged via bizEvent above.
+    const dashId = dashboardIdForOrder(order_id);
+    if (dashId) {
+      recordAudit({
+        dashboardId: dashId,
+        actor: { id: null, email: 'vcc-callback', role: 'system' },
+        action: 'card.declined',
+        resourceType: 'order',
+        resourceId: order_id,
+        details: {
+          decline_code: mappedCode,
+          decline_message: declineMessage,
+          amount_usdc: order.amount_usdc,
+          payment_asset: order.payment_asset,
+          api_key_id: order.api_key_id,
+        },
+        ip: req.ip || req.headers?.['x-forwarded-for'] || null,
+        userAgent: req.headers?.['user-agent'] || null,
+      });
+    }
+
+    // Resolve the alert destination: prefer an agent webhook when the
+    // order's api_key has one configured, otherwise fall back to an
+    // alert email to the user/agent contact on file.
+    const declineKeyRow = /** @type {any} */ (
+      order.api_key_id
+        ? db
+            .prepare(
+              `SELECT webhook_secret, default_webhook_url, webhook_event_filter, alert_email FROM api_keys WHERE id = ?`,
+            )
+            .get(order.api_key_id)
+        : null
+    );
+    const declineWebhookUrl =
+      order.webhook_url || declineKeyRow?.default_webhook_url || null;
+    if (declineWebhookUrl) {
+      fireWebhook(
+        declineWebhookUrl,
+        {
+          order_id,
+          status: 'declined',
+          decline_code: mappedCode,
+          decline_message: declineMessage,
+          amount_usdc: order.amount_usdc,
+          payment_asset: order.payment_asset,
+        },
+        declineKeyRow?.webhook_secret || null,
+        declineKeyRow?.webhook_event_filter ?? null,
+      ).catch(() => {});
+    } else {
+      const alertEmail = declineKeyRow?.alert_email || order.contact_email || null;
+      if (alertEmail) {
+        sendAlertEmail({
+          to: alertEmail,
+          subject: `Card transaction declined (order ${order_id})`,
+          text: `${declineMessage}\n\nOrder: ${order_id}\nAmount: ${order.amount_usdc} ${order.payment_asset || ''}\nDecline code: ${mappedCode}`,
+        }).catch(() => {});
+      }
     }
   } else if (status === 'failed') {
     // Sanitise vcc's verbose internal error into a public-facing one

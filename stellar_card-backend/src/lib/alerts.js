@@ -558,6 +558,112 @@ function safeRequire(path) {
   }
 }
 
+// ── Platform-administrator warning dispatch ─────────────────────────────────
+//
+// Some security events don't map cleanly onto a persisted alert_rule (they
+// fire from request-path enforcement code, not the background tick). The
+// velocity limiter in policy.js is the canonical example: when an agent
+// trips the card-creation rate limit we want to page the platform
+// administrators immediately, without requiring an operator to have
+// pre-created a rule.
+//
+// This helper routes through the same channels the evaluator uses:
+//   1. ops Discord webhook via lib/notify.notifyOps (best-effort)
+//   2. a structured bizEvent for the log pipeline
+//   3. an alert_firings row when a matching system rule exists, so the
+//      event shows up in the dashboard history
+//
+// Every channel is wrapped so a missing module / network failure can
+// never throw out of the request path — the caller (policy.js) treats
+// this as fire-and-forget.
+
+/**
+ * Dispatch a platform-administrator warning for a velocity-limit trip.
+ * Never throws; returns a small summary of what was attempted.
+ *
+ * @param {string} agentId
+ * @param {{
+ *   limit?: number;
+ *   windowMs?: number;
+ *   count?: number;
+ *   retryAfterSeconds?: number;
+ *   [key: string]: unknown;
+ * }} [details]
+ * @returns {{ dispatched: boolean; channels: string[] }}
+ */
+function notifyVelocityLimitExceeded(agentId, details = {}) {
+  return dispatchAdminWarning('velocity_limit_exceeded', {
+    agent_id: agentId,
+    ...details,
+  });
+}
+
+/**
+ * Generic platform-administrator warning dispatcher. Shared by the
+ * velocity limiter and any future request-path security signal.
+ *
+ * @param {string} eventType  short machine-readable event name
+ * @param {Record<string, unknown>} payload
+ * @returns {{ dispatched: boolean; channels: string[] }}
+ */
+function dispatchAdminWarning(eventType, payload) {
+  const channels = [];
+  const at = new Date().toISOString();
+  const summary = `[${eventType}] ${JSON.stringify(payload)}`;
+
+  // 1. Structured log event — always attempted, cheap, never throws.
+  try {
+    const { event: bizEvent } = safeRequire('./logger');
+    if (typeof bizEvent === 'function') {
+      bizEvent(`alerts.${eventType}`, { ...payload, at });
+      channels.push('log');
+    }
+  } catch (err) {
+    console.error(`[alerts] ${eventType} log dispatch failed: ${err.message}`);
+  }
+
+  // 2. Ops Discord webhook — best-effort, fire-and-forget.
+  try {
+    const { notifyOps } = safeRequire('./notify');
+    if (typeof notifyOps === 'function') {
+      void Promise.resolve(
+        notifyOps({ type: 'frozen', error: summary, event: eventType, ...payload }),
+      ).catch((err) => {
+        console.error(`[alerts] ${eventType} ops notify failed: ${err.message}`);
+      });
+      channels.push('ops_discord');
+    }
+  } catch (err) {
+    console.error(`[alerts] ${eventType} ops notify failed: ${err.message}`);
+  }
+
+  // 3. Record an alert_firings row against any enabled system rule whose
+  //    kind matches, so the dashboard history reflects the event. We
+  //    deliberately don't create rules on the fly — if no rule exists the
+  //    log + Discord channels above are still sufficient.
+  try {
+    const rule = /** @type {any} */ (
+      db
+        .prepare(
+          `SELECT id, dashboard_id FROM alert_rules
+           WHERE kind = ? AND enabled = 1
+           ORDER BY created_at ASC LIMIT 1`,
+        )
+        .get(eventType)
+    );
+    if (rule) {
+      db.prepare(
+        `INSERT INTO alert_firings (rule_id, dashboard_id, context) VALUES (?, ?, ?)`,
+      ).run(rule.id, rule.dashboard_id, JSON.stringify({ ...payload, at }));
+      channels.push('alert_firings');
+    }
+  } catch (err) {
+    console.error(`[alerts] ${eventType} firing record failed: ${err.message}`);
+  }
+
+  return { dispatched: channels.length > 0, channels };
+}
+
 /**
  * @param {{ kind: string; config: Record<string, unknown> }} rule
  * @param {string} dashboardId
@@ -711,6 +817,8 @@ module.exports = {
   evaluateRules,
   isSystemKind,
   isUserKind,
+  notifyVelocityLimitExceeded,
+  dispatchAdminWarning,
   SYSTEM_KINDS: [...SYSTEM_KINDS],
   USER_KINDS: [...USER_KINDS],
   KNOWN_KINDS: [...SYSTEM_KINDS, ...USER_KINDS],

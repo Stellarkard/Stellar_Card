@@ -332,6 +332,32 @@ const EnvSchema = z
       .regex(/^[0-9a-fA-F]{64}$/, 'CARDS402_SECRET_BOX_KEY must be 64 hex characters (32 bytes)')
       .optional(),
 
+    // Secret-box master secret — high-entropy passphrase from which the
+    // AES-256-GCM data-encryption key is derived (via scrypt) together
+    // with CARDS402_SECRET_BOX_SALT. Used for CVV-at-rest encryption
+    // (issue #960). A weak or missing master secret silently downgrades
+    // encryption strength, so it is length-checked here and required in
+    // production (see the superRefine below). 32+ chars gives ~192 bits
+    // of entropy for a random base64/hex value; anything shorter is a
+    // deploy mistake that should fail at boot, not at first CVV write.
+    CARDS402_SECRET_BOX_MASTER_SECRET: z
+      .string()
+      .min(
+        32,
+        'CARDS402_SECRET_BOX_MASTER_SECRET must be at least 32 characters of high-entropy data',
+      )
+      .optional(),
+
+    // Secret-box KDF salt — per-deployment salt mixed into the scrypt
+    // derivation of the data-encryption key. Must be stable across
+    // restarts (rotating it invalidates every stored ciphertext) and
+    // long enough to be a meaningful salt. 16+ chars is the floor; a
+    // random 32-hex value (`openssl rand -hex 16`) is recommended.
+    CARDS402_SECRET_BOX_SALT: z
+      .string()
+      .min(16, 'CARDS402_SECRET_BOX_SALT must be at least 16 characters')
+      .optional(),
+
     // ── Sentry error tracking (all optional) ───────────────────────────
     //
     // Validated here rather than only inside lib/sentry-config.js so a
@@ -395,6 +421,48 @@ const EnvSchema = z
           'CARDS402_SECRET_BOX_KEY is required in production. Generate one with ' +
           '`openssl rand -hex 32` and set it in the environment before restarting.',
         path: ['CARDS402_SECRET_BOX_KEY'],
+      });
+    }
+  })
+  .superRefine((val, ctx) => {
+    // Issue #960: CVV-at-rest encryption derives its AES-256-GCM key from
+    // CARDS402_SECRET_BOX_MASTER_SECRET + CARDS402_SECRET_BOX_SALT. Both
+    // must be present together in production — a missing master secret
+    // would silently fall back to a weaker/plaintext path, and a missing
+    // salt would make the KDF deterministic across deploys. Fail boot.
+    if (val.NODE_ENV === 'production') {
+      if (!val.CARDS402_SECRET_BOX_MASTER_SECRET) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'CARDS402_SECRET_BOX_MASTER_SECRET is required in production for CVV-at-rest ' +
+            'encryption. Generate one with `openssl rand -base64 48` and set it in the ' +
+            'environment before restarting.',
+          path: ['CARDS402_SECRET_BOX_MASTER_SECRET'],
+        });
+      }
+      if (!val.CARDS402_SECRET_BOX_SALT) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'CARDS402_SECRET_BOX_SALT is required in production for CVV-at-rest ' +
+            'encryption. Generate one with `openssl rand -hex 16` and set it in the ' +
+            'environment before restarting.',
+          path: ['CARDS402_SECRET_BOX_SALT'],
+        });
+      }
+    }
+    // If only one of the pair is set (any environment), the KDF cannot
+    // run — surface the partial configuration rather than silently
+    // disabling encryption.
+    const hasMaster = Boolean(val.CARDS402_SECRET_BOX_MASTER_SECRET);
+    const hasSalt = Boolean(val.CARDS402_SECRET_BOX_SALT);
+    if (hasMaster !== hasSalt) {
+      const missing = hasMaster ? 'CARDS402_SECRET_BOX_SALT' : 'CARDS402_SECRET_BOX_MASTER_SECRET';
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Secret-box KDF is partially configured: missing ${missing}. Set both CARDS402_SECRET_BOX_MASTER_SECRET and CARDS402_SECRET_BOX_SALT together or neither.`,
+        path: [missing],
       });
     }
   })

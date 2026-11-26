@@ -26,6 +26,8 @@ const { usdToXlm } = require('../payments/xlm-price');
 const { sendApprovalEmail, sendSpendAlertEmail } = require('../lib/email');
 const { event: bizEvent } = require('../lib/logger');
 const { insertPendingPaymentOrder } = require('../orders/core');
+const { auditLog } = require('../lib/audit');
+const vccClient = require('../vcc/client');
 
 const router = Router();
 
@@ -930,19 +932,30 @@ function buildOrderResponse(order) {
   }
 
   if (order.status === 'delivered') {
-    // F1: card_number/cvv/expiry are sealed at rest. openCard pass-throughs
-    // plaintext rows during the upgrade window so legacy orders still work.
-    const { openCard } = require('../lib/card-vault');
-    const { normalizeCardBrand } = require('../lib/normalize-card');
-    const card = openCard(order);
-    if (card) {
-      // Replace the raw upstream brand (e.g. "Visa® Reward Card, 6-Month
-      // Expiration [ITNL] eGift Card") with a stable agent-facing label
-      // before sending to the agent. The raw brand stays in the DB row
-      // for ops/audit but never reaches the agent transcript.
-      card.brand = normalizeCardBrand(card.brand);
+    // Terminated cards must never be revealed again — the card is dead
+    // at the issuer, so returning its PAN/CVV would only leak a secret
+    // that has no legitimate use. Surface the lifecycle status instead
+    // of the card payload.
+    const cardStatus = order.card_status || 'active';
+    response.card_status = cardStatus;
+    if (cardStatus === 'terminated') {
+      response.card = null;
+      response.note = 'This card has been terminated and its details are no longer available.';
+    } else {
+      // F1: card_number/cvv/expiry are sealed at rest. openCard pass-throughs
+      // plaintext rows during the upgrade window so legacy orders still work.
+      const { openCard } = require('../lib/card-vault');
+      const { normalizeCardBrand } = require('../lib/normalize-card');
+      const card = openCard(order);
+      if (card) {
+        // Replace the raw upstream brand (e.g. "Visa® Reward Card, 6-Month
+        // Expiration [ITNL] eGift Card") with a stable agent-facing label
+        // before sending to the agent. The raw brand stays in the DB row
+        // for ops/audit but never reaches the agent transcript.
+        card.brand = normalizeCardBrand(card.brand);
+      }
+      response.card = card;
     }
-    response.card = card;
   }
 
   if (order.status === 'expired') {
@@ -1212,6 +1225,155 @@ router.get('/:id', orderPollLimiter, validateOrderIdParam, (req, res) => {
   res.json(buildOrderResponse(order));
 });
 
+// ── Virtual card lifecycle (freeze / terminate) ─────────────────────────────
+//
+// POST /cards/:id/freeze   — suspend a delivered card instantly
+// POST /cards/:id/terminate — permanently cancel a delivered card
+//
+// Both routes authenticate the caller (req.apiKey is set by the auth
+// middleware mounted ahead of this router), verify ownership by scoping
+// the SELECT to api_key_id, call the upstream VCC issuer, persist the
+// new status, and append an audit-trail entry. Terminated cards are
+// blocked from subsequent reveal calls (see buildOrderResponse, which
+// refuses to open the sealed card blob once status is 'terminated').
+
+// Card lifecycle statuses. Kept separate from ORDER_STATUSES because
+// these describe the *card* rather than the order pipeline, and an
+// order can be 'delivered' while its card is 'frozen' or 'terminated'.
+const CARD_STATUS = {
+  ACTIVE: 'active',
+  FROZEN: 'frozen',
+  TERMINATED: 'terminated',
+};
+
+// Statuses from which a freeze is legal. A frozen card can be re-frozen
+// (idempotent no-op at the issuer); a terminated card cannot be frozen.
+const FREEZABLE_STATUSES = new Set([CARD_STATUS.ACTIVE, CARD_STATUS.FROZEN]);
+// Only an active or frozen card can be terminated. Terminating an
+// already-terminated card is a no-op returning the current state.
+const TERMINABLE_STATUSES = new Set([CARD_STATUS.ACTIVE, CARD_STATUS.FROZEN]);
+
+// Resolve the caller's card row, or send the appropriate error and
+// return null. Ownership is enforced by the api_key_id predicate — a
+// card belonging to another key returns 404 (not 403) so an attacker
+// cannot probe for the existence of other keys' cards.
+function loadOwnedCard(req, res) {
+  const card = /** @type {any} */ (
+    db
+      .prepare(`SELECT * FROM orders WHERE id = ? AND api_key_id = ?`)
+      .get(req.params.id, req.apiKey.id)
+  );
+  if (!card) {
+    res.status(404).json({ error: 'card_not_found' });
+    return null;
+  }
+  if (card.status !== 'delivered') {
+    res.status(409).json({
+      error: 'card_not_delivered',
+      message: 'Only delivered cards can be frozen or terminated.',
+      status: card.status,
+    });
+    return null;
+  }
+  return card;
+}
+
+// Current card lifecycle status, defaulting to 'active' for legacy rows
+// that predate the card_status column.
+function currentCardStatus(card) {
+  return card.card_status || CARD_STATUS.ACTIVE;
+}
+
+// Shared handler body for freeze and terminate. `action` is either
+// 'freeze' or 'terminate'; the two flows differ only in which upstream
+// call is made, which statuses are legal, and the resulting status.
+async function handleCardLifecycle(req, res, action) {
+  const card = loadOwnedCard(req, res);
+  if (!card) return;
+
+  const fromStatus = currentCardStatus(card);
+  const isFreeze = action === 'freeze';
+  const allowed = isFreeze ? FREEZABLE_STATUSES : TERMINABLE_STATUSES;
+  const targetStatus = isFreeze ? CARD_STATUS.FROZEN : CARD_STATUS.TERMINATED;
+
+  // Idempotent short-circuit: terminating an already-terminated card
+  // returns the current state without a second upstream call.
+  if (!isFreeze && fromStatus === CARD_STATUS.TERMINATED) {
+    return res.json({
+      card_id: card.id,
+      card_status: CARD_STATUS.TERMINATED,
+      already_terminated: true,
+    });
+  }
+
+  if (!allowed.has(fromStatus)) {
+    return res.status(409).json({
+      error: 'invalid_card_state',
+      message: `Cannot ${action} a card in status '${fromStatus}'.`,
+      card_status: fromStatus,
+    });
+  }
+
+  // Call the upstream issuer. A failure here must NOT change the local
+  // status — the card is still whatever the issuer says it is.
+  try {
+    if (isFreeze) {
+      await vccClient.freezeCard(card.id);
+    } else {
+      await vccClient.terminateCard(card.id);
+    }
+  } catch (err) {
+    bizEvent('card.lifecycle.upstream_failed', {
+      api_key_id: req.apiKey.id,
+      card_id: card.id,
+      action,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return res.status(502).json({
+      error: 'upstream_error',
+      message: `The card issuer could not ${action} this card. Please retry.`,
+    });
+  }
+
+  // Persist the new status and append the audit-trail entry atomically.
+  db.transaction(() => {
+    db.prepare(`UPDATE orders SET card_status = ?, updated_at = datetime('now') WHERE id = ?`).run(
+      targetStatus,
+      card.id,
+    );
+    auditLog({
+      api_key_id: req.apiKey.id,
+      action: `card.${action}`,
+      target_type: 'card',
+      target_id: card.id,
+      metadata: { from_status: fromStatus, to_status: targetStatus },
+      request_id: req.id || null,
+    });
+  })();
+
+  bizEvent('card.lifecycle', {
+    api_key_id: req.apiKey.id,
+    card_id: card.id,
+    action,
+    from_status: fromStatus,
+    to_status: targetStatus,
+  });
+
+  return res.json({
+    card_id: card.id,
+    card_status: targetStatus,
+    previous_status: fromStatus,
+  });
+}
+
+router.post('/:id/freeze', orderPollLimiter, validateOrderIdParam, (req, res) =>
+  handleCardLifecycle(req, res, 'freeze'),
+);
+
+router.post('/:id/terminate', orderPollLimiter, validateOrderIdParam, (req, res) =>
+  handleCardLifecycle(req, res, 'terminate'),
+);
+
 // Notify owner via Discord + email when an approval is needed
 async function notifyOwnerApprovalNeeded({
   approvalId,
@@ -1361,3 +1523,4 @@ module.exports.releaseStreamSlot = releaseStreamSlot;
 module.exports.orderPollLimiter = orderPollLimiter;
 module.exports.orderCreateLimiter = orderCreateLimiter;
 module.exports.createOrderCreateLimiter = createOrderCreateLimiter;
+module.exports.CARD_STATUS = CARD_STATUS;

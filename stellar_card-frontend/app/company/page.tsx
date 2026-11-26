@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { PageHero, PageSection } from '@/app/components/MarketingPage';
 import { ogForPage, twitterForPage } from '@/app/lib/seo';
+import { FAQAccordion, GENERAL_FAQ } from '@/app/components/FAQAccordion';
 
 export const metadata: Metadata = {
   title: 'Company',
@@ -268,6 +269,11 @@ export default function CompanyPage() {
             </div>
           ))}
         </div>
+      </PageSection>
+
+      {/* FAQ */}
+      <PageSection eyebrow="FAQ" title="Common questions.">
+        <FAQAccordion items={GENERAL_FAQ} allowMultiple />
       </PageSection>
 
       {/* Closing contact */}

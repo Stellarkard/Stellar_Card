@@ -40,6 +40,38 @@ const NETWORK_PASSPHRASE = NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TE
 const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
+// Mock VCC harness (issue #962). Enabled with USE_MOCK_VCC=true; when off the
+// runner behaves exactly as before and talks to the live issuer.
+const USE_MOCK_VCC = String(process.env.USE_MOCK_VCC || '').toLowerCase() === 'true';
+const MOCK_VCC_PORT = parseInt(process.env.MOCK_VCC_PORT || '4999', 10);
+const MOCK_VCC_CALLBACK_SECRET =
+  process.env.MOCK_VCC_CALLBACK_SECRET || 'mock-vcc-callback-secret';
+
+let mockVcc = null;
+
+async function startMockVcc() {
+  // Lazy require so the mock module (and its deps) are only loaded when used.
+  const { createMockVccServer } = require('./src/testing/mock-vcc-server');
+  mockVcc = createMockVccServer({ callbackSecret: MOCK_VCC_CALLBACK_SECRET });
+  const { port } = await mockVcc.start(MOCK_VCC_PORT);
+  const base = `http://127.0.0.1:${port}`;
+  process.env.VCC_API_BASE = base;
+  process.env.VCC_CALLBACK_SECRET = MOCK_VCC_CALLBACK_SECRET;
+  console.log(`  mock vcc = ${base} (USE_MOCK_VCC=true)`);
+  return base;
+}
+
+async function stopMockVcc() {
+  if (!mockVcc) return;
+  try {
+    await mockVcc.stop();
+  } catch (err) {
+    console.log(`(cleanup) mock vcc stop failed: ${err.message}`);
+  } finally {
+    mockVcc = null;
+  }
+}
+
 function now() {
   return Date.now();
 }
@@ -60,7 +92,10 @@ async function main() {
   console.log(`  contract = ${RECEIVER_CONTRACT_ID}`);
   console.log(`  rpc      = ${SOROBAN_RPC_URL}`);
   console.log(`  api      = ${CARDS402_BASE}`);
+  console.log(`  mock vcc = ${USE_MOCK_VCC ? `enabled (port ${MOCK_VCC_PORT})` : 'disabled'}`);
   console.log('');
+
+  if (USE_MOCK_VCC) await startMockVcc();
 
   // ── Shared test API key ────────────────────────────────────────────────────
   const testToken = `stellar_card_${crypto.randomBytes(24).toString('hex')}`;
@@ -295,6 +330,7 @@ async function main() {
   } finally {
     db.prepare(`DELETE FROM api_keys WHERE id = ?`).run(keyId);
     console.log(`(cleanup) removed batch test key ${shortId(keyId)}`);
+    await stopMockVcc();
   }
 }
 
