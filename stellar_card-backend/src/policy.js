@@ -17,8 +17,176 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('./db');
 const { event: bizEvent } = require('./lib/logger');
+const alerts = require('./lib/alerts');
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// ── Virtual card velocity limiter (#957) ──────────────────────────────────────
+//
+// A compromised AI agent could otherwise mint cards in a tight loop and drain
+// funds before a human notices. We enforce a sliding-window cap on card
+// creation per agent (api_key_id): at most `threshold` cards within `windowMs`.
+//
+// State is kept in an in-memory Map keyed by agent ID. This is intentionally
+// process-local: the limiter is a defence-in-depth speed bump, not an
+// accounting ledger, and the backend runs as a single process. If the service
+// is ever horizontally scaled, swap the Map for a shared store (Redis / DB)
+// behind the same interface.
+const DEFAULT_CARD_VELOCITY_THRESHOLD = 3;
+const DEFAULT_CARD_VELOCITY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+/** @type {Map<string, number[]>} agent ID → ascending creation timestamps (ms) */
+const cardCreationLog = new Map();
+
+/**
+ * Resolve the velocity limiter configuration from the environment.
+ * Invalid / non-positive values fall back to the defaults so a typo in
+ * deployment config can't silently disable the limiter.
+ *
+ * @returns {{ threshold: number, windowMs: number }}
+ */
+function getCardVelocityConfig() {
+  const rawThreshold = parseInt(process.env.CARD_VELOCITY_MAX ?? '', 10);
+  const threshold =
+    Number.isInteger(rawThreshold) && rawThreshold > 0
+      ? rawThreshold
+      : DEFAULT_CARD_VELOCITY_THRESHOLD;
+
+  const rawWindow = parseInt(process.env.CARD_VELOCITY_WINDOW_MS ?? '', 10);
+  const windowMs =
+    Number.isInteger(rawWindow) && rawWindow > 0 ? rawWindow : DEFAULT_CARD_VELOCITY_WINDOW_MS;
+
+  return { threshold, windowMs };
+}
+
+/**
+ * Drop timestamps that have fallen outside the sliding window.
+ * Mutates and returns the pruned array.
+ *
+ * @param {number[]} timestamps ascending creation timestamps
+ * @param {number} nowMs
+ * @param {number} windowMs
+ * @returns {number[]}
+ */
+function pruneTimestamps(timestamps, nowMs, windowMs) {
+  const cutoff = nowMs - windowMs;
+  let i = 0;
+  while (i < timestamps.length && timestamps[i] <= cutoff) i++;
+  if (i > 0) timestamps.splice(0, i);
+  return timestamps;
+}
+
+/**
+ * Error thrown when an agent exceeds the card creation velocity limit.
+ * Carries the HTTP status and Retry-After value so route handlers can
+ * translate it directly into a 429 response.
+ */
+class CardVelocityLimitError extends Error {
+  /**
+   * @param {string} message
+   * @param {number} retryAfterSeconds
+   */
+  constructor(message, retryAfterSeconds) {
+    super(message);
+    this.name = 'CardVelocityLimitError';
+    this.status = 429;
+    this.statusCode = 429;
+    this.retryAfter = retryAfterSeconds;
+    this.retryAfterSeconds = retryAfterSeconds;
+    this.code = 'card_velocity_limit_exceeded';
+  }
+}
+
+/**
+ * Enforce the card creation velocity limit for an agent.
+ *
+ * Records a creation timestamp for `apiKeyId` and throws a
+ * CardVelocityLimitError (HTTP 429 + Retry-After) when the agent has already
+ * created `threshold` cards within the trailing `windowMs`. On trip, a warning
+ * alert is dispatched to platform administrators.
+ *
+ * Call this immediately before issuing a virtual card. It is side-effecting:
+ * a successful call counts as one card creation.
+ *
+ * @param {string} apiKeyId
+ * @param {{ threshold?: number, windowMs?: number, now?: number }} [opts]
+ * @returns {{ allowed: true, count: number, remaining: number }}
+ * @throws {CardVelocityLimitError}
+ */
+function enforceCardVelocityLimit(apiKeyId, opts = {}) {
+  const config = getCardVelocityConfig();
+  const threshold = opts.threshold ?? config.threshold;
+  const windowMs = opts.windowMs ?? config.windowMs;
+  const nowMs = opts.now ?? Date.now();
+
+  const timestamps = pruneTimestamps(cardCreationLog.get(apiKeyId) ?? [], nowMs, windowMs);
+
+  if (timestamps.length >= threshold) {
+    // Oldest in-window creation determines when a slot frees up.
+    const oldest = timestamps[0];
+    const retryAfterMs = Math.max(0, oldest + windowMs - nowMs);
+    const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+
+    cardCreationLog.set(apiKeyId, timestamps);
+
+    bizEvent('policy.card_velocity_limit', {
+      api_key_id: apiKeyId,
+      threshold,
+      window_ms: windowMs,
+      count: timestamps.length,
+      retry_after_seconds: retryAfterSeconds,
+    });
+
+    // Fire-and-forget: alerting must never block or fail the rejection path.
+    try {
+      const maybePromise = alerts.notifyOps(
+        `Virtual card velocity limit exceeded for agent ${apiKeyId}: ` +
+          `${timestamps.length} cards in the last ${Math.round(windowMs / 1000)}s ` +
+          `(limit ${threshold}). Possible compromised agent.`,
+        { severity: 'warning', source: 'policy.card_velocity_limit', apiKeyId },
+      );
+      if (maybePromise && typeof maybePromise.catch === 'function') {
+        maybePromise.catch((err) =>
+          bizEvent('policy.card_velocity_alert_failed', {
+            api_key_id: apiKeyId,
+            error: err && err.message ? err.message : String(err),
+          }),
+        );
+      }
+    } catch (err) {
+      bizEvent('policy.card_velocity_alert_failed', {
+        api_key_id: apiKeyId,
+        error: err && err.message ? err.message : String(err),
+      });
+    }
+
+    throw new CardVelocityLimitError(
+      `Card creation velocity limit exceeded: max ${threshold} cards per ` +
+        `${Math.round(windowMs / 1000)}s. Retry in ${retryAfterSeconds}s.`,
+      retryAfterSeconds,
+    );
+  }
+
+  timestamps.push(nowMs);
+  cardCreationLog.set(apiKeyId, timestamps);
+
+  return {
+    allowed: true,
+    count: timestamps.length,
+    remaining: Math.max(0, threshold - timestamps.length),
+  };
+}
+
+/**
+ * Clear recorded card creation timestamps for an agent (or all agents when
+ * called with no argument). Intended for tests and admin tooling.
+ *
+ * @param {string} [apiKeyId]
+ */
+function resetCardVelocityLimit(apiKeyId) {
+  if (apiKeyId === undefined) cardCreationLog.clear();
+  else cardCreationLog.delete(apiKeyId);
+}
 
 // Organisation-wide blocked merchant category codes (#980), comma-separated in
 // ORG_BLOCKED_MCCS. The default covers gambling (7995) and adult direct
@@ -336,4 +504,13 @@ function _decide(apiKeyId, orderId, amountUsdc, decision, rule, reason) {
   return recordDecision(apiKeyId, orderId, amountUsdc, decision, rule, reason);
 }
 
-module.exports = { checkPolicy, recordDecision };
+module.exports = {
+  checkPolicy,
+  recordDecision,
+  enforceCardVelocityLimit,
+  getCardVelocityConfig,
+  resetCardVelocityLimit,
+  CardVelocityLimitError,
+  DEFAULT_CARD_VELOCITY_THRESHOLD,
+  DEFAULT_CARD_VELOCITY_WINDOW_MS,
+};
