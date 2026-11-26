@@ -11,6 +11,7 @@
     "format:check": "prettier --check \"src/**/*.js\" \"test/**/*.js\"",
     "typecheck": "tsc --project jsconfig.json",
     "test": "node --test test/unit/*.test.js test/integration/*.test.js",
+    "test:mock-vcc": "node --test test/unit/mock-vcc-server.test.js test/integration/mock-vcc-server.test.js",
     "bench:db": "node tooling/bench-db.js"
   },
   "dependencies": {

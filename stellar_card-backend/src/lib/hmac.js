@@ -313,6 +313,69 @@ function verifyWebhookBody({ secret, rawBody, signatureHeader }) {
   return safeEqHex(provided, expected) ? { ok: true } : { ok: false, reason: 'bad_signature' };
 }
 
+// ── VCC provider inbound webhook signatures (issue #961) ────────────────────
+//
+// Scheme for inbound transaction-event webhooks from the VCC provider:
+//   X-VCC-Signature:  sha256=<hex HMAC-SHA256(secret, rawBody)>
+//   X-VCC-Timestamp:  <unix ms>
+//
+// The signature covers only the raw request body (no order/nonce binding),
+// so replay protection comes from the timestamp header: requests whose
+// timestamp is more than 5 minutes away from the current clock are rejected.
+
+// Replay-protection window for VCC provider webhooks (issue #961).
+const VCC_WEBHOOK_SKEW_MS = 5 * 60 * 1000; // 5 min
+
+/**
+ * Verify an inbound VCC provider transaction webhook.
+ *
+ * Computes HMAC-SHA256 over the raw request body using the provider secret,
+ * parses the `X-VCC-Signature` header (`sha256=<hex>` or bare `<hex>`),
+ * compares in constant time via safeEqHex, and validates the
+ * `X-VCC-Timestamp` header against `now` within `maxSkewMs` (default 5 min).
+ *
+ * Returns one of:
+ *   { ok: true }
+ *   { ok: false, reason: 'missing_fields' }
+ *   { ok: false, reason: 'timestamp_expired' }
+ *   { ok: false, reason: 'bad_signature' }
+ *
+ * @param {object} args
+ * @param {string | undefined} args.secret          Provider webhook secret.
+ * @param {string | Buffer | undefined | null} args.rawBody Raw request body.
+ * @param {unknown} args.signatureHeader            X-VCC-Signature header.
+ * @param {unknown} args.timestampHeader            X-VCC-Timestamp header.
+ * @param {number} [args.maxSkewMs]                 Replay window.
+ * @param {number} [args.now]                       Injected clock for tests.
+ */
+function verifyVccWebhookSignature({
+  secret,
+  rawBody,
+  signatureHeader,
+  timestampHeader,
+  maxSkewMs = VCC_WEBHOOK_SKEW_MS,
+  now = Date.now(),
+}) {
+  if (!secret || rawBody === undefined || rawBody === null || !signatureHeader || !timestampHeader) {
+    return { ok: false, reason: 'missing_fields' };
+  }
+
+  // Strict digits-only timestamp so the skew check can't be bypassed by
+  // lax parseInt parsing (see F1-hmac above).
+  if (typeof timestampHeader !== 'string' || !TIMESTAMP_STRICT.test(timestampHeader)) {
+    return { ok: false, reason: 'missing_fields' };
+  }
+  const ts = parseInt(timestampHeader, 10);
+  if (!Number.isFinite(ts)) return { ok: false, reason: 'missing_fields' };
+  if (Math.abs(now - ts) > maxSkewMs) return { ok: false, reason: 'timestamp_expired' };
+
+  const provided = parseSignatureHeader(signatureHeader);
+  if (!provided) return { ok: false, reason: 'bad_signature' };
+
+  const expected = signWebhookBody({ secret, rawBody });
+  return safeEqHex(provided, expected) ? { ok: true } : { ok: false, reason: 'bad_signature' };
+}
+
 module.exports = {
   signCallback,
   verifyCallback,
@@ -321,4 +384,6 @@ module.exports = {
   signWebhookBody,
   parseSignatureHeader,
   verifyWebhookBody,
+  verifyVccWebhookSignature,
+  VCC_WEBHOOK_SKEW_MS,
 };
